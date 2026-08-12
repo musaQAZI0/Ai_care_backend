@@ -1,0 +1,25 @@
+# Required for the Render backend service.
+ASPNETCORE_ENVIRONMENT=Production
+
+# Render Postgres / Supabase Postgres connection string.
+# Example:
+# Host=db.example.supabase.co;Port=5432;Database=postgres;Username=postgres;Password=YOUR_PASSWORD;SSL Mode=Require;Trust Server Certificate=true
+ConnectionStrings__DefaultConnection=
+
+# Use a long random secret, at least 32 characters.
+JwtOptions__SigningKey=
+
+# Your deployed frontend URL, for example:
+# https://your-frontend.vercel.app
+Cors__AllowedOrigins__0=
+
+# File storage. Use Supabase to store uploaded documents outside Render's temporary filesystem.
+Storage__Provider=Supabase
+Supabase__Url=
+Supabase__ServiceRoleKey=
+Supabase__Bucket=care-documents
+
+# Optional. If your bucket is public, this lets /download return a public URL.
+# Example:
+# https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/care-documents
+Supabase__PublicFileBaseUrl=

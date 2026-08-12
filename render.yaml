@@ -13,3 +13,13 @@ services:
         sync: false
       - key: Cors__AllowedOrigins__0
         sync: false
+      - key: Storage__Provider
+        value: Supabase
+      - key: Supabase__Url
+        sync: false
+      - key: Supabase__ServiceRoleKey
+        sync: false
+      - key: Supabase__Bucket
+        value: care-documents
+      - key: Supabase__PublicFileBaseUrl
+        sync: false
