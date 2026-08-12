@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ai-care-backend
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: ConnectionStrings__DefaultConnection
+        sync: false
+      - key: JwtOptions__SigningKey
+        sync: false
+      - key: Cors__AllowedOrigins__0
+        sync: false
