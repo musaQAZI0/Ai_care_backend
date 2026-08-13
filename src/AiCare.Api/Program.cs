@@ -1030,19 +1030,90 @@ phase1.MapPost("/messages", (CreateMessageThreadRequest request, ICareRepository
     return Results.Created($"/api/phase1/messages/{thread.Id}", thread);
 });
 
-phase1.MapGet("/notifications", (ICareRepository repository) => Results.Ok(repository.GetNotifications()));
-phase1.MapPost("/notifications/send", (SendNotificationRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/notifications", (CareDbContext context, ITenantContext tenant, bool unreadOnly = false) =>
+{
+    var notifications = context.Notifications.AsNoTracking()
+        .AsEnumerable()
+        .Where(notification => TenantVisible(tenant, notification.OrganizationId, notification.BranchId))
+        .Where(notification => !unreadOnly || !notification.IsRead)
+        .OrderByDescending(notification => notification.CreatedAt)
+        .ToList();
+    return Results.Ok(notifications);
+});
+phase1.MapGet("/notifications/unread-count", (CareDbContext context, ITenantContext tenant) =>
+{
+    var count = context.Notifications.AsNoTracking()
+        .AsEnumerable()
+        .Count(notification => TenantVisible(tenant, notification.OrganizationId, notification.BranchId) && !notification.IsRead);
+    return Results.Ok(new { unread = count });
+});
+phase1.MapGet("/notifications/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var notification = context.Notifications.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return notification is null || !tenant.CanAccess(notification.OrganizationId, notification.BranchId)
+        ? Results.NotFound()
+        : Results.Ok(notification);
+});
+phase1.MapPost("/notifications/send", (SendNotificationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (Missing(request.Title, request.Detail, request.Channel))
     {
         return Error("Title, detail, and channel are required.");
     }
 
-    var notification = new NotificationItem(Guid.NewGuid(), request.Title, $"{request.Channel}: {request.Detail}", DateTimeOffset.Now, false, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var notification = new NotificationItem(Guid.NewGuid(), request.Title, $"{request.Channel}: {request.Detail}", DateTimeOffset.UtcNow, false, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
     context.Notifications.Add(notification);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "notification.queued", "system", nameof(NotificationItem), notification.Id, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "notification.queued", currentUser.UserName, nameof(NotificationItem), notification.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
     return Results.Accepted($"/api/phase1/notifications/{notification.Id}", notification);
+});
+phase1.MapPost("/notifications/{id:guid}/read", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var notification = context.Notifications.Find(id);
+    if (notification is null || !tenant.CanAccess(notification.OrganizationId, notification.BranchId)) return Results.NotFound();
+
+    var updated = notification with { IsRead = true };
+    context.Entry(notification).CurrentValues.SetValues(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "notification.read", currentUser.UserName, nameof(NotificationItem), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(updated);
+});
+phase1.MapPost("/notifications/{id:guid}/unread", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var notification = context.Notifications.Find(id);
+    if (notification is null || !tenant.CanAccess(notification.OrganizationId, notification.BranchId)) return Results.NotFound();
+
+    var updated = notification with { IsRead = false };
+    context.Entry(notification).CurrentValues.SetValues(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "notification.unread", currentUser.UserName, nameof(NotificationItem), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(updated);
+});
+phase1.MapPost("/notifications/read-all", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var notifications = context.Notifications
+        .AsEnumerable()
+        .Where(notification => TenantVisible(tenant, notification.OrganizationId, notification.BranchId) && !notification.IsRead)
+        .ToList();
+
+    foreach (var notification in notifications)
+    {
+        context.Entry(notification).CurrentValues.SetValues(notification with { IsRead = true });
+    }
+
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "notification.read_all", currentUser.UserName, nameof(NotificationItem), null, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(new { updated = notifications.Count });
+});
+phase1.MapDelete("/notifications/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var notification = context.Notifications.Find(id);
+    if (notification is null || !tenant.CanAccess(notification.OrganizationId, notification.BranchId)) return Results.NotFound();
+
+    context.Notifications.Remove(notification);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "notification.deleted", currentUser.UserName, nameof(NotificationItem), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.NoContent();
 });
 
 phase1.MapGet("/admin/users", (ICareRepository repository, ICurrentUserContext currentUser) =>

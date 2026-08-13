@@ -139,6 +139,48 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
+    [Fact]
+    public async Task NotificationCanBeQueuedAndMarkedRead()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+
+        var send = await client.PostAsJsonAsync("/api/phase1/notifications/send", new
+        {
+            channel = "in-app",
+            title = "Visit changed",
+            detail = "Morning visit has been updated"
+        });
+        Assert.Equal(HttpStatusCode.Accepted, send.StatusCode);
+        var notification = await send.Content.ReadFromJsonAsync<NotificationResponse>();
+        Assert.NotNull(notification);
+        Assert.False(notification.IsRead);
+
+        var count = await client.GetFromJsonAsync<UnreadCountResponse>("/api/phase1/notifications/unread-count");
+        Assert.True(count?.Unread >= 1);
+
+        var read = await client.PostAsync($"/api/phase1/notifications/{notification.Id}/read", null);
+        Assert.Equal(HttpStatusCode.OK, read.StatusCode);
+        var updated = await read.Content.ReadFromJsonAsync<NotificationResponse>();
+        Assert.True(updated?.IsRead);
+    }
+
+    [Fact]
+    public async Task NotificationsCanBeMarkedAllRead()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+
+        await client.PostAsJsonAsync("/api/phase1/notifications/send", new { channel = "in-app", title = "One", detail = "First" });
+        await client.PostAsJsonAsync("/api/phase1/notifications/send", new { channel = "in-app", title = "Two", detail = "Second" });
+
+        var response = await client.PostAsync("/api/phase1/notifications/read-all", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var count = await client.GetFromJsonAsync<UnreadCountResponse>("/api/phase1/notifications/unread-count");
+        Assert.Equal(0, count?.Unread);
+    }
+
     private static async Task Login(HttpClient client, string userName, string password)
     {
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password });
@@ -149,6 +191,8 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     }
 
     private sealed record LoginResponse(string Token);
+    private sealed record NotificationResponse(Guid Id, string Title, string Detail, DateTimeOffset CreatedAt, bool IsRead);
+    private sealed record UnreadCountResponse(int Unread);
 }
 
 public sealed class AiCareApiFactory : WebApplicationFactory<Program>
