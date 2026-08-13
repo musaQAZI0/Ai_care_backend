@@ -38,6 +38,7 @@ Authorization: Bearer YOUR_TOKEN
 GET /health
 GET /health/db
 GET /health/storage
+GET /status/config
 ```
 
 ## Core Endpoints
@@ -94,6 +95,19 @@ GET    /api/phase1/documents/{id}/download-url
 PUT    /api/phase1/documents/{id}
 DELETE /api/phase1/documents/{id}
 
+GET    /api/phase1/medications
+GET    /api/phase1/medications/{id}
+POST   /api/phase1/medications
+PUT    /api/phase1/medications/{id}
+DELETE /api/phase1/medications/{id}
+
+GET    /api/phase1/mar
+GET    /api/phase1/mar/{id}
+POST   /api/phase1/mar
+POST   /api/phase1/mar/{id}/administer
+POST   /api/phase1/mar/{id}/skip
+POST   /api/phase1/mar/{id}/refuse
+
 GET    /api/phase1/care-notes
 GET    /api/phase1/care-notes/{id}
 POST   /api/phase1/care-notes
@@ -109,8 +123,52 @@ DELETE /api/phase1/incidents/{id}
 GET    /api/phase1/messages
 POST   /api/phase1/messages
 
+GET    /api/phase1/notifications
+GET    /api/phase1/notifications?unreadOnly=true
+GET    /api/phase1/notifications/unread-count
+GET    /api/phase1/notifications/{id}
+POST   /api/phase1/notifications/send
+POST   /api/phase1/notifications/{id}/read
+POST   /api/phase1/notifications/{id}/unread
+POST   /api/phase1/notifications/read-all
+DELETE /api/phase1/notifications/{id}
+
+GET    /api/phase1/payroll-runs
+GET    /api/phase1/payroll-runs?status=Generated
+GET    /api/phase1/payroll-runs/{id}
+GET    /api/phase1/payroll-runs/{id}/export
+POST   /api/phase1/payroll-runs/generate
+POST   /api/phase1/payroll-runs/{id}/approve
+POST   /api/phase1/payroll-runs/{id}/reject
+
+GET    /api/phase1/invoices
+GET    /api/phase1/invoices?status=Generated
+GET    /api/phase1/invoices/{id}
+POST   /api/phase1/invoices/generate
+GET    /api/phase1/invoices/{id}/lines
+POST   /api/phase1/invoices/{id}/approve
+POST   /api/phase1/invoices/{id}/record-payment
+POST   /api/phase1/invoices/{id}/void
+
+GET    /api/phase1/admin/users
+POST   /api/phase1/admin/users
+PATCH  /api/phase1/admin/users/{id}/role
+GET    /api/phase1/audit-events
+
 GET    /api/phase1/storage/status
 ```
+
+## Security Notes
+
+Render must have these set with strong values:
+
+```text
+JwtOptions__Issuer
+JwtOptions__Audience
+JwtOptions__SigningKey
+```
+
+`JwtOptions__SigningKey` must be at least 32 characters. API responses include `X-Request-ID` and security headers for easier debugging and safer browser behavior.
 
 ## Demo Data
 

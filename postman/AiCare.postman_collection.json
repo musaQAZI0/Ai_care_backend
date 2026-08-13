@@ -1,81 +1,614 @@
 {
-  "info": {
-    "name": "AiCare Backend",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-  },
-  "variable": [
-    { "key": "baseUrl", "value": "https://ai-care-backend-yeoh.onrender.com" },
-    { "key": "token", "value": "" },
-    { "key": "demoKey", "value": "" }
-  ],
-  "item": [
-    {
-      "name": "Health",
-      "item": [
-        { "name": "API", "request": { "method": "GET", "url": "{{baseUrl}}/health" } },
-        { "name": "Database", "request": { "method": "GET", "url": "{{baseUrl}}/health/db" } },
-        { "name": "Storage", "request": { "method": "GET", "url": "{{baseUrl}}/health/storage" } }
-      ]
-    },
-    {
-      "name": "Auth",
-      "item": [
-        {
-          "name": "Login",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"userName\": \"admin\",\n  \"password\": \"Admin123!\"\n}" },
-            "url": "{{baseUrl}}/api/auth/login"
-          }
-        },
-        {
-          "name": "Me",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
-            "url": "{{baseUrl}}/api/auth/me"
-          }
-        }
-      ]
-    },
-    {
-      "name": "Phase1 Reads",
-      "item": [
-        { "name": "Dashboard", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/dashboard" } },
-        { "name": "Service Users", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/service-users" } },
-        { "name": "Care Workers", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/care-workers" } },
-        { "name": "Visits", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/visits" } },
-        { "name": "Care Plans", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/care-plans" } },
-        { "name": "Documents", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/documents" } }
-      ]
-    },
-    {
-      "name": "Demo",
-      "item": [
-        {
-          "name": "Seed Demo Data",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "X-Demo-Key", "value": "{{demoKey}}" }
-            ],
-            "url": "{{baseUrl}}/api/demo/seed"
-          }
-        },
-        {
-          "name": "Reset Demo Data",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "X-Demo-Key", "value": "{{demoKey}}" }
-            ],
-            "url": "{{baseUrl}}/api/demo/reset"
-          }
-        }
-      ]
-    }
-  ]
+    "info":  {
+                 "name":  "AiCare Backend",
+                 "schema":  "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+             },
+    "variable":  [
+                     {
+                         "key":  "baseUrl",
+                         "value":  "https://ai-care-backend-yeoh.onrender.com"
+                     },
+                     {
+                         "key":  "token",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "demoKey",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "serviceUserId",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "careWorkerId",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "visitId",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "medicationId",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "marId",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "notificationId",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "payrollRunId",
+                         "value":  ""
+                     },
+                     {
+                         "key":  "invoiceId",
+                         "value":  ""
+                     }
+                 ],
+    "item":  [
+                 {
+                     "name":  "Health",
+                     "item":  [
+                                  {
+                                      "name":  "API",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/health"
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Database",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/health/db"
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Storage",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/health/storage"
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Safe Config Status",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/status/config"
+                                                  }
+                                  }
+                              ]
+                 },
+                 {
+                     "name":  "Auth",
+                     "item":  [
+                                  {
+                                      "name":  "Login",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/auth/login",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"userName\": \"admin\",\n  \"password\": \"AdminPasswordHere\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Me",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/auth/me",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  }
+                              ]
+                 },
+                 {
+                     "name":  "Core Reads",
+                     "item":  [
+                                  {
+                                      "name":  "Dashboard",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/dashboard",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Service Users",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/service-users",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Care Workers",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/care-workers",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Visits",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/visits",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Documents",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/documents",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Audit Events",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/audit-events",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  }
+                              ]
+                 },
+                 {
+                     "name":  "Documents",
+                     "item":  [
+                                  {
+                                      "name":  "Create Document Metadata",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/documents",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"serviceUserId\": \"{{serviceUserId}}\",\n  \"fileName\": \"demo.txt\",\n  \"category\": \"Care document\",\n  \"storagePath\": \"supabase://care-documents/demo/demo.txt\",\n  \"uploadedBy\": \"admin\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Download URL",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/documents/{{documentId}}/download-url",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  }
+                              ]
+                 },
+                 {
+                     "name":  "Medication eMAR",
+                     "item":  [
+                                  {
+                                      "name":  "List Medications",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/medications",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Create Medication",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/medications",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"serviceUserId\": \"{{serviceUserId}}\",\n  \"name\": \"Paracetamol\",\n  \"dosage\": \"500mg\",\n  \"route\": \"Oral\",\n  \"schedule\": \"Morning\",\n  \"isPrn\": false,\n  \"pharmacy\": \"Demo pharmacy\",\n  \"allergyWarning\": \"Check allergies\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Schedule MAR",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/mar",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"medicationId\": \"{{medicationId}}\",\n  \"visitId\": \"{{visitId}}\",\n  \"careWorkerId\": \"{{careWorkerId}}\",\n  \"scheduledAt\": \"2026-08-14T09:00:00Z\",\n  \"notes\": \"Due with breakfast\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Administer MAR",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/mar/{{marId}}/administer",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"administeredAt\": null,\n  \"notes\": \"Taken with breakfast\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Skip MAR",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/mar/{{marId}}/skip",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"administeredAt\": null,\n  \"notes\": \"Skipped by instruction\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Refuse MAR",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/mar/{{marId}}/refuse",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"administeredAt\": null,\n  \"notes\": \"Person refused\"\n}"
+                                                               }
+                                                  }
+                                  }
+                              ]
+                 },
+                 {
+                     "name":  "Notifications",
+                     "item":  [
+                                  {
+                                      "name":  "List Notifications",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/notifications",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Unread Count",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/notifications/unread-count",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Send Notification",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/notifications/send",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"channel\": \"in-app\",\n  \"title\": \"Visit changed\",\n  \"detail\": \"Morning visit updated\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Mark Read",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/notifications/{{notificationId}}/read",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Mark Unread",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/notifications/{{notificationId}}/unread",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Read All",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/notifications/read-all",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  }
+                              ]
+                 },
+                 {
+                     "name":  "Finance",
+                     "item":  [
+                                  {
+                                      "name":  "Payroll Runs",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/payroll-runs",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Generate Payroll",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/payroll-runs/generate",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Approve Payroll",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/payroll-runs/{{payrollRunId}}/approve",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Reject Payroll",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/payroll-runs/{{payrollRunId}}/reject",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"reason\": \"Timesheet correction needed\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Invoices",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/invoices",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Generate Invoices",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/invoices/generate",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Invoice Lines",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "url":  "{{baseUrl}}/api/phase1/invoices/{{invoiceId}}/lines",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Approve Invoice",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/invoices/{{invoiceId}}/approve",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Record Payment",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/invoices/{{invoiceId}}/record-payment",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"amount\": 120,\n  \"reference\": \"PAY-001\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Void Invoice",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/phase1/invoices/{{invoiceId}}/void",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"reason\": \"Incorrect funder\"\n}"
+                                                               }
+                                                  }
+                                  }
+                              ]
+                 },
+                 {
+                     "name":  "Demo",
+                     "item":  [
+                                  {
+                                      "name":  "Seed Demo Data",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "url":  "{{baseUrl}}/api/demo/seed",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "X-Demo-Key",
+                                                                         "value":  "{{demoKey}}"
+                                                                     }
+                                                                 ]
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Reset Demo Data",
+                                      "request":  {
+                                                      "method":  "DELETE",
+                                                      "url":  "{{baseUrl}}/api/demo/reset",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "X-Demo-Key",
+                                                                         "value":  "{{demoKey}}"
+                                                                     }
+                                                                 ]
+                                                  }
+                                  }
+                              ]
+                 }
+             ]
 }
