@@ -37,16 +37,24 @@ public class AuthController : ControllerBase
 
     private string CreateJwtToken(AppUser user)
     {
-        var claims = new[]
+        var claims = new List<Claim>
         {
             new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
             new Claim(JwtRegisteredClaimNames.UniqueName, user.UserName),
             new Claim(ClaimTypes.Role, user.Role.ToString()),
             new Claim(ClaimTypes.Email, user.Email),
             new Claim("organization_id", (user.OrganizationId ?? AiCare.Domain.TenantDefaults.OrganizationId).ToString()),
-            new Claim("branch_id", user.BranchId?.ToString() ?? string.Empty),
-            new Claim("care_worker_id", user.CareWorkerId?.ToString() ?? string.Empty),
         };
+
+        if (user.BranchId is not null)
+        {
+            claims.Add(new Claim("branch_id", user.BranchId.Value.ToString()));
+        }
+
+        if (user.CareWorkerId is not null)
+        {
+            claims.Add(new Claim("care_worker_id", user.CareWorkerId.Value.ToString()));
+        }
 
         var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtOptions.SigningKey));
         var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
