@@ -82,8 +82,8 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Invalid current password." });
         }
 
-        _context.AppUsers.Update(user with { PasswordHash = PasswordHasher.HashPassword(request.NewPassword) });
-        _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.password_changed", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.Now));
+        _context.Entry(user).CurrentValues.SetValues(user with { PasswordHash = PasswordHasher.HashPassword(request.NewPassword) });
+        _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.password_changed", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.UtcNow, user.OrganizationId, user.BranchId));
         _context.SaveChanges();
         return NoContent();
     }
@@ -116,7 +116,7 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Invalid refresh request." });
         }
 
-        _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.token_refreshed", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.Now));
+        _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.token_refreshed", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.UtcNow, user.OrganizationId, user.BranchId));
         _context.SaveChanges();
         return Ok(new { token = CreateJwtToken(user) });
     }
@@ -127,7 +127,7 @@ public class AuthController : ControllerBase
         var user = _context.AppUsers.SingleOrDefault(u => u.Email == request.Email && u.IsActive);
         if (user is not null)
         {
-            _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.password_reset_requested", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.Now));
+            _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.password_reset_requested", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.UtcNow, user.OrganizationId, user.BranchId));
             _context.SaveChanges();
         }
 
@@ -148,8 +148,8 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Invalid reset request." });
         }
 
-        _context.AppUsers.Update(user with { PasswordHash = PasswordHasher.HashPassword(request.NewPassword) });
-        _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.password_reset_completed", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.Now));
+        _context.Entry(user).CurrentValues.SetValues(user with { PasswordHash = PasswordHasher.HashPassword(request.NewPassword) });
+        _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.password_reset_completed", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.UtcNow, user.OrganizationId, user.BranchId));
         _context.SaveChanges();
         return NoContent();
     }
@@ -163,7 +163,7 @@ public class AuthController : ControllerBase
             return NotFound(new { message = "User not found." });
         }
 
-        _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.mfa_setup_started", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.Now));
+        _context.AuditEvents.Add(new AiCare.Domain.AuditEvent(Guid.NewGuid(), "auth.mfa_setup_started", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.UtcNow, user.OrganizationId, user.BranchId));
         _context.SaveChanges();
         return Ok(new { issuer = "AiCare", account = user.Email, secret = "provider-managed-secret", enabled = false });
     }
