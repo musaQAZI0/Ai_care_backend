@@ -458,8 +458,9 @@ public sealed class EfCoreCareRepository : ICareRepository
 
     public PayrollRun GeneratePayrollRun()
     {
+        var now = DateTimeOffset.UtcNow;
         var completedVisits = Visible(_context.Visits).Count(visit => visit.Status == VisitStatus.Completed);
-        var payroll = new PayrollRun(Guid.NewGuid(), $"{DateTimeOffset.Now:yyyy}-W{ISOWeek.GetWeekOfYear(DateTimeOffset.Now.DateTime):00}", Visible(_context.CareWorkers).Count(), completedVisits * 42.50m, "Generated", DateTimeOffset.Now, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId);
+        var payroll = new PayrollRun(Guid.NewGuid(), $"{now:yyyy}-W{ISOWeek.GetWeekOfYear(now.DateTime):00}", Visible(_context.CareWorkers).Count(), completedVisits * 42.50m, "Generated", now, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId);
         _context.PayrollRuns.Add(payroll);
         AddAudit("payroll.generated", "system", nameof(PayrollRun), payroll.Id);
         _context.SaveChanges();
@@ -470,8 +471,9 @@ public sealed class EfCoreCareRepository : ICareRepository
 
     public IReadOnlyCollection<Invoice> GenerateInvoices()
     {
+        var now = DateTimeOffset.UtcNow;
         var generated = Visible(_context.ServiceUsers)
-            .Select(serviceUser => new Invoice(Guid.NewGuid(), serviceUser.Id, serviceUser.FundingSource, 360.00m, "Generated", DateTimeOffset.Now, serviceUser.OrganizationId, serviceUser.BranchId))
+            .Select(serviceUser => new Invoice(Guid.NewGuid(), serviceUser.Id, serviceUser.FundingSource, 360.00m, "Generated", now, serviceUser.OrganizationId, serviceUser.BranchId))
             .ToList();
         _context.Invoices.AddRange(generated);
         AddAudit("invoices.generated", "system", nameof(Invoice), null);
