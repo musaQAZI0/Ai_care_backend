@@ -181,6 +181,57 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         Assert.Equal(0, count?.Unread);
     }
 
+    [Fact]
+    public async Task BackOfficeCanApprovePayrollRun()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "backoffice", "BackOfficePassword123!");
+
+        var response = await client.PostAsync($"/api/phase1/payroll-runs/{TestIds.PayrollRunId}/approve", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CareWorkerCannotAccessInvoices()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "worker", "WorkerPassword123!");
+
+        var response = await client.GetAsync("/api/phase1/invoices");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BackOfficeCanRecordInvoicePayment()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "backoffice", "BackOfficePassword123!");
+
+        var response = await client.PostAsJsonAsync($"/api/phase1/invoices/{TestIds.InvoiceId}/record-payment", new
+        {
+            amount = 120m,
+            reference = "TEST-PAY-001"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BackOfficeCanVoidGeneratedInvoice()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "backoffice", "BackOfficePassword123!");
+
+        var response = await client.PostAsJsonAsync($"/api/phase1/invoices/{TestIds.VoidInvoiceId}/void", new
+        {
+            reason = "Incorrect funder"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     private static async Task Login(HttpClient client, string userName, string password)
     {
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password });
@@ -235,6 +286,8 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
     private static void Seed(CareDbContext context)
     {
         context.AppUsers.RemoveRange(context.AppUsers);
+        context.PayrollRuns.RemoveRange(context.PayrollRuns);
+        context.Invoices.RemoveRange(context.Invoices);
         context.MedicationAdministrationRecords.RemoveRange(context.MedicationAdministrationRecords);
         context.Medications.RemoveRange(context.Medications);
         context.ServiceUsers.RemoveRange(context.ServiceUsers);
@@ -308,8 +361,21 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             "Due with breakfast",
             TenantDefaults.OrganizationId,
             TenantDefaults.BranchId));
+        context.PayrollRuns.Add(new PayrollRun(
+            TestIds.PayrollRunId,
+            "2026-W33",
+            2,
+            100m,
+            "Generated",
+            DateTimeOffset.UtcNow,
+            TenantDefaults.OrganizationId,
+            TenantDefaults.BranchId));
+        context.Invoices.AddRange(
+            new Invoice(TestIds.InvoiceId, TestIds.ServiceUserId, "Private", 120m, "Approved", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId),
+            new Invoice(TestIds.VoidInvoiceId, TestIds.ServiceUserId, "Private", 90m, "Generated", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         context.AppUsers.AddRange(
             new AppUser(Guid.NewGuid(), "admin", "admin@test.local", PasswordHasher.HashPassword("AdminPassword123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId),
+            new AppUser(Guid.NewGuid(), "backoffice", "backoffice@test.local", PasswordHasher.HashPassword("BackOfficePassword123!"), UserRole.BackOffice, true, TenantDefaults.OrganizationId),
             new AppUser(Guid.NewGuid(), "worker", "worker@test.local", PasswordHasher.HashPassword("WorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.WorkerId),
             new AppUser(Guid.NewGuid(), "other-worker", "other@test.local", PasswordHasher.HashPassword("OtherWorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.OtherWorkerId));
         context.SaveChanges();
@@ -324,4 +390,7 @@ internal static class TestIds
     public static readonly Guid VisitId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
     public static readonly Guid MedicationId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
     public static readonly Guid MarId = Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");
+    public static readonly Guid PayrollRunId = Guid.Parse("11111111-aaaa-aaaa-aaaa-111111111111");
+    public static readonly Guid InvoiceId = Guid.Parse("22222222-aaaa-aaaa-aaaa-222222222222");
+    public static readonly Guid VoidInvoiceId = Guid.Parse("33333333-aaaa-aaaa-aaaa-333333333333");
 }

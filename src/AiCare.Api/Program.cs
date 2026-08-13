@@ -920,10 +920,26 @@ phase1.MapDelete("/incidents/{id:guid}", (Guid id, ICareRepository repository, C
     return repository.DeleteIncident(id) ? Results.NoContent() : Results.NotFound();
 });
 phase1.MapGet("/ai/risk-alerts", (ICareRepository repository) => Results.Ok(repository.GetAiRiskAlerts()));
-phase1.MapGet("/payroll-runs", (ICareRepository repository, ICurrentUserContext currentUser) =>
+phase1.MapGet("/payroll-runs", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string? status = null) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
-    return denied ?? Results.Ok(repository.GetPayrollRuns());
+    if (denied is not null) return denied;
+
+    var payrollRuns = context.PayrollRuns.AsNoTracking()
+        .AsEnumerable()
+        .Where(payroll => TenantVisible(tenant, payroll.OrganizationId, payroll.BranchId))
+        .Where(payroll => string.IsNullOrWhiteSpace(status) || string.Equals(payroll.Status, status, StringComparison.OrdinalIgnoreCase))
+        .OrderByDescending(payroll => payroll.CreatedAt)
+        .ToList();
+    return Results.Ok(payrollRuns);
+});
+phase1.MapGet("/payroll-runs/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
+    var payroll = context.PayrollRuns.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return payroll is null || !tenant.CanAccess(payroll.OrganizationId, payroll.BranchId) ? Results.NotFound() : Results.Ok(payroll);
 });
 phase1.MapPost("/payroll-runs/generate", (ICareRepository repository, ICurrentUserContext currentUser) =>
 {
@@ -933,10 +949,41 @@ phase1.MapPost("/payroll-runs/generate", (ICareRepository repository, ICurrentUs
     var payroll = repository.GeneratePayrollRun();
     return Results.Created($"/api/phase1/payroll-runs/{payroll.Id}", payroll);
 });
-phase1.MapGet("/invoices", (ICareRepository repository, ICurrentUserContext currentUser) =>
+phase1.MapGet("/payroll-runs/{id:guid}/export", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
-    return denied ?? Results.Ok(repository.GetInvoices());
+    if (denied is not null) return denied;
+
+    var payroll = context.PayrollRuns.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    if (payroll is null || !tenant.CanAccess(payroll.OrganizationId, payroll.BranchId)) return Results.NotFound();
+
+    var rows = new[]
+    {
+        "period,worker_count,gross_pay,status,created_at",
+        $"{payroll.Period},{payroll.WorkerCount},{payroll.GrossPay},{payroll.Status},{payroll.CreatedAt:O}"
+    };
+    return Results.Text(string.Join(Environment.NewLine, rows), "text/csv");
+});
+phase1.MapGet("/invoices", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string? status = null) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
+    var invoices = context.Invoices.AsNoTracking()
+        .AsEnumerable()
+        .Where(invoice => TenantVisible(tenant, invoice.OrganizationId, invoice.BranchId))
+        .Where(invoice => string.IsNullOrWhiteSpace(status) || string.Equals(invoice.Status, status, StringComparison.OrdinalIgnoreCase))
+        .OrderByDescending(invoice => invoice.IssuedAt)
+        .ToList();
+    return Results.Ok(invoices);
+});
+phase1.MapGet("/invoices/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
+    var invoice = context.Invoices.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return invoice is null || !tenant.CanAccess(invoice.OrganizationId, invoice.BranchId) ? Results.NotFound() : Results.Ok(invoice);
 });
 phase1.MapPost("/invoices/generate", (ICareRepository repository, ICurrentUserContext currentUser) =>
 {
@@ -1295,9 +1342,33 @@ phase1.MapPost("/payroll-runs/{id:guid}/approve", (Guid id, CareDbContext contex
         return Results.NotFound();
     }
 
+    if (string.Equals(payroll.Status, "Approved", StringComparison.OrdinalIgnoreCase))
+    {
+        return Error("Payroll run is already approved.");
+    }
+
     var updated = payroll with { Status = "Approved" };
-    context.PayrollRuns.Update(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "payroll.approved", "system", nameof(PayrollRun), id, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.Entry(payroll).CurrentValues.SetValues(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "payroll.approved", currentUser.UserName, nameof(PayrollRun), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(updated);
+});
+phase1.MapPost("/payroll-runs/{id:guid}/reject", (Guid id, RejectFinancialRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
+    if (Missing(request.Reason))
+    {
+        return Error("A rejection reason is required.");
+    }
+
+    var payroll = context.PayrollRuns.Find(id);
+    if (payroll is null || !tenant.CanAccess(payroll.OrganizationId, payroll.BranchId)) return Results.NotFound();
+
+    var updated = payroll with { Status = "Rejected" };
+    context.Entry(payroll).CurrentValues.SetValues(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"payroll.rejected: {request.Reason}", currentUser.UserName, nameof(PayrollRun), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
     return Results.Ok(updated);
 });
@@ -1366,11 +1437,21 @@ phase1.MapPost("/invoices/{id:guid}/record-payment", (Guid id, RecordPaymentRequ
         return Results.NotFound();
     }
 
+    if (request.Amount <= 0 || Missing(request.Reference))
+    {
+        return Error("Payment amount and reference are required.");
+    }
+
+    if (string.Equals(invoice.Status, "Void", StringComparison.OrdinalIgnoreCase))
+    {
+        return Error("Void invoices cannot receive payments.");
+    }
+
     var updated = invoice with { Status = request.Amount >= invoice.Amount ? "Paid" : "Part paid" };
-    context.Invoices.Update(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "invoice.payment_recorded", "system", nameof(Invoice), id, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.Entry(invoice).CurrentValues.SetValues(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"invoice.payment_recorded: {request.Reference}", currentUser.UserName, nameof(Invoice), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
-    return Results.Ok(new { invoice = updated, request.Amount, request.Reference, paidAt = DateTimeOffset.Now });
+    return Results.Ok(new { invoice = updated, request.Amount, request.Reference, paidAt = DateTimeOffset.UtcNow });
 });
 
 phase1.MapPost("/invoices/{id:guid}/approve", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
@@ -1384,9 +1465,39 @@ phase1.MapPost("/invoices/{id:guid}/approve", (Guid id, CareDbContext context, I
         return Results.NotFound();
     }
 
+    if (string.Equals(invoice.Status, "Paid", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(invoice.Status, "Void", StringComparison.OrdinalIgnoreCase))
+    {
+        return Error("Paid or void invoices cannot be approved.");
+    }
+
     var updated = invoice with { Status = "Approved" };
-    context.Invoices.Update(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "invoice.approved", "system", nameof(Invoice), id, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.Entry(invoice).CurrentValues.SetValues(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "invoice.approved", currentUser.UserName, nameof(Invoice), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(updated);
+});
+phase1.MapPost("/invoices/{id:guid}/void", (Guid id, RejectFinancialRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
+    if (Missing(request.Reason))
+    {
+        return Error("A void reason is required.");
+    }
+
+    var invoice = context.Invoices.Find(id);
+    if (invoice is null || !tenant.CanAccess(invoice.OrganizationId, invoice.BranchId)) return Results.NotFound();
+
+    if (string.Equals(invoice.Status, "Paid", StringComparison.OrdinalIgnoreCase))
+    {
+        return Error("Paid invoices cannot be voided.");
+    }
+
+    var updated = invoice with { Status = "Void" };
+    context.Entry(invoice).CurrentValues.SetValues(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"invoice.voided: {request.Reason}", currentUser.UserName, nameof(Invoice), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
     return Results.Ok(updated);
 });
@@ -1901,5 +2012,6 @@ public sealed record CreateOrganizationRequest(string Name, string Plan);
 public sealed record CreateBranchRequest(string Name, string Region, Guid? OrganizationId);
 public sealed record FamilyPreferencesRequest(bool EmailNotifications, bool SmsNotifications, bool MonthlyDigest, bool IncidentAlerts);
 public sealed record RecordPaymentRequest(decimal Amount, string Reference);
+public sealed record RejectFinancialRequest(string Reason);
 
 public partial class Program;
