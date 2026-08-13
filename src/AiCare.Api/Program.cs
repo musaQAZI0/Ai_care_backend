@@ -249,12 +249,12 @@ phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest req
     var serviceUser = repository.UpdateServiceUser(id, request);
     return serviceUser is null ? Results.NotFound() : Results.Ok(serviceUser);
 });
-phase1.MapDelete("/service-users/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapDelete("/service-users/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var serviceUser = context.ServiceUsers.Find(id);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId)) return Results.NotFound();
     context.ServiceUsers.Remove(serviceUser);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "service_user.deleted", "system", nameof(ServiceUser), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "service_user.deleted", nameof(ServiceUser), id);
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -276,13 +276,14 @@ phase1.MapGet("/service-users/{id:guid}/complete-record", (Guid id, CareDbContex
     return Results.Ok(new { person, record, assessments, plans, outcomes, risks, family, notes, incidents });
 });
 
-phase1.MapPut("/service-users/{id:guid}/person-record", (Guid id, UpsertPersonRecordRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPut("/service-users/{id:guid}/person-record", (Guid id, UpsertPersonRecordRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var person = context.ServiceUsers.FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return Results.NotFound();
     var existing = context.PersonRecords.FirstOrDefault(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId);
     var updated = new PersonRecord(existing?.Id ?? Guid.NewGuid(), id, request.PreferredName, request.Pronouns, request.HealthIdentifier, request.GpDetails, request.PharmacyDetails, request.LegalRepresentative, request.ConsentStatus, request.MentalCapacityStatus, request.CommunicationPassport, request.PersonalHistory, request.WhatMattersToMe, request.DesiredOutcomes, request.AdvanceCareWishes, request.AdmittedAt, request.DischargedAt, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
     if (existing is null) context.PersonRecords.Add(updated); else context.Entry(existing).CurrentValues.SetValues(updated);
+    AddAudit(context, tenant, currentUser, existing is null ? "person_record.created" : "person_record.updated", nameof(PersonRecord), updated.Id);
     context.SaveChanges();
     return Results.Ok(updated);
 });
@@ -290,31 +291,34 @@ phase1.MapPut("/service-users/{id:guid}/person-record", (Guid id, UpsertPersonRe
 phase1.MapGet("/assessments", (Guid? serviceUserId, CareDbContext context, ITenantContext tenant) => Results.Ok(
     context.CareAssessments.AsNoTracking().Where(item => item.OrganizationId == tenant.OrganizationId && (serviceUserId == null || item.ServiceUserId == serviceUserId)).OrderByDescending(item => item.CompletedAt).ToList()));
 
-phase1.MapPost("/assessments", (CreateCareAssessmentRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/assessments", (CreateCareAssessmentRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     try { System.Text.Json.JsonDocument.Parse(request.AnswersJson); } catch { return Error("AnswersJson must contain valid JSON."); }
     var assessment = new CareAssessment(Guid.NewGuid(), request.ServiceUserId, request.AssessmentType, request.TemplateVersion, "Completed", request.AnswersJson, request.Score, request.Risk, request.Summary, request.RecommendedActions, request.CompletedBy, DateTimeOffset.UtcNow, request.ReviewDueAt, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
     context.CareAssessments.Add(assessment);
+    AddAudit(context, tenant, currentUser, "assessment.completed", nameof(CareAssessment), assessment.Id);
     context.SaveChanges();
     return Results.Created($"/api/phase1/assessments/{assessment.Id}", assessment);
 });
 
-phase1.MapPost("/care-plans/{id:guid}/outcomes", (Guid id, CreateCarePlanOutcomeRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/care-plans/{id:guid}/outcomes", (Guid id, CreateCarePlanOutcomeRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var plan = context.CarePlans.AsNoTracking().FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (plan is null || request.CarePlanId != id || request.ServiceUserId != plan.ServiceUserId) return Error("The outcome must belong to the selected care plan and person.");
     var outcome = new CarePlanOutcome(Guid.NewGuid(), id, plan.ServiceUserId, request.Goal, request.DesiredOutcome, request.Interventions, request.ResponsiblePerson, request.Measure, "Active", request.TargetDate, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
     context.CarePlanOutcomes.Add(outcome);
+    AddAudit(context, tenant, currentUser, "care_plan.outcome_created", nameof(CarePlanOutcome), outcome.Id);
     context.SaveChanges();
     return Results.Created($"/api/phase1/care-plans/{id}/outcomes/{outcome.Id}", outcome);
 });
 
-phase1.MapPost("/care-plans/{id:guid}/approve", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/care-plans/{id:guid}/approve", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var plan = context.CarePlans.FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (plan is null) return Results.NotFound();
     var approved = plan with { Status = "Active" };
     context.Entry(plan).CurrentValues.SetValues(approved);
+    AddAudit(context, tenant, currentUser, "care_plan.approved", nameof(CarePlan), id);
     context.SaveChanges();
     return Results.Ok(approved);
 });
@@ -365,12 +369,12 @@ phase1.MapPut("/care-workers/{id:guid}", (Guid id, CreateCareWorkerRequest reque
     var careWorker = repository.UpdateCareWorker(id, request);
     return careWorker is null ? Results.NotFound() : Results.Ok(careWorker);
 });
-phase1.MapDelete("/care-workers/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapDelete("/care-workers/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var worker = context.CareWorkers.Find(id);
     if (worker is null || !tenant.CanAccess(worker.OrganizationId, worker.BranchId)) return Results.NotFound();
     context.CareWorkers.Remove(worker);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_worker.deleted", "system", nameof(CareWorker), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "care_worker.deleted", nameof(CareWorker), id);
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -452,7 +456,7 @@ phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantCo
     var visit = context.Visits.Find(id);
     if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return Results.NotFound();
     context.Visits.Remove(visit);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "visit.deleted", "system", nameof(Visit), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "visit.deleted", nameof(Visit), id);
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -560,7 +564,7 @@ phase1.MapPost("/family-members", (CreateFamilyMemberRequest request, ICareRepos
     var familyMember = repository.AddFamilyMember(request);
     return Results.Created($"/api/phase1/family-members/{familyMember.Id}", familyMember);
 });
-phase1.MapPut("/family-members/{id:guid}", (Guid id, CreateFamilyMemberRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPut("/family-members/{id:guid}", (Guid id, CreateFamilyMemberRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.FullName, request.Email, request.Relationship, request.AccessLevel) || !LooksLikeEmail(request.Email))
     {
@@ -571,16 +575,16 @@ phase1.MapPut("/family-members/{id:guid}", (Guid id, CreateFamilyMemberRequest r
     if (family is null || !tenant.CanAccess(family.OrganizationId, family.BranchId)) return Results.NotFound();
     var updated = family with { ServiceUserId = request.ServiceUserId, FullName = request.FullName, Email = request.Email, Relationship = request.Relationship, AccessLevel = request.AccessLevel };
     context.FamilyMembers.Update(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "family_member.updated", "system", nameof(FamilyMember), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "family_member.updated", nameof(FamilyMember), id);
     context.SaveChanges();
     return Results.Ok(updated);
 });
-phase1.MapDelete("/family-members/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapDelete("/family-members/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var family = context.FamilyMembers.Find(id);
     if (family is null || !tenant.CanAccess(family.OrganizationId, family.BranchId)) return Results.NotFound();
     context.FamilyMembers.Remove(family);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "family_member.deleted", "system", nameof(FamilyMember), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "family_member.deleted", nameof(FamilyMember), id);
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -832,7 +836,7 @@ phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, 
         RequiresReview = request.RequiresReview
     };
     context.CareNotes.Update(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_note.updated", "system", nameof(CareNote), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "care_note.updated", nameof(CareNote), id);
     context.SaveChanges();
     return Results.Ok(updated);
 });
@@ -844,7 +848,7 @@ phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITena
     if (denied is not null) return denied;
 
     context.CareNotes.Remove(note);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_note.deleted", "system", nameof(CareNote), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "care_note.deleted", nameof(CareNote), id);
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -1013,7 +1017,7 @@ phase1.MapGet("/reports/{reportName}/csv", (string reportName, CareDbContext con
 
     return Results.Text(string.Join(Environment.NewLine, rows), "text/csv");
 });
-phase1.MapPost("/reports/generate", (GenerateReportRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/reports/generate", (GenerateReportRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var report = new
     {
@@ -1032,11 +1036,11 @@ phase1.MapPost("/reports/generate", (GenerateReportRequest request, CareDbContex
             auditEvents = context.AuditEvents.Count(audit => tenant.IsPlatformOwner || audit.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || tenant.BranchId == null || audit.BranchId == tenant.BranchId))
         }
     };
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "report.generated", "system", "Report", null, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "report.generated", "Report", null);
     context.SaveChanges();
     return Results.Ok(report);
 });
-phase1.MapPost("/reports/builder", (BuildReportRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/reports/builder", (BuildReportRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (Missing(request.Name, request.Category) || request.Metrics.Count == 0)
     {
@@ -1052,7 +1056,7 @@ phase1.MapPost("/reports/builder", (BuildReportRequest request, CareDbContext co
         tenant.OrganizationId,
         tenant.BranchId ?? TenantDefaults.BranchId);
     context.Reports.Add(report);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "report.definition_created", "system", nameof(ReportDefinition), report.Id, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "report.definition_created", nameof(ReportDefinition), report.Id);
     context.SaveChanges();
     return Results.Created($"/api/phase1/reports/{report.Id}", new
     {
@@ -1274,7 +1278,7 @@ phase1.MapGet("/family/service-users/{id:guid}/dashboard", (Guid id, CareDbConte
     });
 });
 
-phase1.MapPost("/family/service-users/{id:guid}/preferences", (Guid id, FamilyPreferencesRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/family/service-users/{id:guid}/preferences", (Guid id, FamilyPreferencesRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(user => user.Id == id);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
@@ -1282,7 +1286,7 @@ phase1.MapPost("/family/service-users/{id:guid}/preferences", (Guid id, FamilyPr
         return Results.NotFound();
     }
 
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "family.preferences_updated", "system", nameof(ServiceUser), id, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "family.preferences_updated", nameof(ServiceUser), id);
     context.SaveChanges();
     return Results.Ok(new
     {
@@ -1311,7 +1315,7 @@ phase1.MapGet("/family/service-users/{id:guid}/monthly-report", (Guid id, CareDb
     return Results.Text(text, "text/plain");
 });
 
-phase1.MapPost("/incidents/{id:guid}/investigate", (Guid id, InvestigateIncidentRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/incidents/{id:guid}/investigate", (Guid id, InvestigateIncidentRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (Missing(request.Outcome, request.ActionPlan))
     {
@@ -1325,8 +1329,8 @@ phase1.MapPost("/incidents/{id:guid}/investigate", (Guid id, InvestigateIncident
     }
 
     var updated = incident with { Status = request.CloseIncident ? "Closed" : "Under investigation", Description = $"{incident.Description}\nInvestigation outcome: {request.Outcome}\nAction plan: {request.ActionPlan}" };
-    context.Incidents.Update(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "incident.investigated", "system", nameof(Incident), id, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.Entry(incident).CurrentValues.SetValues(updated);
+    AddAudit(context, tenant, currentUser, "incident.investigated", nameof(Incident), id);
     context.SaveChanges();
     return Results.Ok(updated);
 });
@@ -1502,7 +1506,7 @@ phase1.MapPost("/invoices/{id:guid}/void", (Guid id, RejectFinancialRequest requ
     return Results.Ok(updated);
 });
 
-phase1.MapPost("/ai/summarize-notes", (AiSummaryRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/ai/summarize-notes", (AiSummaryRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var notes = context.CareNotes.AsNoTracking()
         .Where(note => (request.ServiceUserId == null || note.ServiceUserId == request.ServiceUserId) && (tenant.IsPlatformOwner || note.OrganizationId == tenant.OrganizationId) && (tenant.IsOrganizationWide || tenant.BranchId == null || note.BranchId == tenant.BranchId))
@@ -1513,12 +1517,12 @@ phase1.MapPost("/ai/summarize-notes", (AiSummaryRequest request, CareDbContext c
     var summary = notes.Count == 0
         ? "No recent care notes are available for summarization."
         : $"AI draft summary based on {notes.Count} recent notes: {string.Join(" ", notes.Select(note => note.Summary)).Trim()}";
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "ai.summary_generated", "system", "AiInteraction", request.ServiceUserId, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "ai.summary_generated", "AiInteraction", request.ServiceUserId);
     context.SaveChanges();
     return Results.Ok(new { summary, humanReviewRequired = true, generatedAt = DateTimeOffset.Now });
 });
 
-phase1.MapPost("/ai/detect-risks", (AiSummaryRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/ai/detect-risks", (AiSummaryRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var serviceUserId = request.ServiceUserId ?? context.ServiceUsers.AsNoTracking()
         .Where(user => tenant.IsPlatformOwner || user.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || tenant.BranchId == null || user.BranchId == tenant.BranchId))
@@ -1541,7 +1545,7 @@ phase1.MapPost("/ai/detect-risks", (AiSummaryRequest request, CareDbContext cont
         : RiskLevel.Medium;
     var alert = new AiRiskAlert(Guid.NewGuid(), serviceUserId, "Care note pattern review", risk, recentText.Length == 0 ? "No notes found; baseline review recommended." : recentText, "Manager review required before action.", false, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
     context.AiRiskAlerts.Add(alert);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "ai.risk_detected", "system", nameof(AiRiskAlert), alert.Id, DateTimeOffset.Now, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "ai.risk_detected", nameof(AiRiskAlert), alert.Id);
     context.SaveChanges();
     return Results.Created($"/api/phase1/ai/risk-alerts/{alert.Id}", alert);
 });
@@ -1560,7 +1564,7 @@ phase1.MapGet("/organization/branches", (CareDbContext context, ITenantContext t
         })
         .ToList()));
 
-phase1.MapPost("/organization/branches", (CreateBranchRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/organization/branches", (CreateBranchRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (Missing(request.Name, request.Region))
     {
@@ -1581,7 +1585,7 @@ phase1.MapPost("/organization/branches", (CreateBranchRequest request, CareDbCon
 
     var branch = new Branch(Guid.NewGuid(), organizationId, request.Name.Trim(), request.Region.Trim(), "Active");
     context.Branches.Add(branch);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "branch.created", "system", nameof(Branch), branch.Id, DateTimeOffset.Now, organizationId, branch.Id));
+    AddAudit(context, tenant, currentUser, "branch.created", nameof(Branch), branch.Id, organizationId, branch.Id);
     context.SaveChanges();
     return Results.Created($"/api/phase1/organization/branches/{branch.Id}", branch);
 });
@@ -1591,7 +1595,7 @@ phase1.MapGet("/organizations", (CareDbContext context, ITenantContext tenant) =
         .Where(organization => tenant.IsPlatformOwner || organization.Id == tenant.OrganizationId)
         .ToList()));
 
-phase1.MapPost("/organizations", (CreateOrganizationRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/organizations", (CreateOrganizationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (!tenant.IsPlatformOwner)
     {
@@ -1607,7 +1611,7 @@ phase1.MapPost("/organizations", (CreateOrganizationRequest request, CareDbConte
     var branch = new Branch(Guid.NewGuid(), organization.Id, "Main Branch", "Primary", "Active");
     context.Organizations.Add(organization);
     context.Branches.Add(branch);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "organization.created", "system", nameof(Organization), organization.Id, DateTimeOffset.Now, organization.Id, branch.Id));
+    AddAudit(context, tenant, currentUser, "organization.created", nameof(Organization), organization.Id, organization.Id, branch.Id);
     context.SaveChanges();
     return Results.Created($"/api/phase1/organizations/{organization.Id}", new { organization, branch });
 });
@@ -1620,7 +1624,7 @@ phase1.MapGet("/storage/status", (IConfiguration configuration) => Results.Ok(ne
 }));
 
 var demo = app.MapGroup("/api/demo").RequireAuthorization("Phase1User");
-demo.MapPost("/seed", (HttpContext httpContext, IConfiguration configuration, CareDbContext context, ITenantContext tenant) =>
+demo.MapPost("/seed", (HttpContext httpContext, IConfiguration configuration, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (!DemoAccessAllowed(httpContext, configuration))
     {
@@ -1640,7 +1644,7 @@ demo.MapPost("/seed", (HttpContext httpContext, IConfiguration configuration, Ca
     var message = new MessageThread(Guid.NewGuid(), serviceUser.Id, worker.Id, "Demo message", MessagePriority.Routine, "Demo message body.", DateTimeOffset.UtcNow.AddMinutes(30), tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
 
     context.AddRange(serviceUser, worker, visit, carePlan, risk, family, document, note, incident, message);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "demo.seeded", "system", "DemoData", serviceUser.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "demo.seeded", "DemoData", serviceUser.Id);
     context.SaveChanges();
 
     return Results.Created("/api/demo/seed", new
@@ -1658,7 +1662,7 @@ demo.MapPost("/seed", (HttpContext httpContext, IConfiguration configuration, Ca
     });
 });
 
-demo.MapDelete("/reset", (HttpContext httpContext, IConfiguration configuration, CareDbContext context, ITenantContext tenant) =>
+demo.MapDelete("/reset", (HttpContext httpContext, IConfiguration configuration, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (!DemoAccessAllowed(httpContext, configuration))
     {
@@ -1684,7 +1688,7 @@ demo.MapDelete("/reset", (HttpContext httpContext, IConfiguration configuration,
     context.Visits.RemoveRange(context.Visits.Where(item => demoServiceUserIds.Contains(item.ServiceUserId) || demoWorkerIds.Contains(item.CareWorkerId)));
     context.CareWorkers.RemoveRange(context.CareWorkers.Where(item => demoWorkerIds.Contains(item.Id)));
     context.ServiceUsers.RemoveRange(context.ServiceUsers.Where(item => demoServiceUserIds.Contains(item.Id)));
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "demo.reset", "system", "DemoData", null, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    AddAudit(context, tenant, currentUser, "demo.reset", "DemoData", null);
     var removed = context.SaveChanges();
     return Results.Ok(new { removedChanges = removed, serviceUsers = demoServiceUserIds.Count, careWorkers = demoWorkerIds.Count });
 });
@@ -1701,6 +1705,20 @@ static IResult? RequireAdministrator(ICurrentUserContext currentUser) =>
 
 static IResult? RequireAnyRole(ICurrentUserContext currentUser, params UserRole[] roles) =>
     currentUser.HasAnyRole(roles) ? null : Error("You do not have permission to access this resource.", StatusCodes.Status403Forbidden);
+
+static void AddAudit(CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string action, string entityType, Guid? entityId, Guid? organizationId = null, Guid? branchId = null)
+{
+    var actor = string.IsNullOrWhiteSpace(currentUser.UserName) ? "system" : currentUser.UserName;
+    context.AuditEvents.Add(new AuditEvent(
+        Guid.NewGuid(),
+        action,
+        actor,
+        entityType,
+        entityId,
+        DateTimeOffset.UtcNow,
+        organizationId ?? tenant.OrganizationId,
+        branchId ?? tenant.BranchId ?? TenantDefaults.BranchId));
+}
 
 static bool LooksLikeEmail(string value) => value.Contains('@', StringComparison.Ordinal) && value.Contains('.', StringComparison.Ordinal);
 

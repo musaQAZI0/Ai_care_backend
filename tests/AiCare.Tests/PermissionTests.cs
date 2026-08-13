@@ -232,6 +232,24 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
+    [Fact]
+    public async Task RepositoryActionsAuditCurrentUser()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+
+        var create = await client.PostAsJsonAsync("/api/phase1/care-workers", new
+        {
+            fullName = "Audited Worker",
+            specialization = "Medication support",
+            availability = "Weekdays"
+        });
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+
+        var audits = await client.GetFromJsonAsync<List<AuditResponse>>("/api/phase1/audit-events");
+        Assert.Contains(audits ?? [], audit => audit.Action == "care_worker.added" && audit.Actor == "admin");
+    }
+
     private static async Task Login(HttpClient client, string userName, string password)
     {
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password });
@@ -244,6 +262,7 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     private sealed record LoginResponse(string Token);
     private sealed record NotificationResponse(Guid Id, string Title, string Detail, DateTimeOffset CreatedAt, bool IsRead);
     private sealed record UnreadCountResponse(int Unread);
+    private sealed record AuditResponse(Guid Id, string Action, string Actor, string EntityType, Guid? EntityId, DateTimeOffset CreatedAt);
 }
 
 public sealed class AiCareApiFactory : WebApplicationFactory<Program>

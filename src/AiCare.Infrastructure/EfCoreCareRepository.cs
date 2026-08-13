@@ -10,11 +10,13 @@ public sealed class EfCoreCareRepository : ICareRepository
 {
     private readonly CareDbContext _context;
     private readonly ITenantContext _tenant;
+    private readonly ICurrentUserContext _currentUser;
 
-    public EfCoreCareRepository(CareDbContext context, ITenantContext tenant)
+    public EfCoreCareRepository(CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
     {
         _context = context;
         _tenant = tenant;
+        _currentUser = currentUser;
     }
 
     public IReadOnlyCollection<ServiceUser> GetServiceUsers() => Visible(_context.ServiceUsers).ToList();
@@ -579,7 +581,8 @@ public sealed class EfCoreCareRepository : ICareRepository
 
     private void AddAudit(string action, string actor, string entityType, Guid? entityId)
     {
-        _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), action, actor, entityType, entityId, DateTimeOffset.Now, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId));
+        var resolvedActor = string.IsNullOrWhiteSpace(_currentUser.UserName) ? actor : _currentUser.UserName;
+        _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), action, resolvedActor, entityType, entityId, DateTimeOffset.UtcNow, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId));
         _context.SaveChanges();
     }
 
