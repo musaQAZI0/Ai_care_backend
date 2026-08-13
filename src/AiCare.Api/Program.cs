@@ -6,6 +6,7 @@ using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,7 +25,9 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("JwtOptions"));
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? throw new InvalidOperationException("Missing DefaultConnection");
+var connectionString = NormalizePostgresConnectionString(
+    builder.Configuration.GetConnectionString("DefaultConnection")
+        ?? throw new InvalidOperationException("Missing DefaultConnection"));
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, HttpTenantContext>();
 builder.Services.AddHttpClient();
@@ -887,6 +890,28 @@ static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSp
 static bool LooksLikeEmail(string value) => value.Contains('@', StringComparison.Ordinal) && value.Contains('.', StringComparison.Ordinal);
 
 static bool TenantVisible(ITenantContext tenant, Guid? organizationId, Guid? branchId) => tenant.CanAccess(organizationId, branchId);
+
+static string NormalizePostgresConnectionString(string connectionString)
+{
+    if (!Uri.TryCreate(connectionString, UriKind.Absolute, out var uri) ||
+        (uri.Scheme != "postgres" && uri.Scheme != "postgresql"))
+    {
+        return connectionString;
+    }
+
+    var credentials = uri.UserInfo.Split(':', 2);
+    var builder = new NpgsqlConnectionStringBuilder
+    {
+        Host = uri.Host,
+        Port = uri.Port > 0 ? uri.Port : 5432,
+        Database = uri.AbsolutePath.TrimStart('/'),
+        Username = Uri.UnescapeDataString(credentials.ElementAtOrDefault(0) ?? string.Empty),
+        Password = Uri.UnescapeDataString(credentials.ElementAtOrDefault(1) ?? string.Empty),
+        SslMode = SslMode.Require
+    };
+
+    return builder.ConnectionString;
+}
 
 static async Task<string> UploadToLocalStorage(IFormFile file, string storedName, IWebHostEnvironment environment)
 {
