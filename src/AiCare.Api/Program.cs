@@ -76,6 +76,7 @@ using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<CareDbContext>();
     context.Database.Migrate();
+    EnsureRuntimeSchema(context);
 }
 
 app.UseCors("ReactClient");
@@ -1455,6 +1456,24 @@ static string NormalizePostgresConnectionString(string connectionString)
     };
 
     return builder.ConnectionString;
+}
+
+static void EnsureRuntimeSchema(CareDbContext context)
+{
+    if (!context.Database.IsNpgsql())
+    {
+        return;
+    }
+
+    context.Database.ExecuteSqlRaw("""
+        ALTER TABLE "AppUsers"
+        ADD COLUMN IF NOT EXISTS "CareWorkerId" uuid;
+        """);
+
+    context.Database.ExecuteSqlRaw("""
+        CREATE INDEX IF NOT EXISTS "IX_AppUsers_CareWorkerId"
+        ON "AppUsers" ("CareWorkerId");
+        """);
 }
 
 static (string Bucket, string ObjectKey) ParseSupabaseStoragePath(string storagePath)
