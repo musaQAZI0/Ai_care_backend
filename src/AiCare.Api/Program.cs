@@ -62,6 +62,11 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("Phase1User", policy => policy.RequireRole("ServiceUser", "FamilyMember", "CareWorker", "CareCoordinator", "CareManager", "Administrator", "BackOffice"));
 });
 
+builder.Services.Configure<RouteHandlerOptions>(options =>
+{
+    options.ThrowOnBadRequest = true;
+});
+
 builder.Services.AddControllers();
 
 var app = builder.Build();
