@@ -316,6 +316,73 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task VisitConflictEndpointDetectsOverlappingWorkerVisit()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+
+        var response = await client.PostAsJsonAsync("/api/phase1/visits/conflicts", new
+        {
+            serviceUserId = TestIds.ServiceUserId,
+            careWorkerId = TestIds.WorkerId,
+            startsAt = TestIds.VisitStartsAt.AddMinutes(15),
+            visitType = "Overlap",
+            durationMinutes = 30,
+            requiredSkills = "Personal care"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("hasConflicts\":true", body);
+    }
+
+    [Fact]
+    public async Task CreatingOverlappingVisitIsBlocked()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+
+        var response = await client.PostAsJsonAsync("/api/phase1/visits", new
+        {
+            serviceUserId = TestIds.ServiceUserId,
+            careWorkerId = TestIds.WorkerId,
+            startsAt = TestIds.VisitStartsAt.AddMinutes(15),
+            visitType = "Blocked overlap",
+            durationMinutes = 30,
+            requiredSkills = "Personal care"
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RecurringVisitCreatesSeriesAndRotaShowsItems()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+        var startsAt = TestIds.VisitStartsAt.AddDays(3);
+
+        var create = await client.PostAsJsonAsync("/api/phase1/visits/recurring", new
+        {
+            serviceUserId = TestIds.ServiceUserId,
+            careWorkerId = TestIds.WorkerId,
+            startsAt,
+            visitType = "Weekly demo visit",
+            durationMinutes = 30,
+            requiredSkills = "Personal care",
+            frequency = "Weekly",
+            occurrences = 3
+        });
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+
+        var rota = await client.GetAsync($"/api/phase1/rota?from={Uri.EscapeDataString(startsAt.AddDays(-1).ToString("O"))}&to={Uri.EscapeDataString(startsAt.AddDays(15).ToString("O"))}");
+        var body = await rota.Content.ReadAsStringAsync();
+
+        Assert.True(rota.StatusCode == HttpStatusCode.OK, $"Expected OK but got {(int)rota.StatusCode}: {body}");
+        Assert.Contains("Weekly demo visit", body);
+    }
+
     private static async Task Login(HttpClient client, string userName, string password)
     {
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password });
@@ -444,7 +511,7 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             TestIds.VisitId,
             TestIds.ServiceUserId,
             TestIds.WorkerId,
-            DateTimeOffset.UtcNow.AddDays(1),
+            TestIds.VisitStartsAt,
             "Morning visit",
             30,
             "Personal care",
@@ -510,6 +577,7 @@ internal static class TestIds
     public static readonly Guid OtherWorkerId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
     public static readonly Guid FamilyMemberId = Guid.Parse("44444444-aaaa-aaaa-aaaa-444444444444");
     public static readonly Guid VisitId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+    public static readonly DateTimeOffset VisitStartsAt = new(2026, 8, 20, 9, 0, 0, TimeSpan.Zero);
     public static readonly Guid MedicationId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
     public static readonly Guid MarId = Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");
     public static readonly Guid PayrollRunId = Guid.Parse("11111111-aaaa-aaaa-aaaa-111111111111");

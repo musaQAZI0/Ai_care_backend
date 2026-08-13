@@ -62,7 +62,10 @@ DELETE /api/phase1/care-workers/{id}
 
 GET    /api/phase1/visits
 GET    /api/phase1/visits/{id}
+GET    /api/phase1/rota?from=2026-08-20T00:00:00Z&to=2026-08-27T00:00:00Z
+POST   /api/phase1/visits/conflicts
 POST   /api/phase1/visits
+POST   /api/phase1/visits/recurring
 PUT    /api/phase1/visits/{id}
 PATCH  /api/phase1/visits/{id}/status
 POST   /api/phase1/visits/{id}/check-in

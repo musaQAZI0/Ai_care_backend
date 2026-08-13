@@ -449,6 +449,52 @@ phase1.MapGet("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantConte
     var observations = context.HealthObservations.AsNoTracking().Where(item => item.VisitId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.RecordedAt).ToList();
     return Results.Ok(new { visit, person, worker, notes, observations });
 });
+phase1.MapGet("/rota", (DateTimeOffset? from, DateTimeOffset? to, Guid? careWorkerId, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
+    var start = from ?? DateTimeOffset.UtcNow.Date;
+    var end = to ?? start.AddDays(7);
+    if (end <= start || end.Subtract(start).TotalDays > 62)
+    {
+        return Error("Rota date range must be between 1 and 62 days.");
+    }
+
+    var visits = context.Visits.AsNoTracking()
+        .AsEnumerable()
+        .Where(visit => TenantVisible(tenant, visit.OrganizationId, visit.BranchId))
+        .Where(visit => visit.StartsAt >= start && visit.StartsAt < end && (careWorkerId == null || visit.CareWorkerId == careWorkerId))
+        .OrderBy(visit => visit.StartsAt)
+        .ToList();
+    var workerIds = visits.Select(visit => visit.CareWorkerId).Distinct().ToList();
+    var serviceUserIds = visits.Select(visit => visit.ServiceUserId).Distinct().ToList();
+    var workers = context.CareWorkers.AsNoTracking().Where(worker => workerIds.Contains(worker.Id)).ToDictionary(worker => worker.Id);
+    var serviceUsers = context.ServiceUsers.AsNoTracking().Where(user => serviceUserIds.Contains(user.Id)).ToDictionary(user => user.Id);
+    return Results.Ok(visits.Select(visit => new
+    {
+        visit,
+        careWorkerName = workers.TryGetValue(visit.CareWorkerId, out var worker) ? worker.FullName : "",
+        serviceUserName = serviceUsers.TryGetValue(visit.ServiceUserId, out var serviceUser) ? serviceUser.FullName : "",
+        conflicts = FindVisitConflicts(context, tenant, visit.CareWorkerId, visit.StartsAt, visit.DurationMinutes, visit.Id).Count
+    }));
+});
+phase1.MapPost("/visits/conflicts", (CreateVisitRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
+    if (request.CareWorkerId == Guid.Empty || request.DurationMinutes <= 0)
+    {
+        return Error("Care worker and a positive duration are required.");
+    }
+
+    var validation = ValidateCareWorkerReference(request.CareWorkerId, context, tenant);
+    if (validation is not null) return validation;
+
+    var conflicts = FindVisitConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes);
+    return Results.Ok(new { hasConflicts = conflicts.Count > 0, conflicts });
+});
 phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
@@ -461,6 +507,12 @@ phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repositor
 
     var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant);
     if (validation is not null) return validation;
+
+    var conflicts = FindVisitConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes);
+    if (conflicts.Count > 0)
+    {
+        return Error("Care worker already has a conflicting visit.");
+    }
 
     var visit = repository.AddVisit(request);
     return Results.Created($"/api/phase1/visits/{visit.Id}", visit);
@@ -478,8 +530,61 @@ phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRe
     var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant);
     if (validation is not null) return validation;
 
+    var conflicts = FindVisitConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes, id);
+    if (conflicts.Count > 0)
+    {
+        return Error("Care worker already has a conflicting visit.");
+    }
+
     var visit = repository.UpdateVisit(id, request);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
+});
+phase1.MapPost("/visits/recurring", (CreateRecurringVisitRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
+    if (request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || Missing(request.VisitType, request.Frequency) || request.DurationMinutes <= 0 || request.Occurrences <= 0)
+    {
+        return Error("Service user, care worker, visit type, frequency, duration, and occurrences are required.");
+    }
+
+    if (request.Occurrences > 60)
+    {
+        return Error("Recurring visit generation is limited to 60 occurrences.");
+    }
+
+    var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant);
+    if (validation is not null) return validation;
+
+    var starts = ExpandRecurringStarts(request.StartsAt, request.Frequency, request.Occurrences).ToList();
+    var conflicts = starts.SelectMany(startsAt => FindVisitConflicts(context, tenant, request.CareWorkerId, startsAt, request.DurationMinutes)).ToList();
+    if (conflicts.Count > 0)
+    {
+        return Error("Recurring series has conflicts. Use /api/phase1/visits/conflicts to inspect the rota.");
+    }
+
+    var visits = starts.Select(startsAt => new Visit(
+        Guid.NewGuid(),
+        request.ServiceUserId,
+        request.CareWorkerId,
+        startsAt,
+        request.VisitType,
+        request.DurationMinutes,
+        request.RequiredSkills,
+        VisitStatus.Scheduled,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        tenant.OrganizationId,
+        tenant.BranchId ?? TenantDefaults.BranchId)).ToList();
+    context.Visits.AddRange(visits);
+    AddAudit(context, tenant, currentUser, $"visit.recurring_scheduled:{visits.Count}", nameof(Visit), visits.First().Id);
+    context.SaveChanges();
+    return Results.Created("/api/phase1/visits/recurring", new { count = visits.Count, visits });
 });
 phase1.MapPatch("/visits/{id:guid}/status", (Guid id, UpdateVisitStatusRequest request, ICareRepository repository, ICurrentUserContext currentUser) =>
 {
@@ -1937,6 +2042,47 @@ static IResult? ValidateCareNoteReferences(Guid visitId, Guid serviceUserId, Gui
     return ValidateVisitReferences(serviceUserId, careWorkerId, context, tenant);
 }
 
+static List<object> FindVisitConflicts(CareDbContext context, ITenantContext tenant, Guid careWorkerId, DateTimeOffset startsAt, int durationMinutes, Guid? excludeVisitId = null)
+{
+    var endsAt = startsAt.AddMinutes(durationMinutes);
+    return context.Visits.AsNoTracking()
+        .Where(visit => visit.CareWorkerId == careWorkerId && (excludeVisitId == null || visit.Id != excludeVisitId))
+        .AsEnumerable()
+        .Where(visit => TenantVisible(tenant, visit.OrganizationId, visit.BranchId))
+        .Where(visit =>
+        {
+            var visitEndsAt = visit.StartsAt.AddMinutes(visit.DurationMinutes);
+            return startsAt < visitEndsAt && endsAt > visit.StartsAt;
+        })
+        .OrderBy(visit => visit.StartsAt)
+        .Select(visit => new
+        {
+            visit.Id,
+            visit.ServiceUserId,
+            visit.CareWorkerId,
+            visit.StartsAt,
+            visit.DurationMinutes,
+            visit.VisitType,
+            visit.Status
+        })
+        .Cast<object>()
+        .ToList();
+}
+
+static IEnumerable<DateTimeOffset> ExpandRecurringStarts(DateTimeOffset startsAt, string frequency, int occurrences)
+{
+    for (var index = 0; index < occurrences; index++)
+    {
+        yield return frequency.Trim().ToLowerInvariant() switch
+        {
+            "daily" => startsAt.AddDays(index),
+            "weekly" => startsAt.AddDays(index * 7),
+            "fortnightly" => startsAt.AddDays(index * 14),
+            _ => throw new InvalidOperationException("Frequency must be Daily, Weekly, or Fortnightly.")
+        };
+    }
+}
+
 static IResult? ValidateMedicationAdministrationReferences(Guid medicationId, Guid visitId, Guid careWorkerId, CareDbContext context, ITenantContext tenant)
 {
     var medication = context.Medications.AsNoTracking().FirstOrDefault(item => item.Id == medicationId);
@@ -2153,6 +2299,7 @@ public sealed record BuildReportRequest(string Name, string Category, string Sch
 public sealed record SendNotificationRequest(string Channel, string Title, string Detail);
 public sealed record InvestigateIncidentRequest(string Outcome, string ActionPlan, bool CloseIncident);
 public sealed record AiSummaryRequest(Guid? ServiceUserId);
+public sealed record CreateRecurringVisitRequest(Guid ServiceUserId, Guid CareWorkerId, DateTimeOffset StartsAt, string VisitType, int DurationMinutes, string RequiredSkills, string Frequency, int Occurrences);
 public sealed record CreateMedicationRequest(Guid ServiceUserId, string Name, string Dosage, string Route, string Schedule, bool IsPrn, string Pharmacy, string AllergyWarning);
 public sealed record CreateMedicationAdministrationRecordRequest(Guid MedicationId, Guid VisitId, Guid CareWorkerId, DateTimeOffset ScheduledAt, string Notes);
 public sealed record CompleteMedicationAdministrationRequest(DateTimeOffset? AdministeredAt, string Notes);

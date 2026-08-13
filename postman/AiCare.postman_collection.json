@@ -693,6 +693,64 @@
                                                   }
                                   }
                               ]
+                 },
+                 {
+                     "name":  "Scheduling Rota",
+                     "item":  [
+                                  {
+                                      "name":  "Rota Range",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 },
+                                                      "url":  "{{baseUrl}}/api/phase1/rota?from=2026-08-20T00:00:00Z\u0026to=2026-08-27T00:00:00Z"
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Check Visit Conflicts",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "url":  "{{baseUrl}}/api/phase1/visits/conflicts",
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"serviceUserId\": \"{{serviceUserId}}\",\n  \"careWorkerId\": \"{{careWorkerId}}\",\n  \"startsAt\": \"2026-08-20T09:15:00Z\",\n  \"visitType\": \"Conflict check\",\n  \"durationMinutes\": 30,\n  \"requiredSkills\": \"Personal care\"\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Create Recurring Visits",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "url":  "{{baseUrl}}/api/phase1/visits/recurring",
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"serviceUserId\": \"{{serviceUserId}}\",\n  \"careWorkerId\": \"{{careWorkerId}}\",\n  \"startsAt\": \"2026-08-22T09:00:00Z\",\n  \"visitType\": \"Weekly care visit\",\n  \"durationMinutes\": 30,\n  \"requiredSkills\": \"Personal care\",\n  \"frequency\": \"Weekly\",\n  \"occurrences\": 4\n}"
+                                                               }
+                                                  }
+                                  }
+                              ]
                  }
              ]
 }
