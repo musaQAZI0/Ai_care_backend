@@ -670,7 +670,100 @@ phase1.MapPut("/documents/{id:guid}", (Guid id, CreateDocumentRequest request, I
 phase1.MapDelete("/documents/{id:guid}", (Guid id, ICareRepository repository) =>
     repository.DeleteDocument(id) ? Results.NoContent() : Results.NotFound());
 phase1.MapGet("/medications", (ICareRepository repository) => Results.Ok(repository.GetMedications()));
+phase1.MapGet("/medications/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var medication = context.Medications.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId) ? Results.NotFound() : Results.Ok(medication);
+});
+phase1.MapPost("/medications", (CreateMedicationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
+    if (request.ServiceUserId == Guid.Empty || Missing(request.Name, request.Dosage, request.Route, request.Schedule))
+    {
+        return Error("Service user, medication name, dosage, route, and schedule are required.");
+    }
+
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
+
+    var medication = new Medication(Guid.NewGuid(), request.ServiceUserId, request.Name, request.Dosage, request.Route, request.Schedule, request.IsPrn, request.Pharmacy, request.AllergyWarning, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    context.Medications.Add(medication);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.created", currentUser.UserName, nameof(Medication), medication.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Created($"/api/phase1/medications/{medication.Id}", medication);
+});
+phase1.MapPut("/medications/{id:guid}", (Guid id, CreateMedicationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
+    if (request.ServiceUserId == Guid.Empty || Missing(request.Name, request.Dosage, request.Route, request.Schedule))
+    {
+        return Error("Service user, medication name, dosage, route, and schedule are required.");
+    }
+
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
+
+    var medication = context.Medications.Find(id);
+    if (medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId)) return Results.NotFound();
+
+    var updated = medication with
+    {
+        ServiceUserId = request.ServiceUserId,
+        Name = request.Name,
+        Dosage = request.Dosage,
+        Route = request.Route,
+        Schedule = request.Schedule,
+        IsPrn = request.IsPrn,
+        Pharmacy = request.Pharmacy,
+        AllergyWarning = request.AllergyWarning
+    };
+    context.Medications.Update(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.updated", currentUser.UserName, nameof(Medication), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(updated);
+});
+phase1.MapDelete("/medications/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
+    var medication = context.Medications.Find(id);
+    if (medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId)) return Results.NotFound();
+    context.Medications.Remove(medication);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.deleted", currentUser.UserName, nameof(Medication), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.NoContent();
+});
 phase1.MapGet("/mar", (ICareRepository repository) => Results.Ok(repository.GetMedicationAdministrationRecords()));
+phase1.MapGet("/mar/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var record = context.MedicationAdministrationRecords.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return record is null || !tenant.CanAccess(record.OrganizationId, record.BranchId) ? Results.NotFound() : Results.Ok(record);
+});
+phase1.MapPost("/mar", (CreateMedicationAdministrationRecordRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
+    var validation = ValidateMedicationAdministrationReferences(request.MedicationId, request.VisitId, request.CareWorkerId, context, tenant);
+    if (validation is not null) return validation;
+
+    var record = new MedicationAdministrationRecord(Guid.NewGuid(), request.MedicationId, request.VisitId, request.CareWorkerId, request.ScheduledAt, null, "Scheduled", request.Notes, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    context.MedicationAdministrationRecords.Add(record);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "emar.scheduled", currentUser.UserName, nameof(MedicationAdministrationRecord), record.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Created($"/api/phase1/mar/{record.Id}", record);
+});
+phase1.MapPost("/mar/{id:guid}/administer", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+    CompleteMedicationAdministration(id, "Administered", request, context, tenant, currentUser));
+phase1.MapPost("/mar/{id:guid}/skip", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+    CompleteMedicationAdministration(id, "Skipped", request, context, tenant, currentUser));
+phase1.MapPost("/mar/{id:guid}/refuse", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+    CompleteMedicationAdministration(id, "Refused", request, context, tenant, currentUser));
 phase1.MapGet("/care-notes", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (!currentUser.IsCareWorker)
@@ -1524,6 +1617,53 @@ static IResult? ValidateCareNoteReferences(Guid visitId, Guid serviceUserId, Gui
     return ValidateVisitReferences(serviceUserId, careWorkerId, context, tenant);
 }
 
+static IResult? ValidateMedicationAdministrationReferences(Guid medicationId, Guid visitId, Guid careWorkerId, CareDbContext context, ITenantContext tenant)
+{
+    var medication = context.Medications.AsNoTracking().FirstOrDefault(item => item.Id == medicationId);
+    if (medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId))
+    {
+        return Error("Medication does not exist or is not accessible.");
+    }
+
+    var visit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == visitId);
+    if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId))
+    {
+        return Error("Visit does not exist or is not accessible.");
+    }
+
+    if (visit.CareWorkerId != careWorkerId)
+    {
+        return Error("Medication record care worker must match the visit.");
+    }
+
+    if (visit.ServiceUserId != medication.ServiceUserId)
+    {
+        return Error("Medication and visit must belong to the same service user.");
+    }
+
+    return ValidateCareWorkerReference(careWorkerId, context, tenant);
+}
+
+static IResult CompleteMedicationAdministration(Guid id, string outcome, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+{
+    var record = context.MedicationAdministrationRecords.Find(id);
+    if (record is null || !tenant.CanAccess(record.OrganizationId, record.BranchId)) return Results.NotFound();
+
+    var denied = RequireAssignedVisitForCareWorker(record.VisitId, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
+    var completed = record with
+    {
+        AdministeredAt = request.AdministeredAt ?? DateTimeOffset.UtcNow,
+        Outcome = outcome,
+        Notes = request.Notes
+    };
+    context.Entry(record).CurrentValues.SetValues(completed);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"emar.{outcome.ToLowerInvariant()}", currentUser.UserName, nameof(MedicationAdministrationRecord), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(completed);
+}
+
 static bool DemoAccessAllowed(HttpContext httpContext, IConfiguration configuration)
 {
     if (!string.Equals(configuration["Demo:Enabled"], "true", StringComparison.OrdinalIgnoreCase))
@@ -1683,6 +1823,9 @@ public sealed record BuildReportRequest(string Name, string Category, string Sch
 public sealed record SendNotificationRequest(string Channel, string Title, string Detail);
 public sealed record InvestigateIncidentRequest(string Outcome, string ActionPlan, bool CloseIncident);
 public sealed record AiSummaryRequest(Guid? ServiceUserId);
+public sealed record CreateMedicationRequest(Guid ServiceUserId, string Name, string Dosage, string Route, string Schedule, bool IsPrn, string Pharmacy, string AllergyWarning);
+public sealed record CreateMedicationAdministrationRecordRequest(Guid MedicationId, Guid VisitId, Guid CareWorkerId, DateTimeOffset ScheduledAt, string Notes);
+public sealed record CompleteMedicationAdministrationRequest(DateTimeOffset? AdministeredAt, string Notes);
 public sealed record CreateOrganizationRequest(string Name, string Plan);
 public sealed record CreateBranchRequest(string Name, string Region, Guid? OrganizationId);
 public sealed record FamilyPreferencesRequest(bool EmailNotifications, bool SmsNotifications, bool MonthlyDigest, bool IncidentAlerts);

@@ -108,6 +108,37 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
+    [Fact]
+    public async Task AssignedCareWorkerCanAdministerMedication()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "worker", "WorkerPassword123!");
+
+        var response = await client.PostAsJsonAsync($"/api/phase1/mar/{TestIds.MarId}/administer", new
+        {
+            administeredAt = DateTimeOffset.UtcNow,
+            notes = "Taken with breakfast"
+        });
+
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.OK, $"Expected OK but got {(int)response.StatusCode}: {body}");
+    }
+
+    [Fact]
+    public async Task OtherCareWorkerCannotAdministerMedication()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "other-worker", "OtherWorkerPassword123!");
+
+        var response = await client.PostAsJsonAsync($"/api/phase1/mar/{TestIds.MarId}/administer", new
+        {
+            administeredAt = DateTimeOffset.UtcNow,
+            notes = "Should be blocked"
+        });
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
     private static async Task Login(HttpClient client, string userName, string password)
     {
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password });
@@ -160,6 +191,8 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
     private static void Seed(CareDbContext context)
     {
         context.AppUsers.RemoveRange(context.AppUsers);
+        context.MedicationAdministrationRecords.RemoveRange(context.MedicationAdministrationRecords);
+        context.Medications.RemoveRange(context.Medications);
         context.ServiceUsers.RemoveRange(context.ServiceUsers);
         context.CareWorkers.RemoveRange(context.CareWorkers);
         context.Visits.RemoveRange(context.Visits);
@@ -208,6 +241,29 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             null,
             TenantDefaults.OrganizationId,
             TenantDefaults.BranchId));
+        context.Medications.Add(new Medication(
+            TestIds.MedicationId,
+            TestIds.ServiceUserId,
+            "Paracetamol",
+            "500mg",
+            "Oral",
+            "Morning",
+            false,
+            "Test Pharmacy",
+            "Check allergies",
+            TenantDefaults.OrganizationId,
+            TenantDefaults.BranchId));
+        context.MedicationAdministrationRecords.Add(new MedicationAdministrationRecord(
+            TestIds.MarId,
+            TestIds.MedicationId,
+            TestIds.VisitId,
+            TestIds.WorkerId,
+            DateTimeOffset.UtcNow.AddHours(1),
+            null,
+            "Scheduled",
+            "Due with breakfast",
+            TenantDefaults.OrganizationId,
+            TenantDefaults.BranchId));
         context.AppUsers.AddRange(
             new AppUser(Guid.NewGuid(), "admin", "admin@test.local", PasswordHasher.HashPassword("AdminPassword123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId),
             new AppUser(Guid.NewGuid(), "worker", "worker@test.local", PasswordHasher.HashPassword("WorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.WorkerId),
@@ -222,4 +278,6 @@ internal static class TestIds
     public static readonly Guid WorkerId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
     public static readonly Guid OtherWorkerId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
     public static readonly Guid VisitId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+    public static readonly Guid MedicationId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+    public static readonly Guid MarId = Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");
 }
