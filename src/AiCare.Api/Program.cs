@@ -393,8 +393,11 @@ phase1.MapGet("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantConte
     var observations = context.HealthObservations.AsNoTracking().Where(item => item.VisitId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.RecordedAt).ToList();
     return Results.Ok(new { visit, person, worker, notes, observations });
 });
-phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
     if (request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || string.IsNullOrWhiteSpace(request.VisitType) || request.DurationMinutes <= 0)
     {
         return Error("Service user, care worker, visit type, and a positive duration are required.");
@@ -406,8 +409,11 @@ phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repositor
     var visit = repository.AddVisit(request);
     return Results.Created($"/api/phase1/visits/{visit.Id}", visit);
 });
-phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
     if (request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || string.IsNullOrWhiteSpace(request.VisitType) || request.DurationMinutes <= 0)
     {
         return Error("Service user, care worker, visit type, and a positive duration are required.");
@@ -419,13 +425,19 @@ phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRe
     var visit = repository.UpdateVisit(id, request);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
 });
-phase1.MapPatch("/visits/{id:guid}/status", (Guid id, UpdateVisitStatusRequest request, ICareRepository repository) =>
+phase1.MapPatch("/visits/{id:guid}/status", (Guid id, UpdateVisitStatusRequest request, ICareRepository repository, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
     var visit = repository.UpdateVisitStatus(id, request.Status);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
 });
-phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
+
     var visit = context.Visits.Find(id);
     if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return Results.NotFound();
     context.Visits.Remove(visit);
@@ -433,13 +445,19 @@ phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantCo
     context.SaveChanges();
     return Results.NoContent();
 });
-phase1.MapPost("/visits/{id:guid}/check-in", (Guid id, VisitCheckInRequest request, ICareRepository repository) =>
+phase1.MapPost("/visits/{id:guid}/check-in", (Guid id, VisitCheckInRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAssignedVisitForCareWorker(id, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var visit = repository.CheckInVisit(id, request);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
 });
-phase1.MapPost("/visits/{id:guid}/check-out", (Guid id, VisitCheckOutRequest request, ICareRepository repository) =>
+phase1.MapPost("/visits/{id:guid}/check-out", (Guid id, VisitCheckOutRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAssignedVisitForCareWorker(id, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var visit = repository.CheckOutVisit(id, request);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
 });
@@ -666,7 +684,7 @@ phase1.MapGet("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantC
     var note = context.CareNotes.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId) ? Results.NotFound() : Results.Ok(note);
 });
-phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (request.VisitId == Guid.Empty || request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || Missing(request.Summary))
     {
@@ -676,15 +694,24 @@ phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository re
     var validation = ValidateCareNoteReferences(request.VisitId, request.ServiceUserId, request.CareWorkerId, context, tenant);
     if (validation is not null) return validation;
 
+    var denied = RequireAssignedVisitForCareWorker(request.VisitId, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var note = repository.AddCareNote(request);
     return Results.Created($"/api/phase1/care-notes/{note.Id}", note);
 });
-phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (request.VisitId == Guid.Empty || request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || Missing(request.Summary))
     {
         return Error("Visit, service user, care worker, and summary are required.");
     }
+
+    var validation = ValidateCareNoteReferences(request.VisitId, request.ServiceUserId, request.CareWorkerId, context, tenant);
+    if (validation is not null) return validation;
+
+    var denied = RequireAssignedVisitForCareWorker(request.VisitId, context, tenant, currentUser);
+    if (denied is not null) return denied;
 
     var note = context.CareNotes.Find(id);
     if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
@@ -705,10 +732,13 @@ phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, 
     context.SaveChanges();
     return Results.Ok(updated);
 });
-phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var note = context.CareNotes.Find(id);
     if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
+    var denied = RequireAssignedVisitForCareWorker(note.VisitId, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     context.CareNotes.Remove(note);
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_note.deleted", "system", nameof(CareNote), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
@@ -743,7 +773,7 @@ phase1.MapGet("/incidents/{id:guid}", (Guid id, CareDbContext context, ITenantCo
     var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId) ? Results.NotFound() : Results.Ok(incident);
 });
-phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.Category, request.Severity, request.Description))
     {
@@ -753,16 +783,38 @@ phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository rep
     var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
     if (validation is not null) return validation;
 
+    var denied = RequireIncidentAccessForCareWorker(request, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var incident = repository.AddIncident(request);
     return Results.Created($"/api/phase1/incidents/{incident.Id}", incident);
 });
-phase1.MapPut("/incidents/{id:guid}", (Guid id, CreateIncidentRequest request, ICareRepository repository) =>
+phase1.MapPut("/incidents/{id:guid}", (Guid id, CreateIncidentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var incidentToUpdate = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    if (incidentToUpdate is null || !tenant.CanAccess(incidentToUpdate.OrganizationId, incidentToUpdate.BranchId)) return Results.NotFound();
+
+    var denied = RequireIncidentAccessForCareWorker(request, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var incident = repository.UpdateIncident(id, request);
     return incident is null ? Results.NotFound() : Results.Ok(incident);
 });
-phase1.MapDelete("/incidents/{id:guid}", (Guid id, ICareRepository repository) =>
-    repository.DeleteIncident(id) ? Results.NoContent() : Results.NotFound());
+phase1.MapDelete("/incidents/{id:guid}", (Guid id, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    if (incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId)) return Results.NotFound();
+
+    if (incident.VisitId is null && currentUser.IsCareWorker)
+    {
+        return Error("Care workers can only manage incidents linked to assigned visits.", StatusCodes.Status403Forbidden);
+    }
+
+    var denied = incident.VisitId is null ? null : RequireAssignedVisitForCareWorker(incident.VisitId.Value, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
+    return repository.DeleteIncident(id) ? Results.NoContent() : Results.NotFound();
+});
 phase1.MapGet("/ai/risk-alerts", (ICareRepository repository) => Results.Ok(repository.GetAiRiskAlerts()));
 phase1.MapGet("/payroll-runs", (ICareRepository repository, ICurrentUserContext currentUser) =>
 {
@@ -1367,6 +1419,55 @@ static IResult? RequireAnyRole(ICurrentUserContext currentUser, params UserRole[
 static bool LooksLikeEmail(string value) => value.Contains('@', StringComparison.Ordinal) && value.Contains('.', StringComparison.Ordinal);
 
 static bool TenantVisible(ITenantContext tenant, Guid? organizationId, Guid? branchId) => tenant.CanAccess(organizationId, branchId);
+
+static IResult? RequireAssignedVisitForCareWorker(Guid visitId, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+{
+    if (!currentUser.IsCareWorker)
+    {
+        return null;
+    }
+
+    if (currentUser.CareWorkerId is null)
+    {
+        return Error("Care worker account is not linked to a care worker profile.", StatusCodes.Status403Forbidden);
+    }
+
+    var visit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == visitId);
+    if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId))
+    {
+        return Results.NotFound();
+    }
+
+    return visit.CareWorkerId == currentUser.CareWorkerId
+        ? null
+        : Error("Care workers can only access their assigned visits.", StatusCodes.Status403Forbidden);
+}
+
+static IResult? RequireIncidentAccessForCareWorker(CreateIncidentRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+{
+    if (!currentUser.IsCareWorker)
+    {
+        return null;
+    }
+
+    if (request.VisitId is null)
+    {
+        return Error("Care workers can only manage incidents linked to assigned visits.", StatusCodes.Status403Forbidden);
+    }
+
+    var denied = RequireAssignedVisitForCareWorker(request.VisitId.Value, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
+    var visit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == request.VisitId.Value);
+    if (visit is null)
+    {
+        return Results.NotFound();
+    }
+
+    return visit.ServiceUserId == request.ServiceUserId
+        ? null
+        : Error("Incident service user must match the assigned visit.", StatusCodes.Status403Forbidden);
+}
 
 static IResult? ValidateServiceUserReference(Guid serviceUserId, CareDbContext context, ITenantContext tenant)
 {
