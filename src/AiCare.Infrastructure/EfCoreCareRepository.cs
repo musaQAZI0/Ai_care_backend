@@ -511,7 +511,7 @@ public sealed class EfCoreCareRepository : ICareRepository
     public IReadOnlyCollection<AdminUser> GetAdminUsers() => _context.AppUsers
         .AsNoTracking()
         .Where(user => _tenant.IsPlatformOwner || user.OrganizationId == _tenant.OrganizationId && (_tenant.IsOrganizationWide || _tenant.BranchId == null || user.BranchId == null || user.BranchId == _tenant.BranchId))
-        .Select(user => new AdminUser(user.Id, user.UserName, user.Email, user.Role, user.IsActive ? "Active" : "Suspended", user.OrganizationId, user.BranchId))
+        .Select(user => new AdminUser(user.Id, user.UserName, user.Email, user.Role, user.IsActive ? "Active" : "Suspended", user.OrganizationId, user.BranchId, user.CareWorkerId))
         .ToList();
 
     public AdminUser AddAdminUser(CreateAdminUserRequest request)
@@ -543,12 +543,13 @@ public sealed class EfCoreCareRepository : ICareRepository
             request.Role,
             true,
             organizationId,
-            branchId);
+            branchId,
+            request.CareWorkerId);
 
         _context.AppUsers.Add(user);
         AddAudit("admin.user_created", "system", nameof(AppUser), user.Id);
         _context.SaveChanges();
-        return new AdminUser(user.Id, user.UserName, user.Email, user.Role, "Active", user.OrganizationId, user.BranchId);
+        return new AdminUser(user.Id, user.UserName, user.Email, user.Role, "Active", user.OrganizationId, user.BranchId, user.CareWorkerId);
     }
 
     public AdminUser? UpdateUserRole(Guid id, UserRole role)
@@ -563,7 +564,7 @@ public sealed class EfCoreCareRepository : ICareRepository
         _context.AppUsers.Update(updated);
         AddAudit("admin.role_updated", "system", nameof(AppUser), id);
         _context.SaveChanges();
-        return new AdminUser(updated.Id, updated.UserName, updated.Email, updated.Role, updated.IsActive ? "Active" : "Suspended", updated.OrganizationId, updated.BranchId);
+        return new AdminUser(updated.Id, updated.UserName, updated.Email, updated.Role, updated.IsActive ? "Active" : "Suspended", updated.OrganizationId, updated.BranchId, updated.CareWorkerId);
     }
 
     public IReadOnlyCollection<AuditEvent> GetAuditEvents() => Visible(_context.AuditEvents).ToList();

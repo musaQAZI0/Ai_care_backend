@@ -45,6 +45,7 @@ public class AuthController : ControllerBase
             new Claim(ClaimTypes.Email, user.Email),
             new Claim("organization_id", (user.OrganizationId ?? AiCare.Domain.TenantDefaults.OrganizationId).ToString()),
             new Claim("branch_id", user.BranchId?.ToString() ?? string.Empty),
+            new Claim("care_worker_id", user.CareWorkerId?.ToString() ?? string.Empty),
         };
 
         var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtOptions.SigningKey));

@@ -178,7 +178,30 @@ phase1.MapGet("/dashboard", (CareDbContext context, ITenantContext tenant) =>
     });
 });
 
-phase1.MapGet("/service-users", (ICareRepository repository) => Results.Ok(repository.GetServiceUsers()));
+phase1.MapGet("/service-users", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    if (!currentUser.IsCareWorker)
+    {
+        return Results.Ok(repository.GetServiceUsers());
+    }
+
+    if (currentUser.CareWorkerId is null)
+    {
+        return Results.Ok(Array.Empty<ServiceUser>());
+    }
+
+    var serviceUserIds = context.Visits.AsNoTracking()
+        .Where(visit => visit.CareWorkerId == currentUser.CareWorkerId)
+        .AsEnumerable()
+        .Where(visit => TenantVisible(tenant, visit.OrganizationId, visit.BranchId))
+        .Select(visit => visit.ServiceUserId)
+        .Distinct()
+        .ToList();
+    var serviceUsers = context.ServiceUsers.AsNoTracking()
+        .Where(user => serviceUserIds.Contains(user.Id))
+        .ToList();
+    return Results.Ok(serviceUsers);
+});
 phase1.MapGet("/service-users/{id:guid}", (Guid id, ICareRepository repository) =>
 {
     var serviceUser = repository.GetServiceUser(id);
@@ -284,7 +307,25 @@ phase1.MapPost("/care-plans/{id:guid}/approve", (Guid id, CareDbContext context,
     return Results.Ok(approved);
 });
 
-phase1.MapGet("/care-workers", (ICareRepository repository) => Results.Ok(repository.GetCareWorkers()));
+phase1.MapGet("/care-workers", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    if (!currentUser.IsCareWorker)
+    {
+        return Results.Ok(repository.GetCareWorkers());
+    }
+
+    if (currentUser.CareWorkerId is null)
+    {
+        return Results.Ok(Array.Empty<CareWorker>());
+    }
+
+    var worker = context.CareWorkers.AsNoTracking()
+        .Where(item => item.Id == currentUser.CareWorkerId)
+        .AsEnumerable()
+        .Where(item => TenantVisible(tenant, item.OrganizationId, item.BranchId))
+        .ToList();
+    return Results.Ok(worker);
+});
 phase1.MapGet("/care-workers/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
 {
     var worker = context.CareWorkers.AsNoTracking().FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
@@ -322,7 +363,25 @@ phase1.MapDelete("/care-workers/{id:guid}", (Guid id, CareDbContext context, ITe
     return Results.NoContent();
 });
 
-phase1.MapGet("/visits", (ICareRepository repository) => Results.Ok(repository.GetVisits()));
+phase1.MapGet("/visits", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    if (!currentUser.IsCareWorker)
+    {
+        return Results.Ok(repository.GetVisits());
+    }
+
+    if (currentUser.CareWorkerId is null)
+    {
+        return Results.Ok(Array.Empty<Visit>());
+    }
+
+    var visits = context.Visits.AsNoTracking()
+        .Where(visit => visit.CareWorkerId == currentUser.CareWorkerId)
+        .AsEnumerable()
+        .Where(visit => TenantVisible(tenant, visit.OrganizationId, visit.BranchId))
+        .ToList();
+    return Results.Ok(visits);
+});
 phase1.MapGet("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
 {
     var visit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
@@ -582,7 +641,25 @@ phase1.MapDelete("/documents/{id:guid}", (Guid id, ICareRepository repository) =
     repository.DeleteDocument(id) ? Results.NoContent() : Results.NotFound());
 phase1.MapGet("/medications", (ICareRepository repository) => Results.Ok(repository.GetMedications()));
 phase1.MapGet("/mar", (ICareRepository repository) => Results.Ok(repository.GetMedicationAdministrationRecords()));
-phase1.MapGet("/care-notes", (ICareRepository repository) => Results.Ok(repository.GetCareNotes()));
+phase1.MapGet("/care-notes", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    if (!currentUser.IsCareWorker)
+    {
+        return Results.Ok(repository.GetCareNotes());
+    }
+
+    if (currentUser.CareWorkerId is null)
+    {
+        return Results.Ok(Array.Empty<CareNote>());
+    }
+
+    var notes = context.CareNotes.AsNoTracking()
+        .Where(note => note.CareWorkerId == currentUser.CareWorkerId)
+        .AsEnumerable()
+        .Where(note => TenantVisible(tenant, note.OrganizationId, note.BranchId))
+        .ToList();
+    return Results.Ok(notes);
+});
 phase1.MapGet("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
 {
     var note = context.CareNotes.AsNoTracking().FirstOrDefault(item => item.Id == id);
@@ -637,7 +714,29 @@ phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITena
     return Results.NoContent();
 });
 phase1.MapGet("/observations", (ICareRepository repository) => Results.Ok(repository.GetHealthObservations()));
-phase1.MapGet("/incidents", (ICareRepository repository) => Results.Ok(repository.GetIncidents()));
+phase1.MapGet("/incidents", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    if (!currentUser.IsCareWorker)
+    {
+        return Results.Ok(repository.GetIncidents());
+    }
+
+    if (currentUser.CareWorkerId is null)
+    {
+        return Results.Ok(Array.Empty<Incident>());
+    }
+
+    var assignedVisitIds = context.Visits.AsNoTracking()
+        .Where(visit => visit.CareWorkerId == currentUser.CareWorkerId)
+        .AsEnumerable()
+        .Where(visit => TenantVisible(tenant, visit.OrganizationId, visit.BranchId))
+        .Select(visit => visit.Id)
+        .ToList();
+    var incidents = context.Incidents.AsNoTracking()
+        .Where(incident => incident.VisitId != null && assignedVisitIds.Contains(incident.VisitId.Value))
+        .ToList();
+    return Results.Ok(incidents);
+});
 phase1.MapGet("/incidents/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
 {
     var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
@@ -794,7 +893,7 @@ phase1.MapGet("/admin/users", (ICareRepository repository, ICurrentUserContext c
     var denied = RequireAdministrator(currentUser);
     return denied ?? Results.Ok(repository.GetAdminUsers());
 });
-phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository repository, ICurrentUserContext currentUser) =>
+phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository repository, ICurrentUserContext currentUser, CareDbContext context, ITenantContext tenant) =>
 {
     var denied = RequireAdministrator(currentUser);
     if (denied is not null) return denied;
@@ -807,6 +906,17 @@ phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository 
     if (request.Password.Length < 10)
     {
         return Error("Password must be at least 10 characters.");
+    }
+
+    if (request.Role == UserRole.CareWorker)
+    {
+        if (request.CareWorkerId is null)
+        {
+            return Error("Care worker accounts must be linked to a care worker profile.");
+        }
+
+        var workerValidation = ValidateCareWorkerReference(request.CareWorkerId.Value, context, tenant);
+        if (workerValidation is not null) return workerValidation;
     }
 
     try

@@ -46,6 +46,8 @@ public sealed class HttpCurrentUserContext : ICurrentUserContext
 
     public bool IsBackOffice => HasAnyRole(UserRole.BackOffice);
 
+    public Guid? CareWorkerId => TryReadGuid("care_worker_id");
+
     public bool HasAnyRole(params UserRole[] roles)
     {
         var role = Role;
@@ -53,4 +55,10 @@ public sealed class HttpCurrentUserContext : ICurrentUserContext
     }
 
     private ClaimsPrincipal User => _httpContextAccessor.HttpContext?.User ?? new ClaimsPrincipal();
+
+    private Guid? TryReadGuid(string claimType)
+    {
+        var value = User.FindFirstValue(claimType);
+        return Guid.TryParse(value, out var parsed) ? parsed : null;
+    }
 }

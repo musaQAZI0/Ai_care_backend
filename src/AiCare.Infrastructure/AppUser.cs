@@ -10,5 +10,6 @@ public sealed record AppUser(
     UserRole Role,
     bool IsActive,
     Guid? OrganizationId = null,
-    Guid? BranchId = null
+    Guid? BranchId = null,
+    Guid? CareWorkerId = null
 );

@@ -302,7 +302,8 @@ public sealed record AdminUser(
     UserRole Role,
     string Status,
     Guid? OrganizationId = null,
-    Guid? BranchId = null);
+    Guid? BranchId = null,
+    Guid? CareWorkerId = null);
 
 public sealed record AuditEvent(
     Guid Id,
