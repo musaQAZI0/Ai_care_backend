@@ -37,6 +37,10 @@ builder.Services.AddHttpClient();
 builder.Services.AddInfrastructure(connectionString);
 
 var jwtOptions = builder.Configuration.GetSection("JwtOptions").Get<JwtOptions>() ?? throw new InvalidOperationException("Missing JwtOptions");
+if (builder.Environment.IsEnvironment("Testing") && string.IsNullOrWhiteSpace(jwtOptions.SigningKey))
+{
+    jwtOptions.SigningKey = "test-signing-key-with-enough-length-for-hmac";
+}
 var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.SigningKey));
 
 builder.Services.AddAuthentication(options =>
@@ -75,8 +79,15 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<CareDbContext>();
-    context.Database.Migrate();
-    EnsureRuntimeSchema(context);
+    if (app.Environment.IsEnvironment("Testing"))
+    {
+        context.Database.EnsureCreated();
+    }
+    else
+    {
+        context.Database.Migrate();
+        EnsureRuntimeSchema(context);
+    }
 }
 
 app.UseCors("ReactClient");
@@ -1676,3 +1687,5 @@ public sealed record CreateOrganizationRequest(string Name, string Plan);
 public sealed record CreateBranchRequest(string Name, string Region, Guid? OrganizationId);
 public sealed record FamilyPreferencesRequest(bool EmailNotifications, bool SmsNotifications, bool MonthlyDigest, bool IncidentAlerts);
 public sealed record RecordPaymentRequest(decimal Amount, string Reference);
+
+public partial class Program;
