@@ -178,6 +178,11 @@ phase1.MapPost("/service-users", (CreateServiceUserRequest request, ICareReposit
         return Results.BadRequest(new { message = "Full name, phone number, care needs, emergency contact, and preferred care worker are required." });
     }
 
+    if (request.DateOfBirth > DateOnly.FromDateTime(DateTime.UtcNow))
+    {
+        return Results.BadRequest(new { message = "Date of birth cannot be in the future." });
+    }
+
     var serviceUser = repository.AddServiceUser(request);
     return Results.Created($"/api/phase1/service-users/{serviceUser.Id}", serviceUser);
 });
@@ -186,6 +191,11 @@ phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest req
     if (Missing(request.FullName, request.PhoneNumber, request.CareNeeds, request.EmergencyContact, request.PreferredCareWorker))
     {
         return Results.BadRequest(new { message = "Full name, phone number, care needs, emergency contact, and preferred care worker are required." });
+    }
+
+    if (request.DateOfBirth > DateOnly.FromDateTime(DateTime.UtcNow))
+    {
+        return Results.BadRequest(new { message = "Date of birth cannot be in the future." });
     }
 
     var serviceUser = repository.UpdateServiceUser(id, request);
@@ -310,22 +320,28 @@ phase1.MapGet("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantConte
     var observations = context.HealthObservations.AsNoTracking().Where(item => item.VisitId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.RecordedAt).ToList();
     return Results.Ok(new { visit, person, worker, notes, observations });
 });
-phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repository) =>
+phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
     if (request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || string.IsNullOrWhiteSpace(request.VisitType) || request.DurationMinutes <= 0)
     {
         return Results.BadRequest(new { message = "Service user, care worker, visit type, and a positive duration are required." });
     }
 
+    var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant);
+    if (validation is not null) return validation;
+
     var visit = repository.AddVisit(request);
     return Results.Created($"/api/phase1/visits/{visit.Id}", visit);
 });
-phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRepository repository) =>
+phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
     if (request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || string.IsNullOrWhiteSpace(request.VisitType) || request.DurationMinutes <= 0)
     {
         return Results.BadRequest(new { message = "Service user, care worker, visit type, and a positive duration are required." });
     }
+
+    var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant);
+    if (validation is not null) return validation;
 
     var visit = repository.UpdateVisit(id, request);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
@@ -361,18 +377,29 @@ phase1.MapGet("/care-plans/{id:guid}", (Guid id, CareDbContext context, ITenantC
     var carePlan = context.CarePlans.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return carePlan is null || !tenant.CanAccess(carePlan.OrganizationId, carePlan.BranchId) ? Results.NotFound() : Results.Ok(carePlan);
 });
-phase1.MapPost("/care-plans", (CreateCarePlanRequest request, ICareRepository repository) =>
+phase1.MapPost("/care-plans", (CreateCarePlanRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.PersonalCare, request.MedicationSupport, request.MobilityAndTransfers, request.Nutrition))
     {
         return Results.BadRequest(new { message = "Service user and care plan details are required." });
     }
 
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
+
     var carePlan = repository.AddCarePlan(request);
     return Results.Created($"/api/phase1/care-plans/{carePlan.Id}", carePlan);
 });
-phase1.MapPut("/care-plans/{id:guid}", (Guid id, CreateCarePlanRequest request, ICareRepository repository) =>
+phase1.MapPut("/care-plans/{id:guid}", (Guid id, CreateCarePlanRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
+    if (request.ServiceUserId == Guid.Empty || Missing(request.PersonalCare, request.MedicationSupport, request.MobilityAndTransfers, request.Nutrition))
+    {
+        return Results.BadRequest(new { message = "Service user and care plan details are required." });
+    }
+
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
+
     var carePlan = repository.UpdateCarePlan(id, request);
     return carePlan is null ? Results.NotFound() : Results.Ok(carePlan);
 });
@@ -384,18 +411,29 @@ phase1.MapGet("/risk-assessments/{id:guid}", (Guid id, CareDbContext context, IT
     var risk = context.RiskAssessments.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return risk is null || !tenant.CanAccess(risk.OrganizationId, risk.BranchId) ? Results.NotFound() : Results.Ok(risk);
 });
-phase1.MapPost("/risk-assessments", (CreateRiskAssessmentRequest request, ICareRepository repository) =>
+phase1.MapPost("/risk-assessments", (CreateRiskAssessmentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.Category, request.MitigationPlan))
     {
         return Results.BadRequest(new { message = "Service user, category, and mitigation plan are required." });
     }
 
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
+
     var risk = repository.AddRiskAssessment(request);
     return Results.Created($"/api/phase1/risk-assessments/{risk.Id}", risk);
 });
-phase1.MapPut("/risk-assessments/{id:guid}", (Guid id, CreateRiskAssessmentRequest request, ICareRepository repository) =>
+phase1.MapPut("/risk-assessments/{id:guid}", (Guid id, CreateRiskAssessmentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
+    if (request.ServiceUserId == Guid.Empty || Missing(request.Category, request.MitigationPlan))
+    {
+        return Results.BadRequest(new { message = "Service user, category, and mitigation plan are required." });
+    }
+
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
+
     var risk = repository.UpdateRiskAssessment(id, request);
     return risk is null ? Results.NotFound() : Results.Ok(risk);
 });
@@ -407,12 +445,15 @@ phase1.MapGet("/family-members/{id:guid}", (Guid id, CareDbContext context, ITen
     var family = context.FamilyMembers.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return family is null || !tenant.CanAccess(family.OrganizationId, family.BranchId) ? Results.NotFound() : Results.Ok(family);
 });
-phase1.MapPost("/family-members", (CreateFamilyMemberRequest request, ICareRepository repository) =>
+phase1.MapPost("/family-members", (CreateFamilyMemberRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.FullName, request.Email, request.Relationship, request.AccessLevel) || !LooksLikeEmail(request.Email))
     {
         return Results.BadRequest(new { message = "Valid family member contact details are required." });
     }
+
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
 
     var familyMember = repository.AddFamilyMember(request);
     return Results.Created($"/api/phase1/family-members/{familyMember.Id}", familyMember);
@@ -447,12 +488,15 @@ phase1.MapGet("/documents/{id:guid}", (Guid id, CareDbContext context, ITenantCo
     var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId) ? Results.NotFound() : Results.Ok(document);
 });
-phase1.MapPost("/documents", (CreateDocumentRequest request, ICareRepository repository) =>
+phase1.MapPost("/documents", (CreateDocumentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.FileName, request.Category, request.StoragePath, request.UploadedBy))
     {
         return Results.BadRequest(new { message = "Document file name, category, storage path, and uploader are required." });
     }
+
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
 
     var document = repository.AddDocument(request);
     return Results.Created($"/api/phase1/documents/{document.Id}", document);
@@ -531,12 +575,15 @@ phase1.MapGet("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantC
     var note = context.CareNotes.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId) ? Results.NotFound() : Results.Ok(note);
 });
-phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository repository) =>
+phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
     if (request.VisitId == Guid.Empty || request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || Missing(request.Summary))
     {
         return Results.BadRequest(new { message = "Visit, service user, care worker, and summary are required." });
     }
+
+    var validation = ValidateCareNoteReferences(request.VisitId, request.ServiceUserId, request.CareWorkerId, context, tenant);
+    if (validation is not null) return validation;
 
     var note = repository.AddCareNote(request);
     return Results.Created($"/api/phase1/care-notes/{note.Id}", note);
@@ -583,12 +630,15 @@ phase1.MapGet("/incidents/{id:guid}", (Guid id, CareDbContext context, ITenantCo
     var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId) ? Results.NotFound() : Results.Ok(incident);
 });
-phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository repository) =>
+phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.Category, request.Severity, request.Description))
     {
         return Results.BadRequest(new { message = "Service user, category, severity, and description are required." });
     }
+
+    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (validation is not null) return validation;
 
     var incident = repository.AddIncident(request);
     return Results.Created($"/api/phase1/incidents/{incident.Id}", incident);
@@ -1140,6 +1190,50 @@ static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSp
 static bool LooksLikeEmail(string value) => value.Contains('@', StringComparison.Ordinal) && value.Contains('.', StringComparison.Ordinal);
 
 static bool TenantVisible(ITenantContext tenant, Guid? organizationId, Guid? branchId) => tenant.CanAccess(organizationId, branchId);
+
+static IResult? ValidateServiceUserReference(Guid serviceUserId, CareDbContext context, ITenantContext tenant)
+{
+    var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(item => item.Id == serviceUserId);
+    if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
+    {
+        return Results.BadRequest(new { message = "Service user does not exist or is not accessible." });
+    }
+
+    return null;
+}
+
+static IResult? ValidateCareWorkerReference(Guid careWorkerId, CareDbContext context, ITenantContext tenant)
+{
+    var careWorker = context.CareWorkers.AsNoTracking().FirstOrDefault(item => item.Id == careWorkerId);
+    if (careWorker is null || !tenant.CanAccess(careWorker.OrganizationId, careWorker.BranchId))
+    {
+        return Results.BadRequest(new { message = "Care worker does not exist or is not accessible." });
+    }
+
+    return null;
+}
+
+static IResult? ValidateVisitReferences(Guid serviceUserId, Guid careWorkerId, CareDbContext context, ITenantContext tenant)
+{
+    return ValidateServiceUserReference(serviceUserId, context, tenant)
+        ?? ValidateCareWorkerReference(careWorkerId, context, tenant);
+}
+
+static IResult? ValidateCareNoteReferences(Guid visitId, Guid serviceUserId, Guid careWorkerId, CareDbContext context, ITenantContext tenant)
+{
+    var visit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == visitId);
+    if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId))
+    {
+        return Results.BadRequest(new { message = "Visit does not exist or is not accessible." });
+    }
+
+    if (visit.ServiceUserId != serviceUserId || visit.CareWorkerId != careWorkerId)
+    {
+        return Results.BadRequest(new { message = "Care note visit, service user, and care worker must match." });
+    }
+
+    return ValidateVisitReferences(serviceUserId, careWorkerId, context, tenant);
+}
 
 static bool DemoAccessAllowed(HttpContext httpContext, IConfiguration configuration)
 {
