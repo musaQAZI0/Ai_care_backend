@@ -32,6 +32,7 @@ var connectionString = NormalizePostgresConnectionString(
         ?? throw new InvalidOperationException("Missing DefaultConnection"));
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, HttpTenantContext>();
+builder.Services.AddScoped<ICurrentUserContext, HttpCurrentUserContext>();
 builder.Services.AddHttpClient();
 builder.Services.AddInfrastructure(connectionString);
 
@@ -663,14 +664,29 @@ phase1.MapPut("/incidents/{id:guid}", (Guid id, CreateIncidentRequest request, I
 phase1.MapDelete("/incidents/{id:guid}", (Guid id, ICareRepository repository) =>
     repository.DeleteIncident(id) ? Results.NoContent() : Results.NotFound());
 phase1.MapGet("/ai/risk-alerts", (ICareRepository repository) => Results.Ok(repository.GetAiRiskAlerts()));
-phase1.MapGet("/payroll-runs", (ICareRepository repository) => Results.Ok(repository.GetPayrollRuns()));
-phase1.MapPost("/payroll-runs/generate", (ICareRepository repository) =>
+phase1.MapGet("/payroll-runs", (ICareRepository repository, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    return denied ?? Results.Ok(repository.GetPayrollRuns());
+});
+phase1.MapPost("/payroll-runs/generate", (ICareRepository repository, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
     var payroll = repository.GeneratePayrollRun();
     return Results.Created($"/api/phase1/payroll-runs/{payroll.Id}", payroll);
 });
-phase1.MapGet("/invoices", (ICareRepository repository) => Results.Ok(repository.GetInvoices()));
-phase1.MapPost("/invoices/generate", (ICareRepository repository) => Results.Ok(repository.GenerateInvoices()));
+phase1.MapGet("/invoices", (ICareRepository repository, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    return denied ?? Results.Ok(repository.GetInvoices());
+});
+phase1.MapPost("/invoices/generate", (ICareRepository repository, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    return denied ?? Results.Ok(repository.GenerateInvoices());
+});
 phase1.MapGet("/reports", (ICareRepository repository) => Results.Ok(repository.GetReports()));
 phase1.MapGet("/reports/{reportName}/pdf", (string reportName, ICareRepository repository) =>
     Results.File(repository.ExportPdf(reportName), "application/pdf", $"{reportName}.pdf"));
@@ -773,9 +789,16 @@ phase1.MapPost("/notifications/send", (SendNotificationRequest request, CareDbCo
     return Results.Accepted($"/api/phase1/notifications/{notification.Id}", notification);
 });
 
-phase1.MapGet("/admin/users", (ICareRepository repository) => Results.Ok(repository.GetAdminUsers()));
-phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository repository) =>
+phase1.MapGet("/admin/users", (ICareRepository repository, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAdministrator(currentUser);
+    return denied ?? Results.Ok(repository.GetAdminUsers());
+});
+phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository repository, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAdministrator(currentUser);
+    if (denied is not null) return denied;
+
     if (Missing(request.UserName, request.Email, request.Password) || !LooksLikeEmail(request.Email))
     {
         return Error("Username, valid email, and password are required.");
@@ -796,13 +819,20 @@ phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository 
         return Results.Conflict(new { message = exception.Message });
     }
 });
-phase1.MapPatch("/admin/users/{id:guid}/role", (Guid id, UpdateUserRoleRequest request, ICareRepository repository) =>
+phase1.MapPatch("/admin/users/{id:guid}/role", (Guid id, UpdateUserRoleRequest request, ICareRepository repository, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAdministrator(currentUser);
+    if (denied is not null) return denied;
+
     var user = repository.UpdateUserRole(id, request.Role);
     return user is null ? Results.NotFound() : Results.Ok(user);
 });
 
-phase1.MapGet("/audit-events", (ICareRepository repository) => Results.Ok(repository.GetAuditEvents()));
+phase1.MapGet("/audit-events", (ICareRepository repository, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireAdministrator(currentUser);
+    return denied ?? Results.Ok(repository.GetAuditEvents());
+});
 
 phase1.MapGet("/family/service-users/{id:guid}/timeline", (Guid id, CareDbContext context, ITenantContext tenant) =>
 {
@@ -916,8 +946,11 @@ phase1.MapPost("/incidents/{id:guid}/investigate", (Guid id, InvestigateIncident
     return Results.Ok(updated);
 });
 
-phase1.MapPost("/payroll-runs/{id:guid}/approve", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/payroll-runs/{id:guid}/approve", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
     var payroll = context.PayrollRuns.Find(id);
     if (payroll is null || !tenant.CanAccess(payroll.OrganizationId, payroll.BranchId))
     {
@@ -931,8 +964,11 @@ phase1.MapPost("/payroll-runs/{id:guid}/approve", (Guid id, CareDbContext contex
     return Results.Ok(updated);
 });
 
-phase1.MapGet("/timesheets", (CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/timesheets", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
     var items = context.Visits.AsNoTracking()
         .AsEnumerable()
         .Where(visit => TenantVisible(tenant, visit.OrganizationId, visit.BranchId))
@@ -952,8 +988,11 @@ phase1.MapGet("/timesheets", (CareDbContext context, ITenantContext tenant) =>
     return Results.Ok(items);
 });
 
-phase1.MapGet("/invoices/{id:guid}/lines", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/invoices/{id:guid}/lines", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
     var invoice = context.Invoices.AsNoTracking().FirstOrDefault(item => item.Id == id);
     if (invoice is null || !tenant.CanAccess(invoice.OrganizationId, invoice.BranchId))
     {
@@ -978,8 +1017,11 @@ phase1.MapGet("/invoices/{id:guid}/lines", (Guid id, CareDbContext context, ITen
     return Results.Ok(visits);
 });
 
-phase1.MapPost("/invoices/{id:guid}/record-payment", (Guid id, RecordPaymentRequest request, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/invoices/{id:guid}/record-payment", (Guid id, RecordPaymentRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
     var invoice = context.Invoices.Find(id);
     if (invoice is null || !tenant.CanAccess(invoice.OrganizationId, invoice.BranchId))
     {
@@ -993,8 +1035,11 @@ phase1.MapPost("/invoices/{id:guid}/record-payment", (Guid id, RecordPaymentRequ
     return Results.Ok(new { invoice = updated, request.Amount, request.Reference, paidAt = DateTimeOffset.Now });
 });
 
-phase1.MapPost("/invoices/{id:guid}/approve", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/invoices/{id:guid}/approve", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
+    if (denied is not null) return denied;
+
     var invoice = context.Invoices.Find(id);
     if (invoice is null || !tenant.CanAccess(invoice.OrganizationId, invoice.BranchId))
     {
@@ -1201,6 +1246,12 @@ static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSp
 
 static IResult Error(string message, int statusCode = StatusCodes.Status400BadRequest) =>
     Results.Json(new { message }, statusCode: statusCode);
+
+static IResult? RequireAdministrator(ICurrentUserContext currentUser) =>
+    currentUser.IsAdministrator ? null : Error("Administrator access is required.", StatusCodes.Status403Forbidden);
+
+static IResult? RequireAnyRole(ICurrentUserContext currentUser, params UserRole[] roles) =>
+    currentUser.HasAnyRole(roles) ? null : Error("You do not have permission to access this resource.", StatusCodes.Status403Forbidden);
 
 static bool LooksLikeEmail(string value) => value.Contains('@', StringComparison.Ordinal) && value.Contains('.', StringComparison.Ordinal);
 

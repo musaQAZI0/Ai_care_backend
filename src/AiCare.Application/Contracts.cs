@@ -67,6 +67,20 @@ public interface ITenantContext
     bool CanAccess(Guid? organizationId, Guid? branchId);
 }
 
+public interface ICurrentUserContext
+{
+    Guid? UserId { get; }
+    string UserName { get; }
+    UserRole? Role { get; }
+    bool IsAdministrator { get; }
+    bool IsCareManager { get; }
+    bool IsCareCoordinator { get; }
+    bool IsCareWorker { get; }
+    bool IsFamilyMember { get; }
+    bool IsBackOffice { get; }
+    bool HasAnyRole(params UserRole[] roles);
+}
+
 public sealed record CreateServiceUserRequest(
     string FullName,
     DateOnly DateOfBirth,
