@@ -250,6 +250,33 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         Assert.Contains(audits ?? [], audit => audit.Action == "care_worker.added" && audit.Actor == "admin");
     }
 
+    [Fact]
+    public async Task ResponsesIncludeRequestIdAndSecurityHeaders()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/health");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.Contains("X-Request-ID"));
+        Assert.Equal("nosniff", response.Headers.GetValues("X-Content-Type-Options").Single());
+        Assert.Equal("DENY", response.Headers.GetValues("X-Frame-Options").Single());
+        Assert.Equal("no-referrer", response.Headers.GetValues("Referrer-Policy").Single());
+    }
+
+    [Fact]
+    public async Task ConfigStatusDoesNotExposeSecrets()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/status/config");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("jwtConfigured", body);
+        Assert.DoesNotContain("test-signing-key", body, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static async Task Login(HttpClient client, string userName, string password)
     {
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password });

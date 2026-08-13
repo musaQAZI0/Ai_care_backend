@@ -1,5 +1,6 @@
 using System.Text;
 using System.Net.Http.Json;
+using System.Diagnostics;
 using AiCare.Application;
 using AiCare.Api;
 using AiCare.Domain;
@@ -41,6 +42,7 @@ if (builder.Environment.IsEnvironment("Testing") && string.IsNullOrWhiteSpace(jw
 {
     jwtOptions.SigningKey = "test-signing-key-with-enough-length-for-hmac";
 }
+ValidateJwtOptions(jwtOptions, builder.Environment);
 var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.SigningKey));
 
 builder.Services.AddAuthentication(options =>
@@ -90,7 +92,6 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-app.UseCors("ReactClient");
 app.UseExceptionHandler(errorApp =>
 {
     errorApp.Run(async context =>
@@ -114,6 +115,36 @@ app.UseExceptionHandler(errorApp =>
         await context.Response.WriteAsJsonAsync(new { message = "An unexpected error occurred." });
     });
 });
+app.Use(async (context, next) =>
+{
+    var requestId = context.Request.Headers.TryGetValue("X-Request-ID", out var incoming)
+        ? incoming.ToString()
+        : Guid.NewGuid().ToString("N");
+    context.TraceIdentifier = requestId;
+    context.Response.Headers["X-Request-ID"] = requestId;
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    context.Response.Headers["X-Frame-Options"] = "DENY";
+    context.Response.Headers["Referrer-Policy"] = "no-referrer";
+    context.Response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
+
+    var stopwatch = Stopwatch.StartNew();
+    try
+    {
+        await next();
+    }
+    finally
+    {
+        stopwatch.Stop();
+        app.Logger.LogInformation(
+            "HTTP {Method} {Path} responded {StatusCode} in {ElapsedMs}ms requestId={RequestId}",
+            context.Request.Method,
+            context.Request.Path,
+            context.Response.StatusCode,
+            stopwatch.ElapsedMilliseconds,
+            requestId);
+    }
+});
+app.UseCors("ReactClient");
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -159,6 +190,16 @@ app.MapGet("/health/storage", (IConfiguration configuration) =>
         ? Results.Ok(new { status = "healthy", provider, bucket = configuration["Supabase:Bucket"], checkedAt = DateTimeOffset.UtcNow })
         : Results.Problem("Supabase storage is selected but Supabase:Url, Supabase:ServiceRoleKey, or Supabase:Bucket is missing.", statusCode: StatusCodes.Status503ServiceUnavailable);
 });
+
+app.MapGet("/status/config", (IConfiguration configuration, IWebHostEnvironment environment) => Results.Ok(new
+{
+    environment = environment.EnvironmentName,
+    storageProvider = configuration["Storage:Provider"] ?? "Local",
+    supabaseConfigured = HasConfig(configuration, "Supabase:Url") && HasConfig(configuration, "Supabase:ServiceRoleKey") && HasConfig(configuration, "Supabase:Bucket"),
+    jwtConfigured = HasConfig(configuration, "JwtOptions:Issuer") && HasConfig(configuration, "JwtOptions:Audience") && HasConfig(configuration, "JwtOptions:SigningKey"),
+    demoSeedEnabled = string.Equals(configuration["Demo:Enabled"], "true", StringComparison.OrdinalIgnoreCase),
+    checkedAt = DateTimeOffset.UtcNow
+}));
 
 var phase1 = app.Environment.IsDevelopment()
     ? app.MapGroup("/api/phase1")
@@ -1699,6 +1740,28 @@ static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSp
 
 static IResult Error(string message, int statusCode = StatusCodes.Status400BadRequest) =>
     Results.Json(new { message }, statusCode: statusCode);
+
+static bool HasConfig(IConfiguration configuration, string key) => !string.IsNullOrWhiteSpace(configuration[key]);
+
+static void ValidateJwtOptions(JwtOptions jwtOptions, IWebHostEnvironment environment)
+{
+    if (string.IsNullOrWhiteSpace(jwtOptions.Issuer) ||
+        string.IsNullOrWhiteSpace(jwtOptions.Audience) ||
+        string.IsNullOrWhiteSpace(jwtOptions.SigningKey))
+    {
+        throw new InvalidOperationException("JwtOptions issuer, audience, and signing key must be configured.");
+    }
+
+    if (!environment.IsEnvironment("Testing") && jwtOptions.SigningKey.Length < 32)
+    {
+        throw new InvalidOperationException("JwtOptions signing key must be at least 32 characters.");
+    }
+
+    if (jwtOptions.TokenLifetimeMinutes <= 0 || jwtOptions.TokenLifetimeMinutes > 1440)
+    {
+        throw new InvalidOperationException("JwtOptions token lifetime must be between 1 and 1440 minutes.");
+    }
+}
 
 static IResult? RequireAdministrator(ICurrentUserContext currentUser) =>
     currentUser.IsAdministrator ? null : Error("Administrator access is required.", StatusCodes.Status403Forbidden);
