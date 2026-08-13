@@ -5,6 +5,7 @@ using AiCare.Api;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
@@ -72,6 +73,22 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseCors("ReactClient");
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
+        if (exception is InvalidOperationException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(new { message = exception.Message });
+            return;
+        }
+
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        await context.Response.WriteAsJsonAsync(new { message = "An unexpected error occurred." });
+    });
+});
 app.UseAuthentication();
 app.UseAuthorization();
 
