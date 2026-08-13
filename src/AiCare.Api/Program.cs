@@ -78,6 +78,13 @@ app.UseExceptionHandler(errorApp =>
     errorApp.Run(async context =>
     {
         var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
+        if (exception is BadHttpRequestException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(new { message = "Request body or route values are invalid." });
+            return;
+        }
+
         if (exception is InvalidOperationException)
         {
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
