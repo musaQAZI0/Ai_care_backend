@@ -1,4 +1,5 @@
 using System.Text;
+using System.Net.Http.Json;
 using AiCare.Application;
 using AiCare.Api;
 using AiCare.Domain;
@@ -83,6 +84,40 @@ app.MapGet("/", () => Results.Ok(new
     status = "running"
 }));
 
+app.MapGet("/health", () => Results.Ok(new
+{
+    status = "healthy",
+    service = "AiCare API",
+    checkedAt = DateTimeOffset.UtcNow
+}));
+
+app.MapGet("/health/db", (CareDbContext context) =>
+{
+    try
+    {
+        return context.Database.CanConnect()
+            ? Results.Ok(new { status = "healthy", provider = "PostgreSQL", checkedAt = DateTimeOffset.UtcNow })
+            : Results.Problem("Database connection failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
+
+app.MapGet("/health/storage", (IConfiguration configuration) =>
+{
+    var provider = configuration["Storage:Provider"] ?? "Local";
+    var isSupabase = string.Equals(provider, "Supabase", StringComparison.OrdinalIgnoreCase);
+    var ready = !isSupabase || (!string.IsNullOrWhiteSpace(configuration["Supabase:Url"]) &&
+        !string.IsNullOrWhiteSpace(configuration["Supabase:ServiceRoleKey"]) &&
+        !string.IsNullOrWhiteSpace(configuration["Supabase:Bucket"]));
+
+    return ready
+        ? Results.Ok(new { status = "healthy", provider, bucket = configuration["Supabase:Bucket"], checkedAt = DateTimeOffset.UtcNow })
+        : Results.Problem("Supabase storage is selected but Supabase:Url, Supabase:ServiceRoleKey, or Supabase:Bucket is missing.", statusCode: StatusCodes.Status503ServiceUnavailable);
+});
+
 var phase1 = app.Environment.IsDevelopment()
     ? app.MapGroup("/api/phase1")
     : app.MapGroup("/api/phase1").RequireAuthorization("Phase1User");
@@ -138,6 +173,15 @@ phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest req
 
     var serviceUser = repository.UpdateServiceUser(id, request);
     return serviceUser is null ? Results.NotFound() : Results.Ok(serviceUser);
+});
+phase1.MapDelete("/service-users/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var serviceUser = context.ServiceUsers.Find(id);
+    if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId)) return Results.NotFound();
+    context.ServiceUsers.Remove(serviceUser);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "service_user.deleted", "system", nameof(ServiceUser), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.NoContent();
 });
 
 phase1.MapGet("/service-users/{id:guid}/complete-record", (Guid id, CareDbContext context, ITenantContext tenant) =>
@@ -228,6 +272,15 @@ phase1.MapPut("/care-workers/{id:guid}", (Guid id, CreateCareWorkerRequest reque
     var careWorker = repository.UpdateCareWorker(id, request);
     return careWorker is null ? Results.NotFound() : Results.Ok(careWorker);
 });
+phase1.MapDelete("/care-workers/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var worker = context.CareWorkers.Find(id);
+    if (worker is null || !tenant.CanAccess(worker.OrganizationId, worker.BranchId)) return Results.NotFound();
+    context.CareWorkers.Remove(worker);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_worker.deleted", "system", nameof(CareWorker), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.NoContent();
+});
 
 phase1.MapGet("/visits", (ICareRepository repository) => Results.Ok(repository.GetVisits()));
 phase1.MapGet("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
@@ -265,6 +318,15 @@ phase1.MapPatch("/visits/{id:guid}/status", (Guid id, UpdateVisitStatusRequest r
     var visit = repository.UpdateVisitStatus(id, request.Status);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
 });
+phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var visit = context.Visits.Find(id);
+    if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return Results.NotFound();
+    context.Visits.Remove(visit);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "visit.deleted", "system", nameof(Visit), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.NoContent();
+});
 phase1.MapPost("/visits/{id:guid}/check-in", (Guid id, VisitCheckInRequest request, ICareRepository repository) =>
 {
     var visit = repository.CheckInVisit(id, request);
@@ -277,6 +339,11 @@ phase1.MapPost("/visits/{id:guid}/check-out", (Guid id, VisitCheckOutRequest req
 });
 
 phase1.MapGet("/care-plans", (ICareRepository repository) => Results.Ok(repository.GetCarePlans()));
+phase1.MapGet("/care-plans/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var carePlan = context.CarePlans.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return carePlan is null || !tenant.CanAccess(carePlan.OrganizationId, carePlan.BranchId) ? Results.NotFound() : Results.Ok(carePlan);
+});
 phase1.MapPost("/care-plans", (CreateCarePlanRequest request, ICareRepository repository) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.PersonalCare, request.MedicationSupport, request.MobilityAndTransfers, request.Nutrition))
@@ -295,6 +362,11 @@ phase1.MapPut("/care-plans/{id:guid}", (Guid id, CreateCarePlanRequest request, 
 phase1.MapDelete("/care-plans/{id:guid}", (Guid id, ICareRepository repository) =>
     repository.DeleteCarePlan(id) ? Results.NoContent() : Results.NotFound());
 phase1.MapGet("/risk-assessments", (ICareRepository repository) => Results.Ok(repository.GetRiskAssessments()));
+phase1.MapGet("/risk-assessments/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var risk = context.RiskAssessments.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return risk is null || !tenant.CanAccess(risk.OrganizationId, risk.BranchId) ? Results.NotFound() : Results.Ok(risk);
+});
 phase1.MapPost("/risk-assessments", (CreateRiskAssessmentRequest request, ICareRepository repository) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.Category, request.MitigationPlan))
@@ -313,6 +385,11 @@ phase1.MapPut("/risk-assessments/{id:guid}", (Guid id, CreateRiskAssessmentReque
 phase1.MapDelete("/risk-assessments/{id:guid}", (Guid id, ICareRepository repository) =>
     repository.DeleteRiskAssessment(id) ? Results.NoContent() : Results.NotFound());
 phase1.MapGet("/family-members", (ICareRepository repository) => Results.Ok(repository.GetFamilyMembers()));
+phase1.MapGet("/family-members/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var family = context.FamilyMembers.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return family is null || !tenant.CanAccess(family.OrganizationId, family.BranchId) ? Results.NotFound() : Results.Ok(family);
+});
 phase1.MapPost("/family-members", (CreateFamilyMemberRequest request, ICareRepository repository) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.FullName, request.Email, request.Relationship, request.AccessLevel) || !LooksLikeEmail(request.Email))
@@ -323,7 +400,36 @@ phase1.MapPost("/family-members", (CreateFamilyMemberRequest request, ICareRepos
     var familyMember = repository.AddFamilyMember(request);
     return Results.Created($"/api/phase1/family-members/{familyMember.Id}", familyMember);
 });
+phase1.MapPut("/family-members/{id:guid}", (Guid id, CreateFamilyMemberRequest request, CareDbContext context, ITenantContext tenant) =>
+{
+    if (request.ServiceUserId == Guid.Empty || Missing(request.FullName, request.Email, request.Relationship, request.AccessLevel) || !LooksLikeEmail(request.Email))
+    {
+        return Results.BadRequest(new { message = "Valid family member contact details are required." });
+    }
+
+    var family = context.FamilyMembers.Find(id);
+    if (family is null || !tenant.CanAccess(family.OrganizationId, family.BranchId)) return Results.NotFound();
+    var updated = family with { ServiceUserId = request.ServiceUserId, FullName = request.FullName, Email = request.Email, Relationship = request.Relationship, AccessLevel = request.AccessLevel };
+    context.FamilyMembers.Update(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "family_member.updated", "system", nameof(FamilyMember), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(updated);
+});
+phase1.MapDelete("/family-members/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var family = context.FamilyMembers.Find(id);
+    if (family is null || !tenant.CanAccess(family.OrganizationId, family.BranchId)) return Results.NotFound();
+    context.FamilyMembers.Remove(family);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "family_member.deleted", "system", nameof(FamilyMember), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.NoContent();
+});
 phase1.MapGet("/documents", (ICareRepository repository) => Results.Ok(repository.GetDocuments()));
+phase1.MapGet("/documents/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId) ? Results.NotFound() : Results.Ok(document);
+});
 phase1.MapPost("/documents", (CreateDocumentRequest request, ICareRepository repository) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.FileName, request.Category, request.StoragePath, request.UploadedBy))
@@ -351,8 +457,18 @@ phase1.MapPost("/documents/upload", async (HttpRequest request, IWebHostEnvironm
         return Results.BadRequest(new { message = "File, service user, category, and uploader are required." });
     }
 
-    var safeFileName = Path.GetFileName(file.FileName);
-    var storedName = $"{Guid.NewGuid()}-{safeFileName}";
+    if (file.Length > 10 * 1024 * 1024)
+    {
+        return Results.BadRequest(new { message = "File uploads are limited to 10 MB for the demo backend." });
+    }
+
+    var safeFileName = SanitizeFileName(file.FileName);
+    if (string.IsNullOrWhiteSpace(safeFileName))
+    {
+        return Results.BadRequest(new { message = "A valid file name is required." });
+    }
+
+    var storedName = $"{Guid.NewGuid():N}-{safeFileName}";
     var storagePath = string.Equals(configuration["Storage:Provider"], "Supabase", StringComparison.OrdinalIgnoreCase)
         ? await UploadToSupabaseStorage(file, storedName, configuration, httpClientFactory, tenant)
         : await UploadToLocalStorage(file, storedName, environment);
@@ -360,7 +476,7 @@ phase1.MapPost("/documents/upload", async (HttpRequest request, IWebHostEnvironm
     var document = repository.AddDocument(new CreateDocumentRequest(serviceUserId, safeFileName, category, storagePath, uploadedBy));
     return Results.Created($"/api/phase1/documents/{document.Id}", document);
 });
-phase1.MapGet("/documents/{id:guid}/download-url", (Guid id, CareDbContext context, IConfiguration configuration, ITenantContext tenant) =>
+phase1.MapGet("/documents/{id:guid}/download-url", async (Guid id, CareDbContext context, IConfiguration configuration, IHttpClientFactory httpClientFactory, ITenantContext tenant) =>
 {
     var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
     if (document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId))
@@ -376,10 +492,12 @@ phase1.MapGet("/documents/{id:guid}/download-url", (Guid id, CareDbContext conte
     var publicBaseUrl = configuration["Supabase:PublicFileBaseUrl"];
     if (string.IsNullOrWhiteSpace(publicBaseUrl))
     {
-        return Results.Ok(new { provider = "Supabase", objectKey = document.StoragePath.Replace("supabase://", "", StringComparison.OrdinalIgnoreCase), message = "Configure Supabase:PublicFileBaseUrl or signed URL generation before public downloads." });
+        var signedUrl = await CreateSupabaseSignedUrl(document.StoragePath, configuration, httpClientFactory);
+        return Results.Ok(new { provider = "Supabase", url = signedUrl, expiresInSeconds = 900 });
     }
 
-    return Results.Ok(new { provider = "Supabase", url = $"{publicBaseUrl.TrimEnd('/')}/{document.StoragePath.Replace("supabase://", "", StringComparison.OrdinalIgnoreCase)}" });
+    var (_, objectKey) = ParseSupabaseStoragePath(document.StoragePath);
+    return Results.Ok(new { provider = "Supabase", url = $"{publicBaseUrl.TrimEnd('/')}/{objectKey}" });
 });
 phase1.MapPut("/documents/{id:guid}", (Guid id, CreateDocumentRequest request, ICareRepository repository) =>
 {
@@ -391,6 +509,11 @@ phase1.MapDelete("/documents/{id:guid}", (Guid id, ICareRepository repository) =
 phase1.MapGet("/medications", (ICareRepository repository) => Results.Ok(repository.GetMedications()));
 phase1.MapGet("/mar", (ICareRepository repository) => Results.Ok(repository.GetMedicationAdministrationRecords()));
 phase1.MapGet("/care-notes", (ICareRepository repository) => Results.Ok(repository.GetCareNotes()));
+phase1.MapGet("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var note = context.CareNotes.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId) ? Results.NotFound() : Results.Ok(note);
+});
 phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository repository) =>
 {
     if (request.VisitId == Guid.Empty || request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || Missing(request.Summary))
@@ -401,8 +524,48 @@ phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository re
     var note = repository.AddCareNote(request);
     return Results.Created($"/api/phase1/care-notes/{note.Id}", note);
 });
+phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, CareDbContext context, ITenantContext tenant) =>
+{
+    if (request.VisitId == Guid.Empty || request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || Missing(request.Summary))
+    {
+        return Results.BadRequest(new { message = "Visit, service user, care worker, and summary are required." });
+    }
+
+    var note = context.CareNotes.Find(id);
+    if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
+    var updated = note with
+    {
+        VisitId = request.VisitId,
+        ServiceUserId = request.ServiceUserId,
+        CareWorkerId = request.CareWorkerId,
+        Summary = request.Summary,
+        PersonalCare = request.PersonalCare,
+        MealsAndHydration = request.MealsAndHydration,
+        Medication = request.Medication,
+        Concerns = request.Concerns,
+        RequiresReview = request.RequiresReview
+    };
+    context.CareNotes.Update(updated);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_note.updated", "system", nameof(CareNote), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.Ok(updated);
+});
+phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var note = context.CareNotes.Find(id);
+    if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
+    context.CareNotes.Remove(note);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_note.deleted", "system", nameof(CareNote), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+    return Results.NoContent();
+});
 phase1.MapGet("/observations", (ICareRepository repository) => Results.Ok(repository.GetHealthObservations()));
 phase1.MapGet("/incidents", (ICareRepository repository) => Results.Ok(repository.GetIncidents()));
+phase1.MapGet("/incidents/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+{
+    var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId) ? Results.NotFound() : Results.Ok(incident);
+});
 phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository repository) =>
 {
     if (request.ServiceUserId == Guid.Empty || Missing(request.Category, request.Severity, request.Description))
@@ -883,6 +1046,76 @@ phase1.MapGet("/storage/status", (IConfiguration configuration) => Results.Ok(ne
     cloudReady = !string.Equals(configuration["Storage:Provider"], "Local", StringComparison.OrdinalIgnoreCase)
 }));
 
+var demo = app.MapGroup("/api/demo").RequireAuthorization("Phase1User");
+demo.MapPost("/seed", (HttpContext httpContext, IConfiguration configuration, CareDbContext context, ITenantContext tenant) =>
+{
+    if (!DemoAccessAllowed(httpContext, configuration))
+    {
+        return Results.NotFound();
+    }
+
+    var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmss");
+    var serviceUser = new ServiceUser(Guid.NewGuid(), $"Demo Service User {stamp}", new DateOnly(1970, 1, 1), "+10000000000", "Demo care needs only", "Demo Contact +10000000001", "Demo Care Worker", RiskLevel.Medium, "Onboarded", "Demo address", "None", "Demo condition", "Demo funding", "Demo", "", "Demo mobility", "Demo cognition", "Demo communication", "Demo preferences", "Demo diet", tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var worker = new CareWorker(Guid.NewGuid(), $"Demo Care Worker {stamp}", "Demo support", "Weekdays demo availability", 0, 0, "Demo clear", "Demo complete", "Demo radius", tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var visit = new Visit(Guid.NewGuid(), serviceUser.Id, worker.Id, DateTimeOffset.UtcNow.AddDays(1), "Demo visit", 30, "Demo skills", VisitStatus.Scheduled, null, null, null, null, null, null, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var carePlan = new CarePlan(Guid.NewGuid(), serviceUser.Id, "v1", "Draft", "Demo personal care.", "Demo medication support.", "Demo mobility support.", "Demo nutrition.", DateTimeOffset.UtcNow.AddDays(30), tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var risk = new RiskAssessment(Guid.NewGuid(), serviceUser.Id, "Demo risk", RiskLevel.Medium, "Demo mitigation plan.", DateTimeOffset.UtcNow.AddDays(14), tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var family = new FamilyMember(Guid.NewGuid(), serviceUser.Id, $"Demo Family Member {stamp}", $"demo.family.{stamp}@example.com", "Demo relationship", "Demo access", "Invited", tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var document = new DocumentItem(Guid.NewGuid(), serviceUser.Id, $"demo-document-{stamp}.txt", "Demo document", $"supabase://care-documents/demo/demo-document-{stamp}.txt", "demo-admin", DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var note = new CareNote(Guid.NewGuid(), visit.Id, serviceUser.Id, worker.Id, "Demo care note summary.", "Demo personal care completed.", "Demo meal note.", "Demo medication note.", "Demo concern only.", false, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var incident = new Incident(Guid.NewGuid(), serviceUser.Id, visit.Id, "Demo incident", "Low", "Demo incident description only.", "Reported", DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var message = new MessageThread(Guid.NewGuid(), serviceUser.Id, worker.Id, "Demo message", MessagePriority.Routine, "Demo message body.", DateTimeOffset.UtcNow.AddMinutes(30), tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+
+    context.AddRange(serviceUser, worker, visit, carePlan, risk, family, document, note, incident, message);
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "demo.seeded", "system", "DemoData", serviceUser.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.SaveChanges();
+
+    return Results.Created("/api/demo/seed", new
+    {
+        serviceUserId = serviceUser.Id,
+        careWorkerId = worker.Id,
+        visitId = visit.Id,
+        carePlanId = carePlan.Id,
+        riskAssessmentId = risk.Id,
+        familyMemberId = family.Id,
+        documentId = document.Id,
+        careNoteId = note.Id,
+        incidentId = incident.Id,
+        messageThreadId = message.Id
+    });
+});
+
+demo.MapDelete("/reset", (HttpContext httpContext, IConfiguration configuration, CareDbContext context, ITenantContext tenant) =>
+{
+    if (!DemoAccessAllowed(httpContext, configuration))
+    {
+        return Results.NotFound();
+    }
+
+    var demoServiceUserIds = context.ServiceUsers
+        .Where(item => item.FullName.StartsWith("Demo Service User") && item.OrganizationId == tenant.OrganizationId)
+        .Select(item => item.Id)
+        .ToList();
+    var demoWorkerIds = context.CareWorkers
+        .Where(item => item.FullName.StartsWith("Demo Care Worker") && item.OrganizationId == tenant.OrganizationId)
+        .Select(item => item.Id)
+        .ToList();
+
+    context.MessageThreads.RemoveRange(context.MessageThreads.Where(item => demoServiceUserIds.Contains(item.ServiceUserId) || demoWorkerIds.Contains(item.CareWorkerId)));
+    context.Incidents.RemoveRange(context.Incidents.Where(item => demoServiceUserIds.Contains(item.ServiceUserId)));
+    context.CareNotes.RemoveRange(context.CareNotes.Where(item => demoServiceUserIds.Contains(item.ServiceUserId) || demoWorkerIds.Contains(item.CareWorkerId)));
+    context.Documents.RemoveRange(context.Documents.Where(item => demoServiceUserIds.Contains(item.ServiceUserId) && item.FileName.StartsWith("demo-document-")));
+    context.FamilyMembers.RemoveRange(context.FamilyMembers.Where(item => demoServiceUserIds.Contains(item.ServiceUserId) && item.FullName.StartsWith("Demo Family Member")));
+    context.RiskAssessments.RemoveRange(context.RiskAssessments.Where(item => demoServiceUserIds.Contains(item.ServiceUserId) && item.Category.StartsWith("Demo")));
+    context.CarePlans.RemoveRange(context.CarePlans.Where(item => demoServiceUserIds.Contains(item.ServiceUserId)));
+    context.Visits.RemoveRange(context.Visits.Where(item => demoServiceUserIds.Contains(item.ServiceUserId) || demoWorkerIds.Contains(item.CareWorkerId)));
+    context.CareWorkers.RemoveRange(context.CareWorkers.Where(item => demoWorkerIds.Contains(item.Id)));
+    context.ServiceUsers.RemoveRange(context.ServiceUsers.Where(item => demoServiceUserIds.Contains(item.Id)));
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "demo.reset", "system", "DemoData", null, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    var removed = context.SaveChanges();
+    return Results.Ok(new { removedChanges = removed, serviceUsers = demoServiceUserIds.Count, careWorkers = demoWorkerIds.Count });
+});
+
 app.Run();
 
 static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSpace);
@@ -890,6 +1123,30 @@ static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSp
 static bool LooksLikeEmail(string value) => value.Contains('@', StringComparison.Ordinal) && value.Contains('.', StringComparison.Ordinal);
 
 static bool TenantVisible(ITenantContext tenant, Guid? organizationId, Guid? branchId) => tenant.CanAccess(organizationId, branchId);
+
+static bool DemoAccessAllowed(HttpContext httpContext, IConfiguration configuration)
+{
+    if (!string.Equals(configuration["Demo:Enabled"], "true", StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    var expectedKey = configuration["Demo:SeedKey"];
+    return !string.IsNullOrWhiteSpace(expectedKey) &&
+        httpContext.Request.Headers.TryGetValue("X-Demo-Key", out var providedKey) &&
+        string.Equals(providedKey.ToString(), expectedKey, StringComparison.Ordinal);
+}
+
+static string SanitizeFileName(string fileName)
+{
+    var safeName = Path.GetFileName(fileName);
+    foreach (var invalidChar in Path.GetInvalidFileNameChars())
+    {
+        safeName = safeName.Replace(invalidChar, '-');
+    }
+
+    return safeName.Trim();
+}
 
 static string NormalizePostgresConnectionString(string connectionString)
 {
@@ -911,6 +1168,18 @@ static string NormalizePostgresConnectionString(string connectionString)
     };
 
     return builder.ConnectionString;
+}
+
+static (string Bucket, string ObjectKey) ParseSupabaseStoragePath(string storagePath)
+{
+    var path = storagePath.Replace("supabase://", "", StringComparison.OrdinalIgnoreCase);
+    var splitAt = path.IndexOf('/', StringComparison.Ordinal);
+    if (splitAt < 1 || splitAt == path.Length - 1)
+    {
+        throw new InvalidOperationException("Supabase storage path must be formatted as supabase://bucket/object-key.");
+    }
+
+    return (path[..splitAt], path[(splitAt + 1)..]);
 }
 
 static async Task<string> UploadToLocalStorage(IFormFile file, string storedName, IWebHostEnvironment environment)
@@ -955,6 +1224,39 @@ static async Task<string> UploadToSupabaseStorage(IFormFile file, string storedN
     }
 
     return $"supabase://{bucket}/{objectKey}";
+}
+
+static async Task<string> CreateSupabaseSignedUrl(string storagePath, IConfiguration configuration, IHttpClientFactory httpClientFactory)
+{
+    var supabaseUrl = configuration["Supabase:Url"];
+    var serviceRoleKey = configuration["Supabase:ServiceRoleKey"];
+    var (bucket, objectKey) = ParseSupabaseStoragePath(storagePath);
+
+    if (string.IsNullOrWhiteSpace(supabaseUrl) || string.IsNullOrWhiteSpace(serviceRoleKey))
+    {
+        throw new InvalidOperationException("Supabase signed URLs require Supabase:Url and Supabase:ServiceRoleKey.");
+    }
+
+    var requestUrl = $"{supabaseUrl.TrimEnd('/')}/storage/v1/object/sign/{bucket}/{Uri.EscapeDataString(objectKey).Replace("%2F", "/", StringComparison.Ordinal)}";
+    var client = httpClientFactory.CreateClient();
+    using var request = new HttpRequestMessage(HttpMethod.Post, requestUrl)
+    {
+        Content = JsonContent.Create(new { expiresIn = 900 })
+    };
+    request.Headers.TryAddWithoutValidation("apikey", serviceRoleKey);
+    request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {serviceRoleKey}");
+
+    using var response = await client.SendAsync(request);
+    var detail = await response.Content.ReadAsStringAsync();
+    if (!response.IsSuccessStatusCode)
+    {
+        throw new InvalidOperationException($"Supabase signed URL failed: {(int)response.StatusCode} {detail}");
+    }
+
+    using var payload = System.Text.Json.JsonDocument.Parse(detail);
+    var signedPath = payload.RootElement.GetProperty("signedURL").GetString()
+        ?? throw new InvalidOperationException("Supabase signed URL response did not include signedURL.");
+    return $"{supabaseUrl.TrimEnd('/')}{signedPath}";
 }
 
 public sealed record TimelineItem(string Type, string Title, string Detail, DateTimeOffset When);

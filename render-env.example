@@ -23,3 +23,7 @@ Supabase__Bucket=care-documents
 # Example:
 # https://YOUR_PROJECT_REF.supabase.co/storage/v1/object/public/care-documents
 Supabase__PublicFileBaseUrl=
+
+# Optional. Enables guarded demo seed/reset endpoints.
+Demo__Enabled=false
+Demo__SeedKey=

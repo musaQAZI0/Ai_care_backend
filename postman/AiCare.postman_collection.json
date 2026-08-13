@@ -1,0 +1,81 @@
+{
+  "info": {
+    "name": "AiCare Backend",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://ai-care-backend-yeoh.onrender.com" },
+    { "key": "token", "value": "" },
+    { "key": "demoKey", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        { "name": "API", "request": { "method": "GET", "url": "{{baseUrl}}/health" } },
+        { "name": "Database", "request": { "method": "GET", "url": "{{baseUrl}}/health/db" } },
+        { "name": "Storage", "request": { "method": "GET", "url": "{{baseUrl}}/health/storage" } }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"userName\": \"admin\",\n  \"password\": \"Admin123!\"\n}" },
+            "url": "{{baseUrl}}/api/auth/login"
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": "{{baseUrl}}/api/auth/me"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Phase1 Reads",
+      "item": [
+        { "name": "Dashboard", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/dashboard" } },
+        { "name": "Service Users", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/service-users" } },
+        { "name": "Care Workers", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/care-workers" } },
+        { "name": "Visits", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/visits" } },
+        { "name": "Care Plans", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/care-plans" } },
+        { "name": "Documents", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/api/phase1/documents" } }
+      ]
+    },
+    {
+      "name": "Demo",
+      "item": [
+        {
+          "name": "Seed Demo Data",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "X-Demo-Key", "value": "{{demoKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/demo/seed"
+          }
+        },
+        {
+          "name": "Reset Demo Data",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "X-Demo-Key", "value": "{{demoKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/demo/reset"
+          }
+        }
+      ]
+    }
+  ]
+}
