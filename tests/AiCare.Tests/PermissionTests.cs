@@ -277,6 +277,45 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         Assert.DoesNotContain("test-signing-key", body, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task FamilyMemberCanAccessLinkedServiceUserDashboard()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "family", "FamilyPassword123!");
+
+        var response = await client.GetAsync($"/api/phase1/family/service-users/{TestIds.ServiceUserId}/dashboard");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FamilyMemberCannotAccessAnotherServiceUserDashboard()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "family", "FamilyPassword123!");
+
+        var response = await client.GetAsync($"/api/phase1/family/service-users/{TestIds.OtherServiceUserId}/dashboard");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FamilyAccountMustBeLinkedToFamilyProfile()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+
+        var response = await client.PostAsJsonAsync("/api/phase1/admin/users", new
+        {
+            userName = "unlinked-family",
+            email = "unlinked-family@test.local",
+            password = "FamilyPassword123!",
+            role = UserRole.FamilyMember
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     private static async Task Login(HttpClient client, string userName, string password)
     {
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password });
@@ -336,6 +375,7 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
         context.Invoices.RemoveRange(context.Invoices);
         context.MedicationAdministrationRecords.RemoveRange(context.MedicationAdministrationRecords);
         context.Medications.RemoveRange(context.Medications);
+        context.FamilyMembers.RemoveRange(context.FamilyMembers);
         context.ServiceUsers.RemoveRange(context.ServiceUsers);
         context.CareWorkers.RemoveRange(context.CareWorkers);
         context.Visits.RemoveRange(context.Visits);
@@ -362,6 +402,39 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             "None",
             "None",
             "None",
+            TenantDefaults.OrganizationId,
+            TenantDefaults.BranchId));
+        context.ServiceUsers.Add(new ServiceUser(
+            TestIds.OtherServiceUserId,
+            "Other Service User",
+            new DateOnly(1975, 1, 1),
+            "+10000000001",
+            "Companionship",
+            "Other emergency contact",
+            "Other Worker",
+            RiskLevel.Low,
+            "Active",
+            "Other address",
+            "None",
+            "None",
+            "Private",
+            "Not specified",
+            "",
+            "Independent",
+            "None",
+            "None",
+            "None",
+            "None",
+            TenantDefaults.OrganizationId,
+            TenantDefaults.BranchId));
+        context.FamilyMembers.Add(new FamilyMember(
+            TestIds.FamilyMemberId,
+            TestIds.ServiceUserId,
+            "Family Person",
+            "family@test.local",
+            "Daughter",
+            "Read",
+            "Active",
             TenantDefaults.OrganizationId,
             TenantDefaults.BranchId));
         context.CareWorkers.AddRange(
@@ -423,7 +496,8 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             new AppUser(Guid.NewGuid(), "admin", "admin@test.local", PasswordHasher.HashPassword("AdminPassword123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId),
             new AppUser(Guid.NewGuid(), "backoffice", "backoffice@test.local", PasswordHasher.HashPassword("BackOfficePassword123!"), UserRole.BackOffice, true, TenantDefaults.OrganizationId),
             new AppUser(Guid.NewGuid(), "worker", "worker@test.local", PasswordHasher.HashPassword("WorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.WorkerId),
-            new AppUser(Guid.NewGuid(), "other-worker", "other@test.local", PasswordHasher.HashPassword("OtherWorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.OtherWorkerId));
+            new AppUser(Guid.NewGuid(), "other-worker", "other@test.local", PasswordHasher.HashPassword("OtherWorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.OtherWorkerId),
+            new AppUser(Guid.NewGuid(), "family", "family@test.local", PasswordHasher.HashPassword("FamilyPassword123!"), UserRole.FamilyMember, true, TenantDefaults.OrganizationId, null, null, TestIds.FamilyMemberId));
         context.SaveChanges();
     }
 }
@@ -431,8 +505,10 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
 internal static class TestIds
 {
     public static readonly Guid ServiceUserId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    public static readonly Guid OtherServiceUserId = Guid.Parse("99999999-aaaa-aaaa-aaaa-999999999999");
     public static readonly Guid WorkerId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
     public static readonly Guid OtherWorkerId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
+    public static readonly Guid FamilyMemberId = Guid.Parse("44444444-aaaa-aaaa-aaaa-444444444444");
     public static readonly Guid VisitId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
     public static readonly Guid MedicationId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
     public static readonly Guid MarId = Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");

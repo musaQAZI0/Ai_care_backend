@@ -48,6 +48,8 @@ public sealed class HttpCurrentUserContext : ICurrentUserContext
 
     public Guid? CareWorkerId => TryReadGuid("care_worker_id");
 
+    public Guid? FamilyMemberId => TryReadGuid("family_member_id");
+
     public bool HasAnyRole(params UserRole[] roles)
     {
         var role = Role;

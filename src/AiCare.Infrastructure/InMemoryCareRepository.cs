@@ -585,7 +585,7 @@ public sealed class InMemoryCareRepository : ICareRepository
             throw new InvalidOperationException("A user with that username or email already exists.");
         }
 
-        var user = new AdminUser(Guid.NewGuid(), request.UserName, request.Email, request.Role, "Active");
+        var user = new AdminUser(Guid.NewGuid(), request.UserName, request.Email, request.Role, "Active", TenantDefaults.OrganizationId, TenantDefaults.BranchId, request.CareWorkerId, request.FamilyMemberId);
         _adminUsers.Add(user);
         AddAudit("admin.user_created", "system", nameof(AdminUser), user.Id);
         return user;

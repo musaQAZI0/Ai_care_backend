@@ -1239,6 +1239,17 @@ phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository 
         if (workerValidation is not null) return workerValidation;
     }
 
+    if (request.Role == UserRole.FamilyMember)
+    {
+        if (request.FamilyMemberId is null)
+        {
+            return Error("Family member accounts must be linked to a family member profile.");
+        }
+
+        var familyValidation = ValidateFamilyMemberReference(request.FamilyMemberId.Value, context, tenant);
+        if (familyValidation is not null) return familyValidation;
+    }
+
     try
     {
         var user = repository.AddAdminUser(request);
@@ -1264,8 +1275,11 @@ phase1.MapGet("/audit-events", (ICareRepository repository, ICurrentUserContext 
     return denied ?? Results.Ok(repository.GetAuditEvents());
 });
 
-phase1.MapGet("/family/service-users/{id:guid}/timeline", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/family/service-users/{id:guid}/timeline", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireFamilyServiceUserAccess(id, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(user => user.Id == id);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
     {
@@ -1288,8 +1302,11 @@ phase1.MapGet("/family/service-users/{id:guid}/timeline", (Guid id, CareDbContex
     return Results.Ok(visits.Concat(notes).Concat(incidents).Concat(documents).OrderByDescending(item => item.When).ToList());
 });
 
-phase1.MapGet("/family/service-users/{id:guid}/dashboard", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/family/service-users/{id:guid}/dashboard", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireFamilyServiceUserAccess(id, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(user => user.Id == id);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
     {
@@ -1321,6 +1338,9 @@ phase1.MapGet("/family/service-users/{id:guid}/dashboard", (Guid id, CareDbConte
 
 phase1.MapPost("/family/service-users/{id:guid}/preferences", (Guid id, FamilyPreferencesRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireFamilyServiceUserAccess(id, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(user => user.Id == id);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
     {
@@ -1340,8 +1360,11 @@ phase1.MapPost("/family/service-users/{id:guid}/preferences", (Guid id, FamilyPr
     });
 });
 
-phase1.MapGet("/family/service-users/{id:guid}/monthly-report", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/family/service-users/{id:guid}/monthly-report", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireFamilyServiceUserAccess(id, context, tenant, currentUser);
+    if (denied is not null) return denied;
+
     var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(user => user.Id == id);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
     {
@@ -1836,12 +1859,46 @@ static IResult? RequireIncidentAccessForCareWorker(CreateIncidentRequest request
         : Error("Incident service user must match the assigned visit.", StatusCodes.Status403Forbidden);
 }
 
+static IResult? RequireFamilyServiceUserAccess(Guid serviceUserId, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+{
+    if (!currentUser.IsFamilyMember)
+    {
+        return null;
+    }
+
+    if (currentUser.FamilyMemberId is null)
+    {
+        return Error("Family member account is not linked to a family profile.", StatusCodes.Status403Forbidden);
+    }
+
+    var familyMember = context.FamilyMembers.AsNoTracking().FirstOrDefault(item => item.Id == currentUser.FamilyMemberId);
+    if (familyMember is null || !tenant.CanAccess(familyMember.OrganizationId, familyMember.BranchId))
+    {
+        return Error("Family member profile is not accessible.", StatusCodes.Status403Forbidden);
+    }
+
+    return familyMember.ServiceUserId == serviceUserId
+        ? null
+        : Error("Family members can only access their linked service user.", StatusCodes.Status403Forbidden);
+}
+
 static IResult? ValidateServiceUserReference(Guid serviceUserId, CareDbContext context, ITenantContext tenant)
 {
     var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(item => item.Id == serviceUserId);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
     {
         return Error("Service user does not exist or is not accessible.");
+    }
+
+    return null;
+}
+
+static IResult? ValidateFamilyMemberReference(Guid familyMemberId, CareDbContext context, ITenantContext tenant)
+{
+    var familyMember = context.FamilyMembers.AsNoTracking().FirstOrDefault(item => item.Id == familyMemberId);
+    if (familyMember is null || !tenant.CanAccess(familyMember.OrganizationId, familyMember.BranchId))
+    {
+        return Error("Family member does not exist or is not accessible.");
     }
 
     return null;
@@ -1988,6 +2045,16 @@ static void EnsureRuntimeSchema(CareDbContext context)
     context.Database.ExecuteSqlRaw("""
         CREATE INDEX IF NOT EXISTS "IX_AppUsers_CareWorkerId"
         ON "AppUsers" ("CareWorkerId");
+        """);
+
+    context.Database.ExecuteSqlRaw("""
+        ALTER TABLE "AppUsers"
+        ADD COLUMN IF NOT EXISTS "FamilyMemberId" uuid;
+        """);
+
+    context.Database.ExecuteSqlRaw("""
+        CREATE INDEX IF NOT EXISTS "IX_AppUsers_FamilyMemberId"
+        ON "AppUsers" ("FamilyMemberId");
         """);
 }
 

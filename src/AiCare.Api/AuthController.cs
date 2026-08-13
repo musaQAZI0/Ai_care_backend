@@ -56,6 +56,11 @@ public class AuthController : ControllerBase
             claims.Add(new Claim("care_worker_id", user.CareWorkerId.Value.ToString()));
         }
 
+        if (user.FamilyMemberId is not null)
+        {
+            claims.Add(new Claim("family_member_id", user.FamilyMemberId.Value.ToString()));
+        }
+
         var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtOptions.SigningKey));
         var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
         var expires = DateTime.UtcNow.AddMinutes(_jwtOptions.TokenLifetimeMinutes);
@@ -113,6 +118,8 @@ public class AuthController : ControllerBase
             role = user.Role.ToString(),
             organizationId = user.OrganizationId ?? AiCare.Domain.TenantDefaults.OrganizationId,
             branchId = user.BranchId,
+            familyMemberId = user.FamilyMemberId,
+            careWorkerId = user.CareWorkerId,
         });
     }
 

@@ -303,7 +303,8 @@ public sealed record AdminUser(
     string Status,
     Guid? OrganizationId = null,
     Guid? BranchId = null,
-    Guid? CareWorkerId = null);
+    Guid? CareWorkerId = null,
+    Guid? FamilyMemberId = null);
 
 public sealed record AuditEvent(
     Guid Id,

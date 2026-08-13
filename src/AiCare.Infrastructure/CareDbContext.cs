@@ -272,6 +272,7 @@ public sealed class CareDbContext : DbContext
             builder.Property(user => user.Role).HasConversion<string>().IsRequired();
             builder.Property(user => user.IsActive).IsRequired();
             builder.Property(user => user.CareWorkerId).IsRequired(false);
+            builder.Property(user => user.FamilyMemberId).IsRequired(false);
             builder.HasData(new AppUser(
                 Guid.Parse("99999999-9999-9999-9999-999999999999"),
                 "admin",

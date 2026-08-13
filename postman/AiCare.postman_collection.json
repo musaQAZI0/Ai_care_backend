@@ -47,6 +47,10 @@
                      {
                          "key":  "invoiceId",
                          "value":  ""
+                     },
+                     {
+                         "key":  "familyMemberId",
+                         "value":  ""
                      }
                  ],
     "item":  [
@@ -606,6 +610,86 @@
                                                                          "value":  "{{demoKey}}"
                                                                      }
                                                                  ]
+                                                  }
+                                  }
+                              ]
+                 },
+                 {
+                     "name":  "Family Portal",
+                     "item":  [
+                                  {
+                                      "name":  "Timeline",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 },
+                                                      "url":  "{{baseUrl}}/api/phase1/family/service-users/{{serviceUserId}}/timeline"
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Dashboard",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 },
+                                                      "url":  "{{baseUrl}}/api/phase1/family/service-users/{{serviceUserId}}/dashboard"
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Monthly Report",
+                                      "request":  {
+                                                      "method":  "GET",
+                                                      "header":  {
+                                                                     "key":  "Authorization",
+                                                                     "value":  "Bearer {{token}}"
+                                                                 },
+                                                      "url":  "{{baseUrl}}/api/phase1/family/service-users/{{serviceUserId}}/monthly-report"
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Update Preferences",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "url":  "{{baseUrl}}/api/phase1/family/service-users/{{serviceUserId}}/preferences",
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"emailNotifications\": true,\n  \"smsNotifications\": false,\n  \"monthlyDigest\": true,\n  \"incidentAlerts\": true\n}"
+                                                               }
+                                                  }
+                                  },
+                                  {
+                                      "name":  "Create Linked Family Login",
+                                      "request":  {
+                                                      "method":  "POST",
+                                                      "header":  [
+                                                                     {
+                                                                         "key":  "Authorization",
+                                                                         "value":  "Bearer {{token}}"
+                                                                     },
+                                                                     {
+                                                                         "key":  "Content-Type",
+                                                                         "value":  "application/json"
+                                                                     }
+                                                                 ],
+                                                      "url":  "{{baseUrl}}/api/phase1/admin/users",
+                                                      "body":  {
+                                                                   "mode":  "raw",
+                                                                   "raw":  "{\n  \"userName\": \"demo-family\",\n  \"email\": \"demo.family@example.com\",\n  \"password\": \"DemoFamily_12345!\",\n  \"role\": \"FamilyMember\",\n  \"familyMemberId\": \"{{familyMemberId}}\"\n}"
+                                                               }
                                                   }
                                   }
                               ]

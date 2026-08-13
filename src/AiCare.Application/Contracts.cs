@@ -79,6 +79,7 @@ public interface ICurrentUserContext
     bool IsFamilyMember { get; }
     bool IsBackOffice { get; }
     Guid? CareWorkerId { get; }
+    Guid? FamilyMemberId { get; }
     bool HasAnyRole(params UserRole[] roles);
 }
 
@@ -225,4 +226,5 @@ public sealed record CreateAdminUserRequest(
     UserRole Role,
     Guid? OrganizationId = null,
     Guid? BranchId = null,
-    Guid? CareWorkerId = null);
+    Guid? CareWorkerId = null,
+    Guid? FamilyMemberId = null);

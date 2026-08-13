@@ -155,8 +155,15 @@ POST   /api/phase1/admin/users
 PATCH  /api/phase1/admin/users/{id}/role
 GET    /api/phase1/audit-events
 
+GET    /api/phase1/family/service-users/{id}/timeline
+GET    /api/phase1/family/service-users/{id}/dashboard
+POST   /api/phase1/family/service-users/{id}/preferences
+GET    /api/phase1/family/service-users/{id}/monthly-report
+
 GET    /api/phase1/storage/status
 ```
+
+Family member logins must be created with `role: "FamilyMember"` and a valid `familyMemberId`. Family users can only access family portal endpoints for their linked service user.
 
 ## Security Notes
 
