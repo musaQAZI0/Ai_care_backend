@@ -1,5 +1,7 @@
 # Required for the Render backend service.
 ASPNETCORE_ENVIRONMENT=Production
+DOTNET_USE_POLLING_FILE_WATCHER=true
+DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
 
 # Render Postgres / Supabase Postgres connection string.
 # Example:
