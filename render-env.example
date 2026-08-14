@@ -12,8 +12,8 @@ ConnectionStrings__DefaultConnection=
 JwtOptions__SigningKey=
 
 # Your deployed frontend URL, for example:
-# https://your-frontend.vercel.app
-Cors__AllowedOrigins__0=
+# https://ai-care-frontend.vercel.app
+Cors__AllowedOrigins__0=https://ai-care-frontend.vercel.app
 
 # File storage. Use Supabase to store uploaded documents outside Render's temporary filesystem.
 Storage__Provider=Supabase

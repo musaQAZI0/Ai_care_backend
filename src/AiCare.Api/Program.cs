@@ -18,7 +18,7 @@ builder.Services.AddCors(options =>
     options.AddPolicy("ReactClient", policy =>
     {
         var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
-            ?? ["http://127.0.0.1:5173", "http://localhost:5173"];
+            ?? ["http://127.0.0.1:5173", "http://localhost:5173", "https://ai-care-frontend.vercel.app"];
 
         policy
             .WithOrigins(allowedOrigins)
