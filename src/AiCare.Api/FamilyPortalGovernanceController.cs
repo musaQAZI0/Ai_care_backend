@@ -9,7 +9,12 @@ namespace AiCare.Api;
 [ApiController]
 [Route("api/phase1/family-access")]
 [Authorize(Policy = "Phase1User")]
-public sealed class FamilyAccessAdminController(IFamilyPortalService familyPortal, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) : ControllerBase
+public sealed class FamilyAccessAdminController(
+    IFamilyPortalService familyPortal,
+    ITenantContext tenant,
+    ICurrentUserContext currentUser,
+    IConfiguration configuration,
+    IWebHostEnvironment environment) : ControllerBase
 {
     [HttpGet("{familyMemberId:guid}")]
     public async Task<IActionResult> Get(Guid familyMemberId, CancellationToken ct)
@@ -25,13 +30,28 @@ public sealed class FamilyAccessAdminController(IFamilyPortalService familyPorta
         if (!IsStaff()) return Forbid();
         try
         {
-            var result = await familyPortal.ConfigureAccessAsync(tenant.OrganizationId, tenant.BranchId, ActorId(), currentUser.UserName,
-                new ConfigureFamilyAccessCommand(familyMemberId, request.AuthorityType ?? string.Empty, request.VerificationStatus ?? "Pending", request.ValidFrom, request.ValidUntil, request.Permissions ?? Array.Empty<string>(), request.ExpectedRevision), ct);
+            var result = await familyPortal.ConfigureAccessAsync(
+                tenant.OrganizationId,
+                tenant.BranchId,
+                ActorId(),
+                currentUser.UserName,
+                new ConfigureFamilyAccessCommand(
+                    familyMemberId,
+                    request.AuthorityType ?? string.Empty,
+                    request.VerificationStatus ?? "Pending",
+                    request.VerificationReference ?? string.Empty,
+                    request.ValidFrom,
+                    request.ValidUntil,
+                    request.Permissions ?? Array.Empty<string>(),
+                    request.ExpectedRevision),
+                ct);
             return Ok(result);
         }
         catch (InvalidOperationException ex)
         {
-            return ex.Message.Contains("changed by another user", StringComparison.OrdinalIgnoreCase) ? Conflict(new { message = ex.Message }) : BadRequest(new { message = ex.Message });
+            return ex.Message.Contains("changed by another user", StringComparison.OrdinalIgnoreCase)
+                ? Conflict(new { message = ex.Message })
+                : BadRequest(new { message = ex.Message });
         }
     }
 
@@ -42,15 +62,23 @@ public sealed class FamilyAccessAdminController(IFamilyPortalService familyPorta
         try
         {
             var baseUrl = configuration["FamilyPortal:FrontendBaseUrl"] ?? configuration["Frontend:BaseUrl"] ?? "http://localhost:5173";
-            return Ok(await familyPortal.InviteAsync(tenant.OrganizationId, tenant.BranchId, ActorId(), currentUser.UserName, familyMemberId, baseUrl, ct));
+            var result = await familyPortal.InviteAsync(tenant.OrganizationId, tenant.BranchId, ActorId(), currentUser.UserName, familyMemberId, baseUrl, ct);
+            if (!environment.IsDevelopment() && !environment.IsEnvironment("Testing"))
+                result = result with { DevelopmentActivationUrl = null };
+            return Ok(result);
         }
-        catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     [HttpPost("{familyMemberId:guid}/suspend")]
     public Task<IActionResult> Suspend(Guid familyMemberId, CancellationToken ct) => SetStatus(familyMemberId, "Suspended", ct);
+
     [HttpPost("{familyMemberId:guid}/restore")]
     public Task<IActionResult> Restore(Guid familyMemberId, CancellationToken ct) => SetStatus(familyMemberId, "Active", ct);
+
     [HttpPost("{familyMemberId:guid}/revoke")]
     public Task<IActionResult> Revoke(Guid familyMemberId, CancellationToken ct) => SetStatus(familyMemberId, "Revoked", ct);
 
@@ -62,7 +90,10 @@ public sealed class FamilyAccessAdminController(IFamilyPortalService familyPorta
             await familyPortal.SetAccessStatusAsync(tenant.OrganizationId, ActorId(), currentUser.UserName, familyMemberId, status, ct);
             return Ok(await familyPortal.GetAccessAsync(tenant.OrganizationId, familyMemberId, ct));
         }
-        catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     private bool IsStaff() => currentUser.HasAnyRole(UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator);
@@ -84,10 +115,13 @@ public sealed class FamilyPortalGovernanceController(IFamilyPortalService family
     {
         try
         {
-            await familyPortal.AcceptInvitationAsync(request.Token ?? string.Empty, request.Password ?? string.Empty, ct);
+            await familyPortal.AcceptInvitationAsync(request.Token ?? string.Empty, request.Password ?? string.Empty, request.AcceptTerms, ct);
             return Ok(new { status = "Activated", message = "Family Portal account activated. You can now sign in." });
         }
-        catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     [Authorize(Policy = "Phase1User")]
@@ -105,16 +139,34 @@ public sealed class FamilyPortalGovernanceController(IFamilyPortalService family
         if (!currentUser.IsFamilyMember || currentUser.FamilyMemberId is null) return Forbid();
         try
         {
-            var result = await familyPortal.SubmitFeedbackAsync(tenant.OrganizationId, tenant.BranchId, currentUser.FamilyMemberId.Value,
-                new FamilyFeedbackInput(request.ServiceUserId, request.Type ?? "Feedback", request.Subject ?? string.Empty, request.Description ?? string.Empty, request.Priority ?? "Routine"), ct);
+            var result = await familyPortal.SubmitFeedbackAsync(
+                tenant.OrganizationId,
+                tenant.BranchId,
+                currentUser.FamilyMemberId.Value,
+                new FamilyFeedbackInput(request.ServiceUserId, request.Type ?? "Feedback", request.Subject ?? string.Empty, request.Description ?? string.Empty, request.Priority ?? "Routine"),
+                ct);
             return Created($"/api/family/feedback/{result.Id}", result);
         }
-        catch (UnauthorizedAccessException) { return Forbid(); }
-        catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
+        catch (UnauthorizedAccessException)
+        {
+            return Forbid();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 }
 
-public sealed record ConfigureFamilyAccessRequest(string? AuthorityType, string? VerificationStatus, DateTimeOffset? ValidFrom, DateTimeOffset? ValidUntil, IReadOnlyCollection<string>? Permissions, long? ExpectedRevision);
+public sealed record ConfigureFamilyAccessRequest(
+    string? AuthorityType,
+    string? VerificationStatus,
+    string? VerificationReference,
+    DateTimeOffset? ValidFrom,
+    DateTimeOffset? ValidUntil,
+    IReadOnlyCollection<string>? Permissions,
+    long? ExpectedRevision);
+
 public sealed record ValidateFamilyInvitationRequest(string? Token);
-public sealed record AcceptFamilyInvitationRequest(string? Token, string? Password);
+public sealed record AcceptFamilyInvitationRequest(string? Token, string? Password, bool AcceptTerms);
 public sealed record SubmitFamilyFeedbackRequest(Guid ServiceUserId, string? Type, string? Subject, string? Description, string? Priority);
