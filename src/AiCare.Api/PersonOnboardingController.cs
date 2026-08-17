@@ -106,7 +106,7 @@ public sealed class PersonOnboardingController : ControllerBase
             && !string.IsNullOrWhiteSpace(record.DesiredOutcomes);
         var hasFunding = activeFundingCount > 0 || !string.IsNullOrWhiteSpace(person.FundingSource);
         var hasAssessment = assessmentCount > 0;
-        var hasApprovedPlan = plans.Any(item => item.Status is "Active" or "Approved");
+        var hasActivePlan = plans.Any(item => string.Equals(item.Status, "Active", StringComparison.OrdinalIgnoreCase));
 
         var checks = new[]
         {
@@ -117,7 +117,7 @@ public sealed class PersonOnboardingController : ControllerBase
             new PersonOnboardingCheck("person-centred-record", "Person-centred record", hasPersonCentredRecord, "What matters to the person and desired outcomes are recorded."),
             new PersonOnboardingCheck("funding", "Funding arrangement", hasFunding, "An active funding source or arrangement is recorded."),
             new PersonOnboardingCheck("assessment", "Completed assessment", hasAssessment, "At least one assessment is recorded."),
-            new PersonOnboardingCheck("care-plan", "Approved care plan", hasApprovedPlan, "At least one care plan is approved or active."),
+            new PersonOnboardingCheck("care-plan", "Active signed care plan", hasActivePlan, "At least one governed care-plan version has completed review, signatures and activation."),
         };
 
         return new PersonOnboardingStatus(
@@ -157,7 +157,6 @@ public sealed class PersonOnboardingController : ControllerBase
         }
         catch (DbException)
         {
-            // Allows existing deployments/tests to keep using the legacy person fields until the governance migration is applied.
             return null;
         }
     }
