@@ -33,7 +33,7 @@ public sealed class AddCriticalWebSafetyWorkflows : Migration
                 last_reconciled_at timestamptz null,
                 reconciled_by text not null default '',
                 updated_at timestamptz not null default now(),
-                constraint fk_medication_safety_medication foreign key (medication_id) references \"Medications\"(\"Id\") on delete cascade
+                constraint fk_medication_safety_medication foreign key (medication_id) references "Medications"("Id") on delete cascade
             );
             create index if not exists ix_medication_safety_tenant on medication_safety_profiles(organization_id, branch_id);
 
@@ -49,7 +49,7 @@ public sealed class AddCriticalWebSafetyWorkflows : Migration
                 stock_delta numeric(12,2) null,
                 created_by text not null,
                 created_at timestamptz not null default now(),
-                constraint fk_mar_safety_mar foreign key (mar_record_id) references \"MedicationAdministrationRecords\"(\"Id\") on delete cascade
+                constraint fk_mar_safety_mar foreign key (mar_record_id) references "MedicationAdministrationRecords"("Id") on delete cascade
             );
             create index if not exists ix_mar_safety_record on mar_safety_events(organization_id, branch_id, mar_record_id, created_at);
 
@@ -73,8 +73,8 @@ public sealed class AddCriticalWebSafetyWorkflows : Migration
                 closure_summary text not null default '',
                 created_by text not null,
                 updated_at timestamptz not null default now(),
-                constraint fk_safeguarding_person foreign key (service_user_id) references \"ServiceUsers\"(\"Id\") on delete cascade,
-                constraint fk_safeguarding_incident foreign key (incident_id) references \"Incidents\"(\"Id\") on delete set null
+                constraint fk_safeguarding_person foreign key (service_user_id) references "ServiceUsers"("Id") on delete cascade,
+                constraint fk_safeguarding_incident foreign key (incident_id) references "Incidents"("Id") on delete set null
             );
             create index if not exists ix_safeguarding_person on safeguarding_cases(organization_id, branch_id, service_user_id, status);
 
@@ -101,7 +101,7 @@ public sealed class AddCriticalWebSafetyWorkflows : Migration
                 replaced_by_token_hash text null,
                 created_at timestamptz not null default now(),
                 created_ip text not null default '',
-                constraint fk_refresh_user foreign key (user_id) references \"AppUsers\"(\"Id\") on delete cascade
+                constraint fk_refresh_user foreign key (user_id) references "AppUsers"("Id") on delete cascade
             );
             create index if not exists ix_refresh_user on auth_refresh_tokens(user_id, expires_at);
 
@@ -112,7 +112,7 @@ public sealed class AddCriticalWebSafetyWorkflows : Migration
                 expires_at timestamptz not null,
                 used_at timestamptz null,
                 created_at timestamptz not null default now(),
-                constraint fk_reset_user foreign key (user_id) references \"AppUsers\"(\"Id\") on delete cascade
+                constraint fk_reset_user foreign key (user_id) references "AppUsers"("Id") on delete cascade
             );
             create index if not exists ix_reset_user on password_reset_tokens(user_id, expires_at);
 
@@ -123,7 +123,7 @@ public sealed class AddCriticalWebSafetyWorkflows : Migration
                 mfa_secret text null,
                 mfa_enabled boolean not null default false,
                 updated_at timestamptz not null default now(),
-                constraint fk_security_user foreign key (user_id) references \"AppUsers\"(\"Id\") on delete cascade
+                constraint fk_security_user foreign key (user_id) references "AppUsers"("Id") on delete cascade
             );
         """);
     }
