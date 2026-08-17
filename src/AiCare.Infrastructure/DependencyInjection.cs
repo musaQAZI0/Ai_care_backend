@@ -1,4 +1,5 @@
 using AiCare.Application;
+using AiCare.Application.CarePlans;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -12,6 +13,8 @@ public static class DependencyInjection
             options.UseNpgsql(connectionString));
 
         services.AddScoped<ICareRepository, EfCoreCareRepository>();
+        services.AddScoped<ICarePlanLifecycleStore, CarePlanLifecycleStore>();
+        services.AddScoped<ICarePlanLifecycleService, CarePlanLifecycleService>();
         return services;
     }
 }
