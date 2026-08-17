@@ -33,6 +33,7 @@ public sealed record FamilyAccessSnapshot(
     string Relationship,
     string AuthorityType,
     string VerificationStatus,
+    string VerificationReference,
     string AccessStatus,
     DateTimeOffset? ValidFrom,
     DateTimeOffset? ValidUntil,
@@ -51,6 +52,7 @@ public sealed record ConfigureFamilyAccessCommand(
     Guid FamilyMemberId,
     string AuthorityType,
     string VerificationStatus,
+    string VerificationReference,
     DateTimeOffset? ValidFrom,
     DateTimeOffset? ValidUntil,
     IReadOnlyCollection<string> Permissions,
@@ -86,7 +88,7 @@ public interface IFamilyPortalService
     Task<FamilyAccessSnapshot> ConfigureAccessAsync(Guid organizationId, Guid? branchId, Guid actorUserId, string actorName, ConfigureFamilyAccessCommand command, CancellationToken cancellationToken);
     Task<FamilyInvitationResult> InviteAsync(Guid organizationId, Guid? branchId, Guid actorUserId, string actorName, Guid familyMemberId, string frontendBaseUrl, CancellationToken cancellationToken);
     Task<FamilyInvitationValidation> ValidateInvitationAsync(string token, CancellationToken cancellationToken);
-    Task AcceptInvitationAsync(string token, string password, CancellationToken cancellationToken);
+    Task AcceptInvitationAsync(string token, string password, bool acceptTerms, CancellationToken cancellationToken);
     Task SetAccessStatusAsync(Guid organizationId, Guid actorUserId, string actorName, Guid familyMemberId, string status, CancellationToken cancellationToken);
     Task<IReadOnlyCollection<FamilyPortalPerson>> GetAuthorizedPeopleAsync(Guid organizationId, Guid familyMemberId, CancellationToken cancellationToken);
     Task EnsurePermissionAsync(Guid organizationId, Guid familyMemberId, Guid serviceUserId, string permission, CancellationToken cancellationToken);
@@ -111,11 +113,20 @@ public sealed class FamilyPortalService : IFamilyPortalService
     {
         if (command.FamilyMemberId == Guid.Empty) throw new InvalidOperationException("Family member is required.");
         if (string.IsNullOrWhiteSpace(command.AuthorityType)) throw new InvalidOperationException("Authority type is required.");
+        if (command.VerificationStatus is not ("Pending" or "Verified" or "Rejected" or "Expired" or "Revoked"))
+            throw new InvalidOperationException("Unsupported authority verification status.");
+        if (command.VerificationStatus == "Verified" && string.IsNullOrWhiteSpace(command.VerificationReference))
+            throw new InvalidOperationException("A verification reference or evidence note is required before family authority can be verified.");
         if (command.ValidUntil is not null && command.ValidFrom is not null && command.ValidUntil <= command.ValidFrom)
             throw new InvalidOperationException("Access expiry must be later than the access start date.");
+
         var invalid = command.Permissions.Where(permission => !FamilyPermissions.All.Contains(permission)).Distinct().ToArray();
         if (invalid.Length > 0) throw new InvalidOperationException($"Unsupported family permission: {string.Join(", ", invalid)}.");
-        return _store.ConfigureAccessAsync(organizationId, branchId, actorUserId, actorName, command, cancellationToken);
+        return _store.ConfigureAccessAsync(organizationId, branchId, actorUserId, actorName, command with
+        {
+            AuthorityType = command.AuthorityType.Trim(),
+            VerificationReference = command.VerificationReference.Trim()
+        }, cancellationToken);
     }
 
     public async Task<FamilyInvitationResult> InviteAsync(Guid organizationId, Guid? branchId, Guid actorUserId, string actorName, Guid familyMemberId, string frontendBaseUrl, CancellationToken cancellationToken)
@@ -124,6 +135,8 @@ public sealed class FamilyPortalService : IFamilyPortalService
             ?? throw new InvalidOperationException("Family access must be configured before an invitation can be sent.");
         if (!string.Equals(access.VerificationStatus, "Verified", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Family authority must be verified before an invitation can be sent.");
+        if (access.AccessStatus is "Revoked" or "Expired")
+            throw new InvalidOperationException("Revoked or expired family access cannot be invited.");
         if (string.IsNullOrWhiteSpace(access.Email)) throw new InvalidOperationException("Family member email is required.");
 
         var rawToken = Base64Url(RandomNumberGenerator.GetBytes(32));
@@ -137,13 +150,15 @@ public sealed class FamilyPortalService : IFamilyPortalService
 
     public Task<FamilyInvitationValidation> ValidateInvitationAsync(string token, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(token)) return Task.FromResult(new FamilyInvitationValidation(false, "Invalid", "Invitation token is required.", null, null, null));
+        if (string.IsNullOrWhiteSpace(token))
+            return Task.FromResult(new FamilyInvitationValidation(false, "Invalid", "Invitation token is required.", null, null, null));
         return _store.ValidateInvitationAsync(HashToken(token), DateTimeOffset.UtcNow, cancellationToken);
     }
 
-    public Task AcceptInvitationAsync(string token, string password, CancellationToken cancellationToken)
+    public Task AcceptInvitationAsync(string token, string password, bool acceptTerms, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("Invitation token is required.");
+        if (!acceptTerms) throw new InvalidOperationException("Family Portal terms must be accepted before the account can be activated.");
         ValidatePassword(password);
         return _store.AcceptInvitationAsync(HashToken(token), password, DateTimeOffset.UtcNow, cancellationToken);
     }
@@ -170,7 +185,13 @@ public sealed class FamilyPortalService : IFamilyPortalService
             throw new InvalidOperationException("Person, subject, and description are required.");
         if (input.Type is not ("Feedback" or "Compliment" or "Concern" or "Complaint" or "Suggestion"))
             throw new InvalidOperationException("Unsupported feedback type.");
-        return _store.SubmitFeedbackAsync(organizationId, branchId, familyMemberId, input, cancellationToken);
+        if (input.Priority is not ("Routine" or "Medium" or "High"))
+            throw new InvalidOperationException("Unsupported feedback priority.");
+        return _store.SubmitFeedbackAsync(organizationId, branchId, familyMemberId, input with
+        {
+            Subject = input.Subject.Trim(),
+            Description = input.Description.Trim()
+        }, cancellationToken);
     }
 
     private static string HashToken(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
