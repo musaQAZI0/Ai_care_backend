@@ -14,6 +14,22 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aicare_regression
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aicare_regression"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AICARE_REGRESSION_CONNECTION: Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
