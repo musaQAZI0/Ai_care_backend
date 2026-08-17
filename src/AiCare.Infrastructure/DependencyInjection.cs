@@ -18,6 +18,8 @@ public static class DependencyInjection
         services.AddScoped<ICarePlanLifecycleService, CarePlanLifecycleService>();
         services.AddScoped<IFamilyPortalStore, FamilyPortalStore>();
         services.AddScoped<IFamilyPortalService, FamilyPortalService>();
+        services.AddScoped<IFamilyPortalQueryStore, FamilyPortalQueryStore>();
+        services.AddScoped<IFamilyPortalQueryService, FamilyPortalQueryService>();
         services.AddSingleton<IFamilyInvitationEmailSender, DevelopmentFamilyInvitationEmailSender>();
         return services;
     }
