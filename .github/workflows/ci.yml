@@ -28,15 +28,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-    env:
-      AICARE_REGRESSION_CONNECTION: Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres
-      ConnectionStrings__DefaultConnection: Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres
-      JwtOptions__Issuer: AiCare
-      JwtOptions__Audience: AiCareClient
-      JwtOptions__SigningKey: regression-signing-key-with-enough-length-for-hmac-2026
-      JwtOptions__TokenLifetimeMinutes: '30'
-      Storage__Provider: Local
-      ASPNETCORE_ENVIRONMENT: Development
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,5 +43,17 @@ jobs:
       - name: Build
         run: dotnet build AiCare.Backend.sln --configuration Release --no-restore
 
-      - name: Test
-        run: dotnet test AiCare.Backend.sln --configuration Release --no-build --verbosity normal
+      - name: Existing tests
+        run: dotnet test AiCare.Backend.sln --configuration Release --no-build --verbosity normal --filter "FullyQualifiedName!~ProductionRegressionTests"
+
+      - name: PostgreSQL production regression tests
+        run: dotnet test AiCare.Backend.sln --configuration Release --no-build --verbosity normal --filter "FullyQualifiedName~ProductionRegressionTests"
+        env:
+          AICARE_REGRESSION_CONNECTION: Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres
+          ConnectionStrings__DefaultConnection: Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres
+          JwtOptions__Issuer: AiCare
+          JwtOptions__Audience: AiCareClient
+          JwtOptions__SigningKey: regression-signing-key-with-enough-length-for-hmac-2026
+          JwtOptions__TokenLifetimeMinutes: '30'
+          Storage__Provider: Local
+          ASPNETCORE_ENVIRONMENT: Development
