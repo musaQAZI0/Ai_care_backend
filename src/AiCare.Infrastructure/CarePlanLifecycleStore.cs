@@ -58,20 +58,13 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
         EnsureRevision(snapshot.Version, expectedRevision);
         CarePlanLifecyclePolicy.EnsureTransition(snapshot.Version.Status, targetStatus);
 
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        try
+        await ExecuteTransactionAsync(async () =>
         {
             await UpdateStatusAsync(snapshot.Version, targetStatus, expectedRevision, cancellationToken);
             await InsertEventAsync(snapshot.Version.CarePlanId, snapshot.Version.Status, targetStatus, reason, comment, actor, cancellationToken);
             context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"care_plan.{targetStatus.ToString().ToLowerInvariant()}", actor.UserName, nameof(CarePlan), carePlanId, DateTimeOffset.UtcNow, actor.OrganizationId, actor.BranchId));
             await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }
-        catch
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            throw;
-        }
+        }, cancellationToken);
 
         return await RequireSnapshotAsync(carePlanId, actor, cancellationToken);
     }
@@ -97,39 +90,30 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
             (command.SignerType != CarePlanSignerType.Representative || x.FamilyMemberId == actor.FamilyMemberId));
         if (duplicate) throw new InvalidOperationException("This required signer has already signed this care plan version.");
 
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        try
+        await ExecuteTransactionAsync(async () =>
         {
-            await using (var sql = context.Database.GetDbConnection().CreateCommand())
-            {
-                sql.CommandText = """
-                    insert into care_plan_signatures(id,care_plan_id,signer_type,signer_user_id,family_member_id,signer_name,relationship,declaration,signature_method,signed_at,organization_id,branch_id)
-                    values(@id,@plan,@type,@user,@family,@name,@relationship,@declaration,@method,now(),@organization,@branch)
-                """;
-                AddUuid(sql, "id", Guid.NewGuid());
-                AddUuid(sql, "plan", carePlanId);
-                AddText(sql, "type", command.SignerType.ToString());
-                AddNullableUuid(sql, "user", actor.UserId);
-                AddNullableUuid(sql, "family", command.SignerType == CarePlanSignerType.Representative ? actor.FamilyMemberId : null);
-                AddText(sql, "name", command.SignerName);
-                AddText(sql, "relationship", command.Relationship);
-                AddText(sql, "declaration", command.Declaration);
-                AddText(sql, "method", command.SignatureMethod.ToString());
-                AddUuid(sql, "organization", actor.OrganizationId);
-                AddUuid(sql, "branch", snapshot.Version.BranchId ?? actor.BranchId ?? TenantDefaults.BranchId);
-                await sql.ExecuteNonQueryAsync(cancellationToken);
-            }
+            await using var sql = context.Database.GetDbConnection().CreateCommand();
+            sql.CommandText = """
+                insert into care_plan_signatures(id,care_plan_id,signer_type,signer_user_id,family_member_id,signer_name,relationship,declaration,signature_method,signed_at,organization_id,branch_id)
+                values(@id,@plan,@type,@user,@family,@name,@relationship,@declaration,@method,now(),@organization,@branch)
+            """;
+            AddUuid(sql, "id", Guid.NewGuid());
+            AddUuid(sql, "plan", carePlanId);
+            AddText(sql, "type", command.SignerType.ToString());
+            AddNullableUuid(sql, "user", actor.UserId);
+            AddNullableUuid(sql, "family", command.SignerType == CarePlanSignerType.Representative ? actor.FamilyMemberId : null);
+            AddText(sql, "name", command.SignerName);
+            AddText(sql, "relationship", command.Relationship);
+            AddText(sql, "declaration", command.Declaration);
+            AddText(sql, "method", command.SignatureMethod.ToString());
+            AddUuid(sql, "organization", actor.OrganizationId);
+            AddUuid(sql, "branch", snapshot.Version.BranchId ?? actor.BranchId ?? TenantDefaults.BranchId);
+            await sql.ExecuteNonQueryAsync(cancellationToken);
 
             await IncrementRevisionAsync(carePlanId, command.ExpectedRevision, cancellationToken);
             context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"care_plan.signed:{command.SignerType}", actor.UserName, nameof(CarePlan), carePlanId, DateTimeOffset.UtcNow, actor.OrganizationId, actor.BranchId));
             await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }
-        catch
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            throw;
-        }
+        }, cancellationToken);
 
         var afterSignature = await RequireSnapshotAsync(carePlanId, actor, cancellationToken);
         if (afterSignature.Version.Status == CarePlanLifecycleStatus.Approved && afterSignature.RequiredSignaturesSatisfied)
@@ -146,8 +130,7 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
         CarePlanLifecyclePolicy.EnsureTransition(snapshot.Version.Status, CarePlanLifecycleStatus.Active);
         if (!snapshot.RequiredSignaturesSatisfied) throw new InvalidOperationException("Required signatures are incomplete.");
 
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        try
+        await ExecuteTransactionAsync(async () =>
         {
             var connection = context.Database.GetDbConnection();
             var activePlans = new List<(Guid CarePlanId, long Revision)>();
@@ -176,13 +159,7 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
             await InsertEventAsync(carePlanId, CarePlanLifecycleStatus.Signed, CarePlanLifecycleStatus.Active, "Activated for care delivery", string.Empty, actor, cancellationToken);
             context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_plan.active", actor.UserName, nameof(CarePlan), carePlanId, DateTimeOffset.UtcNow, actor.OrganizationId, actor.BranchId));
             await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }
-        catch
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            throw;
-        }
+        }, cancellationToken);
 
         return await RequireSnapshotAsync(carePlanId, actor, cancellationToken);
     }
@@ -199,8 +176,7 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
         var newPlanId = Guid.NewGuid();
         var branchId = source.Version.BranchId ?? actor.BranchId ?? TenantDefaults.BranchId;
 
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        try
+        await ExecuteTransactionAsync(async () =>
         {
             var newPlan = source.CarePlan with
             {
@@ -249,13 +225,7 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
             await InsertEventAsync(newPlanId, CarePlanLifecycleStatus.Draft, CarePlanLifecycleStatus.Draft, command.ChangeReason, "Revision created from previous care plan version", actor, cancellationToken);
             context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_plan.revision_created", actor.UserName, nameof(CarePlan), newPlanId, DateTimeOffset.UtcNow, actor.OrganizationId, branchId));
             await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }
-        catch
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            throw;
-        }
+        }, cancellationToken);
 
         return await RequireSnapshotAsync(newPlanId, actor, cancellationToken);
     }
@@ -268,8 +238,7 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
         if (actor.CareWorkerId is null) throw new UnauthorizedAccessException("The account is not linked to a care worker.");
         if (snapshot.Acknowledgements.Any(x => x.CareWorkerId == actor.CareWorkerId)) return snapshot;
 
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        try
+        await ExecuteTransactionAsync(async () =>
         {
             await using var command = context.Database.GetDbConnection().CreateCommand();
             command.CommandText = """
@@ -287,14 +256,28 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
             await IncrementRevisionAsync(carePlanId, expectedRevision, cancellationToken);
             context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "care_plan.acknowledged", actor.UserName, nameof(CarePlan), carePlanId, DateTimeOffset.UtcNow, actor.OrganizationId, actor.BranchId));
             await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }
-        catch
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            throw;
-        }
+        }, cancellationToken);
+
         return await RequireSnapshotAsync(carePlanId, actor, cancellationToken);
+    }
+
+    private async Task ExecuteTransactionAsync(Func<Task> operation, CancellationToken cancellationToken)
+    {
+        var strategy = context.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await operation();
+                await transaction.CommitAsync(cancellationToken);
+            }
+            catch
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                throw;
+            }
+        });
     }
 
     private async Task<CarePlanLifecycleSnapshot> RequireSnapshotAsync(Guid carePlanId, CarePlanActor actor, CancellationToken cancellationToken) =>
