@@ -82,6 +82,12 @@ public sealed class CarePlanLifecycleRegressionTests : IClassFixture<PostgresReg
 
         await AssertClinicalContentIsImmutableAsync(plan.Id);
 
+        var legacyApprove = await admin.PostAsync($"/api/phase1/care-plans/{plan.Id}/approve", null);
+        Assert.Equal(HttpStatusCode.InternalServerError, legacyApprove.StatusCode);
+        var afterLegacyApprove = await GetLifecycle(admin, plan.Id);
+        Assert.Equal("Approved", afterLegacyApprove.Version.Status);
+        Assert.Equal(approved.Version.Revision, afterLegacyApprove.Version.Revision);
+
         var managerSignatureResponse = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{plan.Id}/signatures", new
         {
             expectedRevision = approved.Version.Revision,
@@ -199,8 +205,10 @@ public sealed class CarePlanLifecycleRegressionTests : IClassFixture<PostgresReg
         var plan = await db.CarePlans.AsNoTracking().SingleAsync(x => x.Id == carePlanId);
         var changed = plan with { PersonalCare = "Unsafe silent overwrite" };
         db.CarePlans.Update(changed);
-        var error = await Assert.ThrowsAsync<PostgresException>(() => db.SaveChangesAsync());
-        Assert.Contains("immutable", error.MessageText, StringComparison.OrdinalIgnoreCase);
+        var error = await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+        var postgres = Assert.IsType<PostgresException>(error.InnerException);
+        Assert.Equal("P0001", postgres.SqlState);
+        Assert.Contains("immutable", postgres.MessageText, StringComparison.OrdinalIgnoreCase);
         db.ChangeTracker.Clear();
     }
 
