@@ -1,6 +1,7 @@
 using System.Data;
 using AiCare.Application;
 using AiCare.Application.CarePlans;
+using AiCare.Application.FamilyPortal;
 using AiCare.Domain;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -12,6 +13,7 @@ namespace AiCare.Api;
 [Route("api/phase1/care-plans")]
 public sealed class CarePlanLifecycleController(
     ICarePlanLifecycleService lifecycle,
+    IFamilyPortalService familyPortal,
     ITenantContext tenant,
     ICurrentUserContext currentUser) : ControllerBase
 {
@@ -19,12 +21,17 @@ public sealed class CarePlanLifecycleController(
     public async Task<IActionResult> GetLifecycle(Guid carePlanId, CancellationToken cancellationToken)
     {
         var result = await lifecycle.GetAsync(carePlanId, Actor(), cancellationToken);
-        return result is null ? NotFound() : Ok(result);
+        if (result is null) return NotFound();
+        if (!await AuthorizeFamilyAsync(result.CarePlan.ServiceUserId, FamilyPermissions.ViewCarePlan, cancellationToken)) return Forbid();
+        return Ok(result);
     }
 
     [HttpGet("service-user/{serviceUserId:guid}/versions")]
-    public async Task<IActionResult> GetVersions(Guid serviceUserId, CancellationToken cancellationToken) =>
-        Ok(await lifecycle.GetVersionsAsync(serviceUserId, Actor(), cancellationToken));
+    public async Task<IActionResult> GetVersions(Guid serviceUserId, CancellationToken cancellationToken)
+    {
+        if (!await AuthorizeFamilyAsync(serviceUserId, FamilyPermissions.ViewCarePlan, cancellationToken)) return Forbid();
+        return Ok(await lifecycle.GetVersionsAsync(serviceUserId, Actor(), cancellationToken));
+    }
 
     [HttpPost("{carePlanId:guid}/submit-review")]
     public Task<IActionResult> SubmitForReview(Guid carePlanId, LifecycleActionRequest request, CancellationToken cancellationToken) =>
@@ -46,6 +53,14 @@ public sealed class CarePlanLifecycleController(
         if (!Enum.TryParse<CarePlanSignatureMethod>(request.SignatureMethod, true, out var method))
             return BadRequest(new { message = "Invalid signature method." });
 
+        if (currentUser.IsFamilyMember)
+        {
+            if (signerType != CarePlanSignerType.Representative) return Forbid();
+            var snapshot = await lifecycle.GetAsync(carePlanId, Actor(), cancellationToken);
+            if (snapshot is null) return NotFound();
+            if (!await AuthorizeFamilyAsync(snapshot.CarePlan.ServiceUserId, FamilyPermissions.SignCarePlan, cancellationToken)) return Forbid();
+        }
+
         return await Execute(() => lifecycle.SignAsync(carePlanId,
             new SignCarePlanCommand(signerType, request.SignerName ?? string.Empty, request.Relationship ?? string.Empty, request.Declaration ?? string.Empty, method, request.ExpectedRevision),
             Actor(), cancellationToken));
@@ -62,6 +77,21 @@ public sealed class CarePlanLifecycleController(
     [HttpPost("{carePlanId:guid}/acknowledgements")]
     public Task<IActionResult> Acknowledge(Guid carePlanId, RevisionRequest request, CancellationToken cancellationToken) =>
         Execute(() => lifecycle.AcknowledgeAsync(carePlanId, request.ExpectedRevision, Actor(), cancellationToken));
+
+    private async Task<bool> AuthorizeFamilyAsync(Guid serviceUserId, string permission, CancellationToken cancellationToken)
+    {
+        if (!currentUser.IsFamilyMember) return true;
+        if (currentUser.FamilyMemberId is null) return false;
+        try
+        {
+            await familyPortal.EnsurePermissionAsync(tenant.OrganizationId, currentUser.FamilyMemberId.Value, serviceUserId, permission, cancellationToken);
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     private CarePlanActor Actor() => new(
         currentUser.UserId,
