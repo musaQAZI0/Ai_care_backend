@@ -152,6 +152,10 @@ public sealed class AddCarePlanLifecycle : Migration
             declare
                 version_number_value integer;
             begin
+                if exists (select 1 from care_plan_versions where care_plan_id = new."Id") then
+                    return new;
+                end if;
+
                 version_number_value := nullif(regexp_replace(new."Version", '[^0-9]', '', 'g'), '')::integer;
                 if version_number_value is null then
                     raise exception 'Care plan version number could not be determined.';
@@ -162,8 +166,7 @@ public sealed class AddCarePlanLifecycle : Migration
                     status, revision, created_at, updated_at, organization_id, branch_id)
                 values(
                     gen_random_uuid(), new."Id", new."ServiceUserId", version_number_value, null,
-                    'Care plan draft created', 'Draft', 1, now(), now(), new."OrganizationId", new."BranchId")
-                on conflict (care_plan_id) do nothing;
+                    'Care plan draft created', 'Draft', 1, now(), now(), new."OrganizationId", new."BranchId");
                 return new;
             end;
             $$;
@@ -195,7 +198,6 @@ public sealed class AddCarePlanLifecycle : Migration
                     raise exception 'Approved, signed, active, or superseded care plan versions are immutable. Create a revision instead.';
                 end if;
 
-                -- Lifecycle metadata is authoritative. Legacy writes cannot invent a status.
                 new."Status" := lifecycle_status;
                 return new;
             end;
@@ -225,8 +227,9 @@ public sealed class AddCarePlanLifecycle : Migration
                 for each row execute function aicare_prepare_care_plan_insert();
 
             drop trigger if exists trg_aicare_register_care_plan_version on "CarePlans";
-            create trigger trg_aicare_register_care_plan_version
+            create constraint trigger trg_aicare_register_care_plan_version
                 after insert on "CarePlans"
+                deferrable initially deferred
                 for each row execute function aicare_register_care_plan_version();
 
             drop trigger if exists trg_aicare_guard_care_plan_update on "CarePlans";
