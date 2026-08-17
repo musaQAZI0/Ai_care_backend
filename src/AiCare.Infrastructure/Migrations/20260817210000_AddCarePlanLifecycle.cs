@@ -177,6 +177,7 @@ public sealed class AddCarePlanLifecycle : Migration
             as $$
             declare
                 lifecycle_status text;
+                content_changed boolean;
             begin
                 select status into lifecycle_status
                 from care_plan_versions
@@ -186,19 +187,26 @@ public sealed class AddCarePlanLifecycle : Migration
                     return new;
                 end if;
 
-                if lifecycle_status <> 'Draft' and (
+                content_changed :=
                     new."ServiceUserId" is distinct from old."ServiceUserId" or
                     new."PersonalCare" is distinct from old."PersonalCare" or
                     new."MedicationSupport" is distinct from old."MedicationSupport" or
                     new."MobilityAndTransfers" is distinct from old."MobilityAndTransfers" or
                     new."Nutrition" is distinct from old."Nutrition" or
                     new."ReviewDueAt" is distinct from old."ReviewDueAt" or
-                    new."Version" is distinct from old."Version"
-                ) then
+                    new."Version" is distinct from old."Version";
+
+                if lifecycle_status <> 'Draft' and content_changed then
                     raise exception 'Approved, signed, active, or superseded care plan versions are immutable. Create a revision instead.';
                 end if;
 
-                new."Status" := lifecycle_status;
+                if new."Status" is distinct from lifecycle_status then
+                    if lifecycle_status = 'Draft' and content_changed then
+                        new."Status" := 'Draft';
+                    else
+                        raise exception 'Care plan status must be changed through the governed lifecycle workflow.';
+                    end if;
+                end if;
                 return new;
             end;
             $$;
@@ -218,6 +226,52 @@ public sealed class AddCarePlanLifecycle : Migration
                     raise exception 'Only draft care plan versions can be deleted.';
                 end if;
                 return old;
+            end;
+            $$;
+
+            create or replace function aicare_guard_care_plan_child_mutation()
+            returns trigger
+            language plpgsql
+            as $$
+            declare
+                plan_id uuid;
+                lifecycle_status text;
+            begin
+                if tg_op = 'DELETE' then
+                    plan_id := old.care_plan_id;
+                else
+                    plan_id := new.care_plan_id;
+                end if;
+
+                select status into lifecycle_status from care_plan_versions where care_plan_id = plan_id;
+                if lifecycle_status is not null and lifecycle_status <> 'Draft' then
+                    raise exception 'Care-plan tasks can only be changed on a draft care plan version.';
+                end if;
+                if tg_op = 'DELETE' then return old; end if;
+                return new;
+            end;
+            $$;
+
+            create or replace function aicare_guard_care_plan_outcome_mutation()
+            returns trigger
+            language plpgsql
+            as $$
+            declare
+                plan_id uuid;
+                lifecycle_status text;
+            begin
+                if tg_op = 'DELETE' then
+                    plan_id := old."CarePlanId";
+                else
+                    plan_id := new."CarePlanId";
+                end if;
+
+                select status into lifecycle_status from care_plan_versions where care_plan_id = plan_id;
+                if lifecycle_status is not null and lifecycle_status <> 'Draft' then
+                    raise exception 'Care-plan outcomes can only be changed on a draft care plan version.';
+                end if;
+                if tg_op = 'DELETE' then return old; end if;
+                return new;
             end;
             $$;
 
@@ -241,16 +295,30 @@ public sealed class AddCarePlanLifecycle : Migration
             create trigger trg_aicare_guard_care_plan_delete
                 before delete on "CarePlans"
                 for each row execute function aicare_guard_care_plan_delete();
+
+            drop trigger if exists trg_aicare_guard_care_plan_tasks on care_plan_tasks;
+            create trigger trg_aicare_guard_care_plan_tasks
+                before insert or update or delete on care_plan_tasks
+                for each row execute function aicare_guard_care_plan_child_mutation();
+
+            drop trigger if exists trg_aicare_guard_care_plan_outcomes on "CarePlanOutcomes";
+            create trigger trg_aicare_guard_care_plan_outcomes
+                before insert or update or delete on "CarePlanOutcomes"
+                for each row execute function aicare_guard_care_plan_outcome_mutation();
         """);
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)
     {
         migrationBuilder.Sql("""
+            drop trigger if exists trg_aicare_guard_care_plan_outcomes on "CarePlanOutcomes";
+            drop trigger if exists trg_aicare_guard_care_plan_tasks on care_plan_tasks;
             drop trigger if exists trg_aicare_guard_care_plan_delete on "CarePlans";
             drop trigger if exists trg_aicare_guard_care_plan_update on "CarePlans";
             drop trigger if exists trg_aicare_register_care_plan_version on "CarePlans";
             drop trigger if exists trg_aicare_prepare_care_plan_insert on "CarePlans";
+            drop function if exists aicare_guard_care_plan_outcome_mutation();
+            drop function if exists aicare_guard_care_plan_child_mutation();
             drop function if exists aicare_guard_care_plan_delete();
             drop function if exists aicare_guard_care_plan_update();
             drop function if exists aicare_register_care_plan_version();
