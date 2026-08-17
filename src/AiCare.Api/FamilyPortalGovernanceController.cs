@@ -101,8 +101,45 @@ public sealed class FamilyAccessAdminController(
 }
 
 [ApiController]
+[Route("api/phase1/family-documents")]
+[Authorize(Policy = "Phase1User")]
+public sealed class FamilyDocumentAccessAdminController(
+    IFamilyPortalQueryStore familyQueries,
+    ITenantContext tenant,
+    ICurrentUserContext currentUser) : ControllerBase
+{
+    [HttpPut("{documentId:guid}/visibility")]
+    public async Task<IActionResult> SetVisibility(Guid documentId, SetFamilyDocumentVisibilityRequest request, CancellationToken ct)
+    {
+        if (!currentUser.HasAnyRole(UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator)) return Forbid();
+        try
+        {
+            await familyQueries.SetDocumentVisibilityAsync(
+                tenant.OrganizationId,
+                tenant.BranchId,
+                currentUser.UserName,
+                new SetFamilyDocumentVisibilityCommand(documentId, request.Visibility ?? "InternalOnly", request.FamilyMemberIds ?? Array.Empty<Guid>()),
+                ct);
+            return NoContent();
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+}
+
+[ApiController]
 [Route("api/family")]
-public sealed class FamilyPortalGovernanceController(IFamilyPortalService familyPortal, ITenantContext tenant, ICurrentUserContext currentUser) : ControllerBase
+public sealed class FamilyPortalGovernanceController(
+    IFamilyPortalService familyPortal,
+    IFamilyPortalQueryService familyQueries,
+    ITenantContext tenant,
+    ICurrentUserContext currentUser) : ControllerBase
 {
     [AllowAnonymous]
     [HttpPost("invitations/validate")]
@@ -128,21 +165,86 @@ public sealed class FamilyPortalGovernanceController(IFamilyPortalService family
     [HttpGet("people")]
     public async Task<IActionResult> GetAuthorizedPeople(CancellationToken ct)
     {
-        if (!currentUser.IsFamilyMember || currentUser.FamilyMemberId is null) return Forbid();
-        return Ok(await familyPortal.GetAuthorizedPeopleAsync(tenant.OrganizationId, currentUser.FamilyMemberId.Value, ct));
+        if (!TryFamilyMember(out var familyMemberId)) return Forbid();
+        return Ok(await familyPortal.GetAuthorizedPeopleAsync(tenant.OrganizationId, familyMemberId, ct));
     }
+
+    [Authorize(Policy = "Phase1User")]
+    [HttpGet("service-users/{serviceUserId:guid}/overview")]
+    public Task<IActionResult> GetOverview(Guid serviceUserId, CancellationToken ct) =>
+        ExecuteFamily(async familyMemberId =>
+        {
+            var result = await familyQueries.GetOverviewAsync(tenant.OrganizationId, familyMemberId, serviceUserId, ct);
+            return result is null ? NotFound() : Ok(result);
+        });
+
+    [Authorize(Policy = "Phase1User")]
+    [HttpGet("service-users/{serviceUserId:guid}/timeline")]
+    public Task<IActionResult> GetTimeline(Guid serviceUserId, CancellationToken ct) =>
+        ExecuteFamily(async familyMemberId => Ok(await familyQueries.GetTimelineAsync(tenant.OrganizationId, familyMemberId, serviceUserId, ct)));
+
+    [Authorize(Policy = "Phase1User")]
+    [HttpGet("service-users/{serviceUserId:guid}/visits")]
+    public Task<IActionResult> GetVisits(Guid serviceUserId, CancellationToken ct) =>
+        ExecuteFamily(async familyMemberId => Ok(await familyQueries.GetVisitsAsync(tenant.OrganizationId, familyMemberId, serviceUserId, false, ct)));
+
+    [Authorize(Policy = "Phase1User")]
+    [HttpGet("service-users/{serviceUserId:guid}/appointments")]
+    public Task<IActionResult> GetAppointments(Guid serviceUserId, CancellationToken ct) =>
+        ExecuteFamily(async familyMemberId => Ok(await familyQueries.GetVisitsAsync(tenant.OrganizationId, familyMemberId, serviceUserId, true, ct)));
+
+    [Authorize(Policy = "Phase1User")]
+    [HttpGet("service-users/{serviceUserId:guid}/documents")]
+    public Task<IActionResult> GetDocuments(Guid serviceUserId, CancellationToken ct) =>
+        ExecuteFamily(async familyMemberId => Ok(await familyQueries.GetDocumentsAsync(tenant.OrganizationId, familyMemberId, serviceUserId, ct)));
+
+    [Authorize(Policy = "Phase1User")]
+    [HttpGet("service-users/{serviceUserId:guid}/monthly-report")]
+    public Task<IActionResult> GetMonthlyReport(Guid serviceUserId, CancellationToken ct) =>
+        ExecuteFamily(async familyMemberId =>
+        {
+            var result = await familyQueries.GetMonthlyReportAsync(tenant.OrganizationId, familyMemberId, serviceUserId, ct);
+            return result is null ? NotFound() : Ok(result);
+        });
+
+    [Authorize(Policy = "Phase1User")]
+    [HttpGet("service-users/{serviceUserId:guid}/preferences")]
+    public Task<IActionResult> GetPreferences(Guid serviceUserId, CancellationToken ct) =>
+        ExecuteFamily(async familyMemberId => Ok(await familyQueries.GetPreferencesAsync(tenant.OrganizationId, familyMemberId, serviceUserId, ct)));
+
+    [Authorize(Policy = "Phase1User")]
+    [HttpPut("service-users/{serviceUserId:guid}/preferences")]
+    public Task<IActionResult> SavePreferences(Guid serviceUserId, SaveFamilyNotificationPreferencesRequest request, CancellationToken ct) =>
+        ExecuteFamily(async familyMemberId => Ok(await familyQueries.SavePreferencesAsync(
+            tenant.OrganizationId,
+            familyMemberId,
+            serviceUserId,
+            new SaveFamilyNotificationPreferencesCommand(
+                request.EmailUpdates,
+                request.SmsAlerts,
+                request.MonthlyDigest,
+                request.IncidentAlerts,
+                request.CarePlanSignatureRequests,
+                request.CarePlanUpdates,
+                request.AppointmentReminders,
+                request.VisitUpdates,
+                request.DocumentShared,
+                request.NewMessages,
+                request.ComplaintResponses,
+                request.ExpectedRevision),
+            ct)));
 
     [Authorize(Policy = "Phase1User")]
     [HttpPost("feedback")]
     public async Task<IActionResult> SubmitFeedback(SubmitFamilyFeedbackRequest request, CancellationToken ct)
     {
-        if (!currentUser.IsFamilyMember || currentUser.FamilyMemberId is null) return Forbid();
+        if (!TryFamilyMember(out var familyMemberId)) return Forbid();
         try
         {
             var result = await familyPortal.SubmitFeedbackAsync(
                 tenant.OrganizationId,
                 tenant.BranchId,
-                currentUser.FamilyMemberId.Value,
+                familyMemberId,
                 new FamilyFeedbackInput(request.ServiceUserId, request.Type ?? "Feedback", request.Subject ?? string.Empty, request.Description ?? string.Empty, request.Priority ?? "Routine"),
                 ct);
             return Created($"/api/family/feedback/{result.Id}", result);
@@ -156,6 +258,31 @@ public sealed class FamilyPortalGovernanceController(IFamilyPortalService family
             return BadRequest(new { message = ex.Message });
         }
     }
+
+    private async Task<IActionResult> ExecuteFamily(Func<Guid, Task<IActionResult>> action)
+    {
+        if (!TryFamilyMember(out var familyMemberId)) return Forbid();
+        try
+        {
+            return await action(familyMemberId);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Forbid();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return ex.Message.Contains("changed elsewhere", StringComparison.OrdinalIgnoreCase)
+                ? Conflict(new { message = ex.Message })
+                : BadRequest(new { message = ex.Message });
+        }
+    }
+
+    private bool TryFamilyMember(out Guid familyMemberId)
+    {
+        familyMemberId = currentUser.FamilyMemberId ?? Guid.Empty;
+        return currentUser.IsFamilyMember && familyMemberId != Guid.Empty;
+    }
 }
 
 public sealed record ConfigureFamilyAccessRequest(
@@ -167,6 +294,20 @@ public sealed record ConfigureFamilyAccessRequest(
     IReadOnlyCollection<string>? Permissions,
     long? ExpectedRevision);
 
+public sealed record SetFamilyDocumentVisibilityRequest(string? Visibility, IReadOnlyCollection<Guid>? FamilyMemberIds);
 public sealed record ValidateFamilyInvitationRequest(string? Token);
 public sealed record AcceptFamilyInvitationRequest(string? Token, string? Password, bool AcceptTerms);
 public sealed record SubmitFamilyFeedbackRequest(Guid ServiceUserId, string? Type, string? Subject, string? Description, string? Priority);
+public sealed record SaveFamilyNotificationPreferencesRequest(
+    bool EmailUpdates,
+    bool SmsAlerts,
+    bool MonthlyDigest,
+    bool IncidentAlerts,
+    bool CarePlanSignatureRequests,
+    bool CarePlanUpdates,
+    bool AppointmentReminders,
+    bool VisitUpdates,
+    bool DocumentShared,
+    bool NewMessages,
+    bool ComplaintResponses,
+    long? ExpectedRevision);
