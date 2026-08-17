@@ -27,12 +27,12 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
         if (row is null)
         {
             return new FamilyAccessSnapshot(member.Id, member.ServiceUserId, member.FullName, member.Email, member.Relationship,
-                member.Relationship, "Pending", "PendingVerification", null, null, 0, Array.Empty<string>(), invitation.Status, invitation.ExpiresAt);
+                member.Relationship, "Pending", string.Empty, "PendingVerification", null, null, 0, Array.Empty<string>(), invitation.Status, invitation.ExpiresAt);
         }
 
         var permissions = await ReadPermissionsAsync(row.Value.Id, cancellationToken);
         return new FamilyAccessSnapshot(member.Id, member.ServiceUserId, member.FullName, member.Email, member.Relationship,
-            row.Value.AuthorityType, row.Value.VerificationStatus,
+            row.Value.AuthorityType, row.Value.VerificationStatus, row.Value.VerificationReference,
             EffectiveStatus(row.Value.AccessStatus, row.Value.ValidFrom, row.Value.ValidUntil, DateTimeOffset.UtcNow),
             row.Value.ValidFrom, row.Value.ValidUntil, row.Value.Revision, permissions, invitation.Status, invitation.ExpiresAt);
     }
@@ -59,16 +59,17 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
 
             await _db.Database.ExecuteSqlInterpolatedAsync($"""
                 insert into family_access_grants (
-                    id, family_member_id, service_user_id, authority_type, verification_status, access_status,
+                    id, family_member_id, service_user_id, authority_type, verification_status, access_status, verification_reference,
                     verified_by_user_id, verified_by, verified_at, valid_from, valid_until, revision,
                     created_at, updated_at, organization_id, branch_id)
-                values ({grantId}, {member.Id}, {member.ServiceUserId}, {command.AuthorityType}, {command.VerificationStatus}, {accessStatus},
+                values ({grantId}, {member.Id}, {member.ServiceUserId}, {command.AuthorityType}, {command.VerificationStatus}, {accessStatus}, {command.VerificationReference},
                     {actorUserId}, {actorName}, {verifiedAt}, {command.ValidFrom}, {command.ValidUntil}, {nextRevision},
                     now(), now(), {organizationId}, {branchId})
                 on conflict (organization_id, family_member_id, service_user_id) do update set
                     authority_type = excluded.authority_type,
                     verification_status = excluded.verification_status,
                     access_status = excluded.access_status,
+                    verification_reference = excluded.verification_reference,
                     verified_by_user_id = excluded.verified_by_user_id,
                     verified_by = excluded.verified_by,
                     verified_at = excluded.verified_at,
@@ -203,7 +204,7 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
                 _db.Entry(existingUser).CurrentValues.SetValues(existingUser with { UserName = email, Email = email, PasswordHash = passwordHash, IsActive = true });
             await _db.SaveChangesAsync(cancellationToken);
 
-            await _db.Database.ExecuteSqlInterpolatedAsync($"update family_portal_invitations set status = 'Accepted', accepted_at = {now} where id = {invitationId}", cancellationToken);
+            await _db.Database.ExecuteSqlInterpolatedAsync($"update family_portal_invitations set status = 'Accepted', accepted_at = {now}, accepted_terms_at = {now} where id = {invitationId}", cancellationToken);
             await _db.Database.ExecuteSqlInterpolatedAsync($"update family_access_grants set access_status = 'Active', updated_at = now(), revision = revision + 1 where organization_id = {organizationId} and family_member_id = {familyMemberId}", cancellationToken);
             AddAudit(organizationId, branchId, fullName, "family.invitation_accepted", "FamilyMember", familyMemberId);
             await _db.SaveChangesAsync(cancellationToken);
@@ -273,21 +274,21 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
         return new FamilyFeedbackResult(id, submittedStatus, submittedAt);
     }
 
-    private async Task<(Guid Id, Guid ServiceUserId, string AuthorityType, string VerificationStatus, string AccessStatus, DateTimeOffset? ValidFrom, DateTimeOffset? ValidUntil, long Revision)?> ReadGrantAsync(Guid organizationId, Guid familyMemberId, CancellationToken cancellationToken)
+    private async Task<(Guid Id, Guid ServiceUserId, string AuthorityType, string VerificationStatus, string VerificationReference, string AccessStatus, DateTimeOffset? ValidFrom, DateTimeOffset? ValidUntil, long Revision)?> ReadGrantAsync(Guid organizationId, Guid familyMemberId, CancellationToken cancellationToken)
     {
         var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = CreateCommand(connection);
         command.CommandText = """
-            select id, service_user_id, authority_type, verification_status, access_status, valid_from, valid_until, revision
+            select id, service_user_id, authority_type, verification_status, verification_reference, access_status, valid_from, valid_until, revision
             from family_access_grants where organization_id = @organization and family_member_id = @family limit 1
             """;
         command.Parameters.AddWithValue("organization", organizationId);
         command.Parameters.AddWithValue("family", familyMemberId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
-        return (reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
-            reader.IsDBNull(5) ? null : reader.GetFieldValue<DateTimeOffset>(5),
-            reader.IsDBNull(6) ? null : reader.GetFieldValue<DateTimeOffset>(6), reader.GetInt64(7));
+        return (reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5),
+            reader.IsDBNull(6) ? null : reader.GetFieldValue<DateTimeOffset>(6),
+            reader.IsDBNull(7) ? null : reader.GetFieldValue<DateTimeOffset>(7), reader.GetInt64(8));
     }
 
     private async Task<IReadOnlyCollection<string>> ReadPermissionsAsync(Guid grantId, CancellationToken cancellationToken)
