@@ -44,10 +44,10 @@ jobs:
         run: dotnet build AiCare.Backend.sln --configuration Release --no-restore
 
       - name: Existing tests
-        run: dotnet test AiCare.Backend.sln --configuration Release --no-build --verbosity normal --filter "FullyQualifiedName!~ProductionRegressionTests&FullyQualifiedName!~CarePlanLifecycleRegressionTests"
+        run: dotnet test AiCare.Backend.sln --configuration Release --no-build --verbosity normal --filter "FullyQualifiedName!~ProductionRegressionTests&FullyQualifiedName!~CarePlanLifecycleRegressionTests&FullyQualifiedName!~CarePlanSupersedingRegressionTests"
 
       - name: PostgreSQL production regression tests
-        run: dotnet test AiCare.Backend.sln --configuration Release --no-build --verbosity normal --filter "FullyQualifiedName~ProductionRegressionTests|FullyQualifiedName~CarePlanLifecycleRegressionTests"
+        run: dotnet test AiCare.Backend.sln --configuration Release --no-build --verbosity normal --filter "FullyQualifiedName~ProductionRegressionTests|FullyQualifiedName~CarePlanLifecycleRegressionTests|FullyQualifiedName~CarePlanSupersedingRegressionTests"
         env:
           AICARE_REGRESSION_CONNECTION: Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres
           ConnectionStrings__DefaultConnection: Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres
