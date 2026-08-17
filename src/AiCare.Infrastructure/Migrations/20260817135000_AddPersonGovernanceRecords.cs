@@ -27,7 +27,7 @@ public sealed class AddPersonGovernanceRecords : Migration
                 is_emergency boolean not null default false,
                 created_at timestamptz not null default now(),
                 updated_at timestamptz not null default now(),
-                constraint fk_person_contacts_service_users foreign key (service_user_id) references \"ServiceUsers\"(\"Id\") on delete cascade
+                constraint fk_person_contacts_service_users foreign key (service_user_id) references "ServiceUsers"("Id") on delete cascade
             );
             create index if not exists ix_person_contacts_tenant_person on person_contacts(organization_id, branch_id, service_user_id);
 
@@ -47,7 +47,7 @@ public sealed class AddPersonGovernanceRecords : Migration
                 withdrawn_at timestamptz null,
                 withdrawal_reason text not null default '',
                 created_at timestamptz not null default now(),
-                constraint fk_consent_records_service_users foreign key (service_user_id) references \"ServiceUsers\"(\"Id\") on delete cascade
+                constraint fk_consent_records_service_users foreign key (service_user_id) references "ServiceUsers"("Id") on delete cascade
             );
             create index if not exists ix_consent_records_tenant_person on consent_records(organization_id, branch_id, service_user_id);
             create index if not exists ix_consent_records_status on consent_records(organization_id, status, expires_at);
@@ -69,7 +69,7 @@ public sealed class AddPersonGovernanceRecords : Migration
                 notes text not null default '',
                 created_at timestamptz not null default now(),
                 updated_at timestamptz not null default now(),
-                constraint fk_funding_arrangements_service_users foreign key (service_user_id) references \"ServiceUsers\"(\"Id\") on delete cascade
+                constraint fk_funding_arrangements_service_users foreign key (service_user_id) references "ServiceUsers"("Id") on delete cascade
             );
             create index if not exists ix_funding_arrangements_tenant_person on funding_arrangements(organization_id, branch_id, service_user_id);
             create index if not exists ix_funding_arrangements_status on funding_arrangements(organization_id, status, valid_to);
