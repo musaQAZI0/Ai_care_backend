@@ -39,7 +39,8 @@ public sealed class CareTasksController : ControllerBase
         var plan = await FindPlan(carePlanId, cancellationToken);
         if (plan is null) return NotFound();
         if (string.IsNullOrWhiteSpace(request.Title)) return BadRequest(new { message = "Task title is required." });
-        if (string.Equals(plan.Status, "Archived", StringComparison.OrdinalIgnoreCase)) return BadRequest(new { message = "Archived care plans cannot receive new tasks." });
+        if (!string.Equals(plan.Status, "Draft", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { message = "Care-plan tasks can only be changed while the care plan version is Draft. Create a revision first." });
 
         var id = Guid.NewGuid();
         await Execute("""
@@ -105,9 +106,8 @@ public sealed class CareTasksController : ControllerBase
         if (existing > 0) return;
 
         var plan = await _context.CarePlans
-            .Where(item => item.ServiceUserId == visit.ServiceUserId && (item.Status == "Active" || item.Status == "Approved"))
-            .OrderByDescending(item => item.Status == "Active")
-            .ThenByDescending(item => item.ReviewDueAt)
+            .Where(item => item.ServiceUserId == visit.ServiceUserId && item.Status == "Active")
+            .OrderByDescending(item => item.ReviewDueAt)
             .FirstOrDefaultAsync(cancellationToken);
         if (plan is null) return;
 
