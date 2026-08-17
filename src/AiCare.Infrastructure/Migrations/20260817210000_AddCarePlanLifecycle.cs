@@ -112,19 +112,146 @@ public sealed class AddCarePlanLifecycle : Migration
             where v.id = r.id and r.rn > 1;
 
             update "CarePlans" p
-            set "Status" = v.status
+            set "Status" = v.status,
+                "Version" = 'v' || v.version_number::text
             from care_plan_versions v
             where v.care_plan_id = p."Id";
 
             create unique index if not exists ux_care_plan_versions_one_active
                 on care_plan_versions(organization_id, branch_id, service_user_id)
                 where status = 'Active';
+
+            create or replace function aicare_prepare_care_plan_insert()
+            returns trigger
+            language plpgsql
+            as $$
+            declare
+                next_version integer;
+            begin
+                perform pg_advisory_xact_lock(hashtextextended(
+                    new."OrganizationId"::text || ':' || new."BranchId"::text || ':' || new."ServiceUserId"::text,
+                    0));
+
+                select coalesce(max(version_number), 0) + 1
+                into next_version
+                from care_plan_versions
+                where organization_id = new."OrganizationId"
+                  and branch_id = new."BranchId"
+                  and service_user_id = new."ServiceUserId";
+
+                new."Version" := 'v' || next_version::text;
+                new."Status" := 'Draft';
+                return new;
+            end;
+            $$;
+
+            create or replace function aicare_register_care_plan_version()
+            returns trigger
+            language plpgsql
+            as $$
+            declare
+                version_number_value integer;
+            begin
+                version_number_value := nullif(regexp_replace(new."Version", '[^0-9]', '', 'g'), '')::integer;
+                if version_number_value is null then
+                    raise exception 'Care plan version number could not be determined.';
+                end if;
+
+                insert into care_plan_versions(
+                    id, care_plan_id, service_user_id, version_number, previous_care_plan_id, change_reason,
+                    status, revision, created_at, updated_at, organization_id, branch_id)
+                values(
+                    gen_random_uuid(), new."Id", new."ServiceUserId", version_number_value, null,
+                    'Care plan draft created', 'Draft', 1, now(), now(), new."OrganizationId", new."BranchId")
+                on conflict (care_plan_id) do nothing;
+                return new;
+            end;
+            $$;
+
+            create or replace function aicare_guard_care_plan_update()
+            returns trigger
+            language plpgsql
+            as $$
+            declare
+                lifecycle_status text;
+            begin
+                select status into lifecycle_status
+                from care_plan_versions
+                where care_plan_id = old."Id";
+
+                if lifecycle_status is null then
+                    return new;
+                end if;
+
+                if lifecycle_status <> 'Draft' and (
+                    new."ServiceUserId" is distinct from old."ServiceUserId" or
+                    new."PersonalCare" is distinct from old."PersonalCare" or
+                    new."MedicationSupport" is distinct from old."MedicationSupport" or
+                    new."MobilityAndTransfers" is distinct from old."MobilityAndTransfers" or
+                    new."Nutrition" is distinct from old."Nutrition" or
+                    new."ReviewDueAt" is distinct from old."ReviewDueAt" or
+                    new."Version" is distinct from old."Version"
+                ) then
+                    raise exception 'Approved, signed, active, or superseded care plan versions are immutable. Create a revision instead.';
+                end if;
+
+                -- Lifecycle metadata is authoritative. Legacy writes cannot invent a status.
+                new."Status" := lifecycle_status;
+                return new;
+            end;
+            $$;
+
+            create or replace function aicare_guard_care_plan_delete()
+            returns trigger
+            language plpgsql
+            as $$
+            declare
+                lifecycle_status text;
+            begin
+                select status into lifecycle_status
+                from care_plan_versions
+                where care_plan_id = old."Id";
+
+                if lifecycle_status is not null and lifecycle_status <> 'Draft' then
+                    raise exception 'Only draft care plan versions can be deleted.';
+                end if;
+                return old;
+            end;
+            $$;
+
+            drop trigger if exists trg_aicare_prepare_care_plan_insert on "CarePlans";
+            create trigger trg_aicare_prepare_care_plan_insert
+                before insert on "CarePlans"
+                for each row execute function aicare_prepare_care_plan_insert();
+
+            drop trigger if exists trg_aicare_register_care_plan_version on "CarePlans";
+            create trigger trg_aicare_register_care_plan_version
+                after insert on "CarePlans"
+                for each row execute function aicare_register_care_plan_version();
+
+            drop trigger if exists trg_aicare_guard_care_plan_update on "CarePlans";
+            create trigger trg_aicare_guard_care_plan_update
+                before update on "CarePlans"
+                for each row execute function aicare_guard_care_plan_update();
+
+            drop trigger if exists trg_aicare_guard_care_plan_delete on "CarePlans";
+            create trigger trg_aicare_guard_care_plan_delete
+                before delete on "CarePlans"
+                for each row execute function aicare_guard_care_plan_delete();
         """);
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)
     {
         migrationBuilder.Sql("""
+            drop trigger if exists trg_aicare_guard_care_plan_delete on "CarePlans";
+            drop trigger if exists trg_aicare_guard_care_plan_update on "CarePlans";
+            drop trigger if exists trg_aicare_register_care_plan_version on "CarePlans";
+            drop trigger if exists trg_aicare_prepare_care_plan_insert on "CarePlans";
+            drop function if exists aicare_guard_care_plan_delete();
+            drop function if exists aicare_guard_care_plan_update();
+            drop function if exists aicare_register_care_plan_version();
+            drop function if exists aicare_prepare_care_plan_insert();
             drop table if exists care_plan_lifecycle_events;
             drop table if exists care_plan_acknowledgements;
             drop table if exists care_plan_signatures;
