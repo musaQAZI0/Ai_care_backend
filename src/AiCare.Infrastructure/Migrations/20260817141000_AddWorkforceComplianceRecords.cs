@@ -26,7 +26,7 @@ public sealed class AddWorkforceComplianceRecords : Migration
                 notes text not null default '',
                 created_at timestamptz not null default now(),
                 updated_at timestamptz not null default now(),
-                constraint fk_worker_compliance_care_worker foreign key (care_worker_id) references \"CareWorkers\"(\"Id\") on delete cascade
+                constraint fk_worker_compliance_care_worker foreign key (care_worker_id) references "CareWorkers"("Id") on delete cascade
             );
             create index if not exists ix_worker_compliance_worker on worker_compliance_records(organization_id, branch_id, care_worker_id);
             create index if not exists ix_worker_compliance_expiry on worker_compliance_records(organization_id, status, expires_at);
@@ -44,7 +44,7 @@ public sealed class AddWorkforceComplianceRecords : Migration
                 expires_at timestamptz null,
                 status text not null default 'Valid',
                 created_at timestamptz not null default now(),
-                constraint fk_worker_training_care_worker foreign key (care_worker_id) references \"CareWorkers\"(\"Id\") on delete cascade
+                constraint fk_worker_training_care_worker foreign key (care_worker_id) references "CareWorkers"("Id") on delete cascade
             );
             create index if not exists ix_worker_training_worker on worker_training_records(organization_id, branch_id, care_worker_id);
             create index if not exists ix_worker_training_expiry on worker_training_records(organization_id, status, expires_at);
@@ -62,7 +62,7 @@ public sealed class AddWorkforceComplianceRecords : Migration
                 expires_at timestamptz null,
                 notes text not null default '',
                 created_at timestamptz not null default now(),
-                constraint fk_worker_competency_care_worker foreign key (care_worker_id) references \"CareWorkers\"(\"Id\") on delete cascade
+                constraint fk_worker_competency_care_worker foreign key (care_worker_id) references "CareWorkers"("Id") on delete cascade
             );
             create index if not exists ix_worker_competency_worker on worker_competency_records(organization_id, branch_id, care_worker_id);
 
@@ -81,7 +81,7 @@ public sealed class AddWorkforceComplianceRecords : Migration
                 created_at timestamptz not null default now(),
                 constraint ck_worker_availability_day check (day_of_week between 0 and 6),
                 constraint ck_worker_availability_time check (end_time > start_time),
-                constraint fk_worker_availability_care_worker foreign key (care_worker_id) references \"CareWorkers\"(\"Id\") on delete cascade
+                constraint fk_worker_availability_care_worker foreign key (care_worker_id) references "CareWorkers"("Id") on delete cascade
             );
             create index if not exists ix_worker_availability_worker on worker_availability_rules(organization_id, branch_id, care_worker_id, day_of_week);
         """);
