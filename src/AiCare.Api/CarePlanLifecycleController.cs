@@ -34,7 +34,7 @@ public sealed class CarePlanLifecycleController(
     public Task<IActionResult> ReturnToDraft(Guid carePlanId, LifecycleActionRequest request, CancellationToken cancellationToken) =>
         Execute(() => lifecycle.ReturnToDraftAsync(carePlanId, request.ExpectedRevision, request.Reason ?? string.Empty, request.Comment ?? string.Empty, Actor(), cancellationToken));
 
-    [HttpPost("{carePlanId:guid}/approve")]
+    [HttpPost("{carePlanId:guid}/lifecycle/approve")]
     public Task<IActionResult> Approve(Guid carePlanId, LifecycleActionRequest request, CancellationToken cancellationToken) =>
         Execute(() => lifecycle.ApproveAsync(carePlanId, request.ExpectedRevision, request.Comment ?? string.Empty, Actor(), cancellationToken));
 
