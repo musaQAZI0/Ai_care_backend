@@ -64,14 +64,14 @@ public sealed class CarePlanLifecycleRegressionTests : IClassFixture<PostgresReg
         var submitted = (await submittedResponse.Content.ReadFromJsonAsync<LifecycleDto>())!;
         Assert.Equal("InReview", submitted.Version.Status);
 
-        var staleApprove = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{plan.Id}/approve", new
+        var staleApprove = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{plan.Id}/lifecycle/approve", new
         {
             expectedRevision = draft.Version.Revision,
             comment = "This request is deliberately stale"
         });
         Assert.Equal(HttpStatusCode.Conflict, staleApprove.StatusCode);
 
-        var approvedResponse = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{plan.Id}/approve", new
+        var approvedResponse = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{plan.Id}/lifecycle/approve", new
         {
             expectedRevision = submitted.Version.Revision,
             comment = "Clinical content reviewed"
