@@ -12,11 +12,11 @@ using Xunit;
 namespace AiCare.Tests;
 
 [Collection("Postgres regression")]
-public sealed class FamilyPortalGovernanceRegressionTests : IClassFixture<PostgresRegressionFactory>
+public sealed class FamilyPortalProductionRegressionTests : IClassFixture<PostgresRegressionFactory>
 {
     private readonly PostgresRegressionFactory _factory;
 
-    public FamilyPortalGovernanceRegressionTests(PostgresRegressionFactory factory) => _factory = factory;
+    public FamilyPortalProductionRegressionTests(PostgresRegressionFactory factory) => _factory = factory;
 
     [Fact]
     public async Task VerifiedRepresentativeActivationPermissionsCarePlanAndRevocationAreEnforced()
