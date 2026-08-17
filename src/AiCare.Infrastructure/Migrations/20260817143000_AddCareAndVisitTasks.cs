@@ -25,8 +25,8 @@ public sealed class AddCareAndVisitTasks : Migration
                 frequency text not null default 'Every visit',
                 status text not null default 'Active',
                 created_at timestamptz not null default now(),
-                constraint fk_care_plan_tasks_plan foreign key (care_plan_id) references \"CarePlans\"(\"Id\") on delete cascade,
-                constraint fk_care_plan_tasks_person foreign key (service_user_id) references \"ServiceUsers\"(\"Id\") on delete cascade
+                constraint fk_care_plan_tasks_plan foreign key (care_plan_id) references "CarePlans"("Id") on delete cascade,
+                constraint fk_care_plan_tasks_person foreign key (service_user_id) references "ServiceUsers"("Id") on delete cascade
             );
             create index if not exists ix_care_plan_tasks_plan on care_plan_tasks(organization_id, branch_id, care_plan_id);
 
@@ -47,7 +47,7 @@ public sealed class AddCareAndVisitTasks : Migration
                 exception_reason text not null default '',
                 completed_at timestamptz null,
                 created_at timestamptz not null default now(),
-                constraint fk_visit_tasks_visit foreign key (visit_id) references \"Visits\"(\"Id\") on delete cascade,
+                constraint fk_visit_tasks_visit foreign key (visit_id) references "Visits"("Id") on delete cascade,
                 constraint fk_visit_tasks_plan_task foreign key (care_plan_task_id) references care_plan_tasks(id) on delete set null
             );
             create index if not exists ix_visit_tasks_visit on visit_tasks(organization_id, branch_id, visit_id);
