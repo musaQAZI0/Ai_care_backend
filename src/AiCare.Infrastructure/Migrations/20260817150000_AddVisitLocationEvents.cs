@@ -27,7 +27,7 @@ public sealed class AddVisitLocationEvents : Migration
                 source text not null default 'Browser geolocation',
                 notes text not null default '',
                 created_at timestamptz not null default now(),
-                constraint fk_visit_location_visit foreign key (visit_id) references \"Visits\"(\"Id\") on delete cascade
+                constraint fk_visit_location_visit foreign key (visit_id) references "Visits"("Id") on delete cascade
             );
             create index if not exists ix_visit_location_visit on visit_location_events(organization_id, branch_id, visit_id, captured_at);
         """);
