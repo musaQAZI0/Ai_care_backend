@@ -1,5 +1,8 @@
+using System.Text.Json.Serialization;
+
 namespace AiCare.Domain;
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum CarePlanLifecycleStatus
 {
     Draft,
@@ -10,6 +13,7 @@ public enum CarePlanLifecycleStatus
     Superseded
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum CarePlanSignerType
 {
     ServiceUser,
@@ -18,6 +22,7 @@ public enum CarePlanSignerType
     CareManager
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum CarePlanSignatureMethod
 {
     AuthenticatedConfirmation,
