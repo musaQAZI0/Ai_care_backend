@@ -1,0 +1,33 @@
+name: backend-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore AiCare.Backend.sln
+
+      - name: Build
+        run: dotnet build AiCare.Backend.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test AiCare.Backend.sln --configuration Release --no-build --verbosity normal
