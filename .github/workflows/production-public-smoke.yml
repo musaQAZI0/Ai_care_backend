@@ -1,3 +1,4 @@
+# Temporary one-off production smoke workflow. Do not merge to main.
 name: production-public-smoke
 
 on:
