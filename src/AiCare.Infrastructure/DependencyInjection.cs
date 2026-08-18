@@ -10,8 +10,11 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, string connectionString)
     {
-        services.AddDbContext<CareDbContext>(options =>
-            options.UseNpgsql(connectionString));
+        services.AddScoped<DocumentStorageCleanupInterceptor>();
+        services.AddDbContext<CareDbContext>((serviceProvider, options) =>
+            options
+                .UseNpgsql(connectionString)
+                .AddInterceptors(serviceProvider.GetRequiredService<DocumentStorageCleanupInterceptor>()));
 
         services.AddScoped<ICareRepository, EfCoreCareRepository>();
         services.AddScoped<ICarePlanLifecycleStore, CarePlanLifecycleStore>();
