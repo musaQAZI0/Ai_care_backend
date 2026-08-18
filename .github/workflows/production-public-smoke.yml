@@ -1,0 +1,93 @@
+name: production-public-smoke
+
+on:
+  push:
+    branches:
+      - agent/production-smoke-20260818
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      API: https://ai-care-backend-yeoh.onrender.com
+      FRONTEND: https://ai-care-frontend.vercel.app
+    steps:
+      - name: Public health and config
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_json() {
+            local path="$1"
+            echo "GET $API$path"
+            curl -fsS --retry 5 --retry-delay 5 --max-time 60 "$API$path" -o response.json
+            cat response.json
+            echo
+          }
+
+          request_json /health
+          jq -e '.status == "healthy" and .service == "AiCare API"' response.json
+
+          request_json /health/db
+          jq -e '.status == "healthy" and .provider == "PostgreSQL"' response.json
+
+          request_json /health/storage
+          jq -e '.status == "healthy" and .provider == "Supabase"' response.json
+
+          request_json /status/config
+          jq -e '.environment == "Production" and .storageProvider == "Supabase" and .supabaseConfigured == true and .jwtConfigured == true' response.json
+          if jq -e '.demoSeedEnabled == true' response.json >/dev/null; then
+            echo "::warning::Demo seed is enabled in production."
+          fi
+
+      - name: Authentication and authorization error handling
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          code=$(curl -sS --retry 3 --retry-delay 2 --max-time 60 -o unauthorized.json -w '%{http_code}' "$API/api/phase1/service-users")
+          echo "Unauthenticated protected endpoint status: $code"
+          cat unauthorized.json || true
+          test "$code" = "401" || test "$code" = "403"
+
+          code=$(curl -sS --retry 3 --retry-delay 2 --max-time 60 -o login.json -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            -d '{"userName":"production-smoke-invalid-user","password":"DefinitelyWrong123!"}' \
+            "$API/api/auth/login")
+          echo "Invalid login status: $code"
+          cat login.json || true
+          test "$code" = "401"
+          jq -e '.message == "Invalid credentials."' login.json
+
+          code=$(curl -sS --retry 3 --retry-delay 2 --max-time 60 -o forgot.json -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"production-smoke-nonexistent@example.invalid"}' \
+            "$API/api/auth/forgot-password")
+          echo "Forgot-password anti-enumeration status: $code"
+          cat forgot.json || true
+          test "$code" = "202"
+
+      - name: Frontend and CORS integration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          code=$(curl -sS -L --retry 5 --retry-delay 5 --max-time 60 -o frontend.html -w '%{http_code}' "$FRONTEND")
+          echo "Frontend status: $code"
+          test "$code" = "200"
+          grep -Eqi '<html|<!doctype html' frontend.html
+
+          curl -sS --retry 3 --retry-delay 2 --max-time 60 -D cors.headers -o /dev/null \
+            -X OPTIONS \
+            -H "Origin: $FRONTEND" \
+            -H 'Access-Control-Request-Method: POST' \
+            -H 'Access-Control-Request-Headers: content-type,authorization' \
+            "$API/api/auth/login"
+          cat cors.headers
+          grep -Eqi '^access-control-allow-origin: https://ai-care-frontend\.vercel\.app\r?$' cors.headers
+
+      - name: Summary
+        run: echo 'Public production smoke checks passed.'
