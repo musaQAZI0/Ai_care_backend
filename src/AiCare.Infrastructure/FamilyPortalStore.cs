@@ -193,7 +193,9 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
             var grant = await ReadGrantAsync(organizationId, familyMemberId, cancellationToken);
             if (grant is null || !string.Equals(grant.Value.VerificationStatus, "Verified", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Family authority is not verified.");
-            if (EffectiveStatus(grant.Value.AccessStatus, grant.Value.ValidFrom, grant.Value.ValidUntil, now) is "Expired" or "Revoked")
+
+            var effectiveAccessStatus = EffectiveStatus(grant.Value.AccessStatus, grant.Value.ValidFrom, grant.Value.ValidUntil, now);
+            if (!string.Equals(effectiveAccessStatus, "Active", StringComparison.Ordinal))
                 throw new InvalidOperationException("Family access is no longer active.");
 
             var existingUser = await _db.AppUsers.FirstOrDefaultAsync(x => x.OrganizationId == organizationId && x.FamilyMemberId == familyMemberId, cancellationToken);
@@ -205,7 +207,6 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
             await _db.SaveChangesAsync(cancellationToken);
 
             await _db.Database.ExecuteSqlInterpolatedAsync($"update family_portal_invitations set status = 'Accepted', accepted_at = {now}, accepted_terms_at = {now} where id = {invitationId}", cancellationToken);
-            await _db.Database.ExecuteSqlInterpolatedAsync($"update family_access_grants set access_status = 'Active', updated_at = now(), revision = revision + 1 where organization_id = {organizationId} and family_member_id = {familyMemberId}", cancellationToken);
             AddAudit(organizationId, branchId, fullName, "family.invitation_accepted", "FamilyMember", familyMemberId);
             await _db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
