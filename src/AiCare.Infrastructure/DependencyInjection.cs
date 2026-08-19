@@ -18,7 +18,9 @@ public static class DependencyInjection
                 .AddInterceptors(serviceProvider.GetRequiredService<DocumentStorageCleanupInterceptor>()));
         services.AddHostedService<ProductionConfigurationValidationService>();
         services.AddSingleton<IDocumentMalwareScanner, BasicDocumentMalwareScanner>();
+        services.AddSingleton<IProductionAlertSink, WebhookProductionAlertSink>();
         services.AddSingleton<IStartupFilter, ApiSecurityHardeningStartupFilter>();
+        services.AddSingleton<IStartupFilter, ProductionMonitoringStartupFilter>();
         services.AddSingleton<IStartupFilter, DocumentUploadSecurityStartupFilter>();
 
         services.AddScoped<ICareRepository, EfCoreCareRepository>();
