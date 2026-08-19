@@ -30,6 +30,11 @@ public sealed class MessagingProductionRegressionTests : IClassFixture<PostgresR
         var login = await Login(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.Token);
 
+        var directory = await client.GetAsync("/api/messaging/participants");
+        Assert.Equal(HttpStatusCode.OK, directory.StatusCode);
+        var directoryBody = await directory.Content.ReadAsStringAsync();
+        Assert.Contains("admin", directoryBody, StringComparison.OrdinalIgnoreCase);
+
         var create = await client.PostAsJsonAsync("/api/messaging/conversations", new
         {
             serviceUserId = RegressionIds.ServiceUserId,
@@ -47,6 +52,12 @@ public sealed class MessagingProductionRegressionTests : IClassFixture<PostgresR
         });
         Assert.Equal(HttpStatusCode.OK, send.StatusCode);
         var messageId = (await send.Content.ReadFromJsonAsync<CreatedId>())!.Id;
+
+        var attachments = await client.GetAsync($"/api/messaging/conversations/{conversationId}/attachments");
+        Assert.Equal(HttpStatusCode.OK, attachments.StatusCode);
+        var attachmentBody = await attachments.Content.ReadAsStringAsync();
+        Assert.Contains("regression.pdf", attachmentBody, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(DocumentId.ToString(), attachmentBody, StringComparison.OrdinalIgnoreCase);
 
         var reply = await client.PostAsJsonAsync($"/api/messaging/conversations/{conversationId}/messages", new
         {
@@ -90,6 +101,9 @@ public sealed class MessagingProductionRegressionTests : IClassFixture<PostgresR
         attacker.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateCrossTenantToken());
         var response = await attacker.GetAsync($"/api/messaging/conversations/{conversationId}");
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+
+        var attachments = await attacker.GetAsync($"/api/messaging/conversations/{conversationId}/attachments");
+        Assert.Equal(HttpStatusCode.NotFound, attachments.StatusCode);
     }
 
     private async Task EnsureDocumentAsync()
