@@ -268,7 +268,7 @@ public static class DocumentUploadValidator
                 string.Equals(entry.FullName, "word/document.xml", StringComparison.OrdinalIgnoreCase));
             return Task.FromResult(hasContentTypes && hasWordDocument);
         }
-        catch (InvalidDataException)
+        catch (Exception exception) when (exception is InvalidDataException or IOException or ArgumentOutOfRangeException)
         {
             return Task.FromResult(false);
         }
