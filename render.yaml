@@ -27,11 +27,11 @@ services:
         value: false
       - key: Storage__Provider
         value: Supabase
+      - key: Documents__MaxUploadBytes
+        value: 10485760
       - key: Supabase__Url
         sync: false
       - key: Supabase__ServiceRoleKey
         sync: false
       - key: Supabase__Bucket
         value: care-documents
-      - key: Supabase__PublicFileBaseUrl
-        sync: false
