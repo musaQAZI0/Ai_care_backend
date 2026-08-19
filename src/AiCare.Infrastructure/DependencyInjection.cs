@@ -30,7 +30,7 @@ public static class DependencyInjection
         services.AddScoped<IFamilyPortalService, FamilyPortalService>();
         services.AddScoped<IFamilyPortalQueryStore, FamilyPortalQueryStore>();
         services.AddScoped<IFamilyPortalQueryService, FamilyPortalQueryService>();
-        services.AddSingleton<IFamilyInvitationEmailSender, DevelopmentFamilyInvitationEmailSender>();
+        services.AddSingleton<IFamilyInvitationEmailSender, SmtpFamilyInvitationEmailSender>();
         return services;
     }
 }
