@@ -33,7 +33,7 @@ public sealed class MessagingProductionRegressionTests : IClassFixture<PostgresR
         var directory = await client.GetAsync("/api/messaging/participants");
         Assert.Equal(HttpStatusCode.OK, directory.StatusCode);
         var directoryBody = await directory.Content.ReadAsStringAsync();
-        Assert.Contains("admin", directoryBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"userName\":\"admin\"", directoryBody, StringComparison.OrdinalIgnoreCase);
 
         var create = await client.PostAsJsonAsync("/api/messaging/conversations", new
         {
