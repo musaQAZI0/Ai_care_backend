@@ -10,7 +10,6 @@ public sealed class ProductionConfigurationValidationTests
     public void ValidProductionConfigurationPasses()
     {
         var configuration = BuildConfiguration();
-
         ProductionConfigurationValidator.Validate(configuration, "Production");
     }
 
@@ -20,8 +19,22 @@ public sealed class ProductionConfigurationValidationTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>())
             .Build();
-
         ProductionConfigurationValidator.Validate(configuration, "Development");
+    }
+
+    [Fact]
+    public void ExistingProductionCanDeferEmailRequirementUntilCutover()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Email:RequiredInProduction"] = "false",
+            ["Email:Enabled"] = "false",
+            ["Email:SmtpHost"] = "",
+            ["Email:Username"] = "",
+            ["Email:Password"] = "",
+            ["Email:FromAddress"] = ""
+        });
+        ProductionConfigurationValidator.Validate(configuration, "Production");
     }
 
     [Fact]
@@ -33,10 +46,7 @@ public sealed class ProductionConfigurationValidationTests
             ["FamilyPortal:FrontendBaseUrl"] = "",
             ["Email:Password"] = ""
         });
-
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            ProductionConfigurationValidator.Validate(configuration, "Production"));
-
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("Supabase:ServiceRoleKey is required", exception.Message);
         Assert.Contains("FamilyPortal:FrontendBaseUrl is required", exception.Message);
         Assert.Contains("Email:Password is required", exception.Message);
@@ -47,14 +57,8 @@ public sealed class ProductionConfigurationValidationTests
     [Fact]
     public void WeakOrPlaceholderJwtSigningKeyFails()
     {
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
-        {
-            ["JwtOptions:SigningKey"] = "change-me"
-        });
-
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            ProductionConfigurationValidator.Validate(configuration, "Production"));
-
+        var configuration = BuildConfiguration(new Dictionary<string, string?> { ["JwtOptions:SigningKey"] = "change-me" });
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("at least 32 bytes", exception.Message);
         Assert.Contains("placeholder/default", exception.Message);
         Assert.DoesNotContain("change-me", exception.Message);
@@ -66,14 +70,8 @@ public sealed class ProductionConfigurationValidationTests
     [InlineData("https://localhost:5173")]
     public void InsecureOrLoopbackCorsOriginFails(string origin)
     {
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
-        {
-            ["Cors:AllowedOrigins:0"] = origin
-        });
-
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            ProductionConfigurationValidator.Validate(configuration, "Production"));
-
+        var configuration = BuildConfiguration(new Dictionary<string, string?> { ["Cors:AllowedOrigins:0"] = origin });
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("Cors:AllowedOrigins", exception.Message);
     }
 
@@ -83,28 +81,16 @@ public sealed class ProductionConfigurationValidationTests
     [InlineData("https://localhost:5173")]
     public void InsecureOrLoopbackFamilyPortalUrlFails(string url)
     {
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
-        {
-            ["FamilyPortal:FrontendBaseUrl"] = url
-        });
-
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            ProductionConfigurationValidator.Validate(configuration, "Production"));
-
+        var configuration = BuildConfiguration(new Dictionary<string, string?> { ["FamilyPortal:FrontendBaseUrl"] = url });
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("FamilyPortal:FrontendBaseUrl", exception.Message);
     }
 
     [Fact]
     public void ProductionRequiresSupabaseStorage()
     {
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
-        {
-            ["Storage:Provider"] = "Local"
-        });
-
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            ProductionConfigurationValidator.Validate(configuration, "Production"));
-
+        var configuration = BuildConfiguration(new Dictionary<string, string?> { ["Storage:Provider"] = "Local" });
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("Storage:Provider must be Supabase", exception.Message);
     }
 
@@ -115,10 +101,7 @@ public sealed class ProductionConfigurationValidationTests
         {
             ["Supabase:PublicFileBaseUrl"] = "https://project.supabase.co/storage/v1/object/public/care-documents"
         });
-
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            ProductionConfigurationValidator.Validate(configuration, "Production"));
-
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("short-lived signed URLs", exception.Message);
     }
 
@@ -127,7 +110,7 @@ public sealed class ProductionConfigurationValidationTests
     [InlineData("true", "", "587", "true")]
     [InlineData("true", "smtp.hostinger.com", "0", "true")]
     [InlineData("true", "smtp.hostinger.com", "587", "false")]
-    public void InvalidProductionEmailConfigurationFails(string enabled, string host, string port, string enableSsl)
+    public void InvalidRequiredProductionEmailConfigurationFails(string enabled, string host, string port, string enableSsl)
     {
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
@@ -136,24 +119,15 @@ public sealed class ProductionConfigurationValidationTests
             ["Email:SmtpPort"] = port,
             ["Email:EnableSsl"] = enableSsl
         });
-
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            ProductionConfigurationValidator.Validate(configuration, "Production"));
-
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("Email:", exception.Message);
     }
 
     [Fact]
     public void DemoModeCannotBeEnabledInProduction()
     {
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
-        {
-            ["Demo:Enabled"] = "true"
-        });
-
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            ProductionConfigurationValidator.Validate(configuration, "Production"));
-
+        var configuration = BuildConfiguration(new Dictionary<string, string?> { ["Demo:Enabled"] = "true" });
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("Demo:Enabled must be false", exception.Message);
     }
 
@@ -175,6 +149,7 @@ public sealed class ProductionConfigurationValidationTests
             ["Supabase:PublicFileBaseUrl"] = "",
             ["Cors:AllowedOrigins:0"] = "https://care.example.com",
             ["FamilyPortal:FrontendBaseUrl"] = "https://care.example.com",
+            ["Email:RequiredInProduction"] = "true",
             ["Email:Enabled"] = "true",
             ["Email:SmtpHost"] = "smtp.hostinger.com",
             ["Email:SmtpPort"] = "587",
@@ -185,17 +160,10 @@ public sealed class ProductionConfigurationValidationTests
             ["Email:EnableSsl"] = "true",
             ["Demo:Enabled"] = "false"
         };
-
         if (overrides is not null)
         {
-            foreach (var item in overrides)
-            {
-                values[item.Key] = item.Value;
-            }
+            foreach (var item in overrides) values[item.Key] = item.Value;
         }
-
-        return new ConfigurationBuilder()
-            .AddInMemoryCollection(values)
-            .Build();
+        return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
 }
