@@ -16,6 +16,16 @@ services:
       retries: 10
     networks: [internal]
 
+  migrate:
+    image: ${AICARE_MIGRATOR_IMAGE:-aicare-migrator:local}
+    profiles: ["migration"]
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
   backend:
     image: ${AICARE_BACKEND_IMAGE:-aicare-backend:local}
     restart: unless-stopped
