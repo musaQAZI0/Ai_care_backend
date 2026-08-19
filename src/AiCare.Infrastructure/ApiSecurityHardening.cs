@@ -10,6 +10,31 @@ using Microsoft.Extensions.Hosting;
 
 namespace AiCare.Infrastructure;
 
+public static class ApiSecurityPolicy
+{
+    public static bool IsOriginAllowed(IConfiguration configuration, string origin)
+    {
+        if (string.IsNullOrWhiteSpace(origin)) return true;
+        var allowedOrigins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+        return allowedOrigins.Any(allowed =>
+            !string.IsNullOrWhiteSpace(allowed) &&
+            string.Equals(allowed.TrimEnd('/'), origin.Trim().TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static int? GetRateLimit(string method, string path)
+    {
+        if (!HttpMethods.IsPost(method)) return null;
+
+        if (string.Equals(path, "/api/auth/login", StringComparison.OrdinalIgnoreCase)) return 10;
+        if (string.Equals(path, "/api/auth/forgot-password", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(path, "/api/auth/reset-password", StringComparison.OrdinalIgnoreCase)) return 5;
+        if (string.Equals(path, "/api/family/invitations/validate", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(path, "/api/family/invitations/accept", StringComparison.OrdinalIgnoreCase)) return 10;
+        if (string.Equals(path, "/api/phase1/documents/upload", StringComparison.OrdinalIgnoreCase)) return 30;
+        return null;
+    }
+}
+
 public sealed class ApiSecurityHardeningStartupFilter : IStartupFilter
 {
     public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
@@ -37,7 +62,10 @@ public sealed class ApiSecurityHardeningMiddleware(
             return;
         }
 
-        if (TryGetRateLimit(context, out var limit) && !ConsumeRateLimit(context, limit))
+        var rateLimit = environment.IsProduction()
+            ? ApiSecurityPolicy.GetRateLimit(context.Request.Method, context.Request.Path.Value ?? string.Empty)
+            : null;
+        if (rateLimit is not null && !ConsumeRateLimit(context, rateLimit.Value))
         {
             context.Response.Headers.RetryAfter = "60";
             await Reject(context, StatusCodes.Status429TooManyRequests, "Too many requests. Please try again later.");
@@ -56,58 +84,8 @@ public sealed class ApiSecurityHardeningMiddleware(
 
     private bool HasDisallowedOrigin(HttpContext context)
     {
-        if (!context.Request.Headers.TryGetValue("Origin", out var rawOrigin))
-        {
-            return false;
-        }
-
-        var origin = rawOrigin.ToString().Trim();
-        if (string.IsNullOrWhiteSpace(origin))
-        {
-            return false;
-        }
-
-        var allowedOrigins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
-        return !allowedOrigins.Any(allowed =>
-            !string.IsNullOrWhiteSpace(allowed) &&
-            string.Equals(allowed.TrimEnd('/'), origin.TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static bool TryGetRateLimit(HttpContext context, out int limit)
-    {
-        var path = context.Request.Path.Value ?? string.Empty;
-        if (HttpMethods.IsPost(context.Request.Method) &&
-            string.Equals(path, "/api/auth/login", StringComparison.OrdinalIgnoreCase))
-        {
-            limit = 10;
-            return true;
-        }
-
-        if (HttpMethods.IsPost(context.Request.Method) &&
-            (string.Equals(path, "/api/auth/forgot-password", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(path, "/api/auth/reset-password", StringComparison.OrdinalIgnoreCase)))
-        {
-            limit = 5;
-            return true;
-        }
-
-        if (HttpMethods.IsPost(context.Request.Method) &&
-            (string.Equals(path, "/api/family/invitations/validate", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(path, "/api/family/invitations/accept", StringComparison.OrdinalIgnoreCase)))
-        {
-            limit = 10;
-            return true;
-        }
-
-        if (HttpMethods.IsPost(context.Request.Method) &&
-            string.Equals(path, "/api/phase1/documents/upload", StringComparison.OrdinalIgnoreCase))
-        {
-            limit = 30;
-            return true;
-        }
-
-        limit = 0;
-        return false;
+        if (!context.Request.Headers.TryGetValue("Origin", out var rawOrigin)) return false;
+        return !ApiSecurityPolicy.IsOriginAllowed(configuration, rawOrigin.ToString());
     }
 
     private static bool ConsumeRateLimit(HttpContext context, int limit)
@@ -140,7 +118,7 @@ public sealed class ApiSecurityHardeningMiddleware(
         var path = context.Request.Path.Value?.ToLowerInvariant() ?? string.Empty;
         var remoteAddress = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
         var forwardedAddress = context.Request.Headers.TryGetValue("X-Forwarded-For", out var forwarded)
-            ? forwarded.ToString().Split(',', 2)[0].Trim()
+            ? forwarded.ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault() ?? string.Empty
             : string.Empty;
         var authFingerprint = context.Request.Headers.TryGetValue("Authorization", out var authorization)
             ? Fingerprint(authorization.ToString())
