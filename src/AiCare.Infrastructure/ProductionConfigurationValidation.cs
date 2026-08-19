@@ -10,6 +10,7 @@ public sealed class ProductionConfigurationValidationService(
 {
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        RenderVercelTestConfiguration.Normalize(configuration, environment.EnvironmentName);
         ProductionConfigurationValidator.Validate(configuration, environment.EnvironmentName);
         return Task.CompletedTask;
     }
