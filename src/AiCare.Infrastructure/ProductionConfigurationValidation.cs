@@ -82,6 +82,29 @@ public static class ProductionConfigurationValidator
 
         RequireHttpsUrl(configuration["FamilyPortal:FrontendBaseUrl"], "FamilyPortal:FrontendBaseUrl", errors);
 
+        if (!configuration.GetValue<bool>("Email:Enabled"))
+        {
+            errors.Add("Email:Enabled must be true in Production.");
+        }
+        Require(configuration["Email:SmtpHost"], "Email:SmtpHost", errors);
+        var smtpPort = configuration.GetValue<int?>("Email:SmtpPort");
+        if (smtpPort is null or < 1 or > 65535)
+        {
+            errors.Add("Email:SmtpPort must be a valid TCP port in Production.");
+        }
+        Require(configuration["Email:Username"], "Email:Username", errors);
+        var emailPassword = configuration["Email:Password"];
+        Require(emailPassword, "Email:Password", errors);
+        if (LooksLikePlaceholder(emailPassword))
+        {
+            errors.Add("Email:Password must not use a placeholder/default value.");
+        }
+        Require(configuration["Email:FromAddress"], "Email:FromAddress", errors);
+        if (!configuration.GetValue<bool>("Email:EnableSsl"))
+        {
+            errors.Add("Email:EnableSsl must be true in Production.");
+        }
+
         if (string.Equals(configuration["Demo:Enabled"], "true", StringComparison.OrdinalIgnoreCase))
         {
             errors.Add("Demo:Enabled must be false in Production.");
