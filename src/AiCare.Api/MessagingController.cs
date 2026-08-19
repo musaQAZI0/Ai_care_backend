@@ -4,6 +4,7 @@ using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace AiCare.Api;
 
@@ -271,8 +272,10 @@ public sealed class MessagingController : ControllerBase
 
     private async Task<DbConnection> OpenAsync(CancellationToken cancellationToken)
     {
-        var connection = _db.Database.GetDbConnection();
-        if (connection.State != System.Data.ConnectionState.Open) await connection.OpenAsync(cancellationToken);
+        var connectionString = _db.Database.GetConnectionString()
+            ?? throw new InvalidOperationException("Database connection string is unavailable.");
+        var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
         return connection;
     }
 
