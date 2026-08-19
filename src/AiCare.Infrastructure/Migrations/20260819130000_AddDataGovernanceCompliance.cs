@@ -1,10 +1,13 @@
 using System;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace AiCare.Infrastructure.Migrations
 {
+    [DbContext(typeof(CareDbContext))]
+    [Migration("20260819130000_AddDataGovernanceCompliance")]
     public partial class AddDataGovernanceCompliance : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)
