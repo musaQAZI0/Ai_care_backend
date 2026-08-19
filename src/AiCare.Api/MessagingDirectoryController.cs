@@ -1,7 +1,6 @@
 using System.Data.Common;
 using AiCare.Application;
 using AiCare.Application.FamilyPortal;
-using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -32,34 +31,6 @@ public sealed class MessagingDirectoryController : ControllerBase
         _familyPortal = familyPortal;
     }
 
-    [HttpGet("participants")]
-    public async Task<IActionResult> GetParticipants(CancellationToken cancellationToken)
-    {
-        var query = _db.AppUsers.AsNoTracking()
-            .Where(x => x.OrganizationId == _tenant.OrganizationId && x.IsActive);
-
-        if (_user.IsFamilyMember)
-        {
-            query = query.Where(x => x.Role == UserRole.Administrator ||
-                                     x.Role == UserRole.CareManager ||
-                                     x.Role == UserRole.CareCoordinator ||
-                                     x.Role == UserRole.CareWorker);
-        }
-
-        var participants = await query
-            .OrderBy(x => x.UserName)
-            .Select(x => new MessagingParticipantDto(
-                x.Id,
-                x.UserName,
-                x.Email,
-                x.Role.ToString(),
-                x.CareWorkerId,
-                x.FamilyMemberId))
-            .ToListAsync(cancellationToken);
-
-        return Ok(participants);
-    }
-
     [HttpGet("conversations/{conversationId:guid}/attachments")]
     public async Task<IActionResult> GetAttachments(Guid conversationId, CancellationToken cancellationToken)
     {
@@ -87,7 +58,7 @@ public sealed class MessagingDirectoryController : ControllerBase
             }
         }
 
-        var rows = new List<MessageAttachmentDto>();
+        var rows = new List<ConversationAttachmentDto>();
         await using var connection = await OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -105,7 +76,7 @@ public sealed class MessagingDirectoryController : ControllerBase
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new MessageAttachmentDto(
+            rows.Add(new ConversationAttachmentDto(
                 reader.GetGuid(0),
                 reader.GetGuid(1),
                 reader.GetString(2),
@@ -161,15 +132,7 @@ public sealed class MessagingDirectoryController : ControllerBase
     private sealed record AccessibleConversation(Guid? ServiceUserId);
 }
 
-public sealed record MessagingParticipantDto(
-    Guid Id,
-    string UserName,
-    string Email,
-    string Role,
-    Guid? CareWorkerId,
-    Guid? FamilyMemberId);
-
-public sealed record MessageAttachmentDto(
+public sealed record ConversationAttachmentDto(
     Guid MessageId,
     Guid DocumentId,
     string FileName,
