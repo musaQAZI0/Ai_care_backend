@@ -106,6 +106,20 @@ public sealed class ProductionConfigurationValidationTests
     }
 
     [Fact]
+    public void PublicDocumentBaseUrlCannotBeConfiguredInProduction()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Supabase:PublicFileBaseUrl"] = "https://project.supabase.co/storage/v1/object/public/care-documents"
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ProductionConfigurationValidator.Validate(configuration, "Production"));
+
+        Assert.Contains("short-lived signed URLs", exception.Message);
+    }
+
+    [Fact]
     public void DemoModeCannotBeEnabledInProduction()
     {
         var configuration = BuildConfiguration(new Dictionary<string, string?>
@@ -133,6 +147,7 @@ public sealed class ProductionConfigurationValidationTests
             ["Supabase:Url"] = "https://project.supabase.co",
             ["Supabase:ServiceRoleKey"] = "service-role-test-only-value",
             ["Supabase:Bucket"] = "care-documents",
+            ["Supabase:PublicFileBaseUrl"] = "",
             ["Cors:AllowedOrigins:0"] = "https://ai-care-frontend.vercel.app",
             ["FamilyPortal:FrontendBaseUrl"] = "https://ai-care-frontend.vercel.app",
             ["Demo:Enabled"] = "false"
