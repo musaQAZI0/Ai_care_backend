@@ -91,8 +91,12 @@ public sealed class DocumentUploadSecurityMiddleware(
 
     public async Task InvokeAsync(HttpContext context)
     {
-        if (!HttpMethods.IsPost(context.Request.Method) ||
-            !context.Request.Path.Equals("/api/phase1/documents/upload", StringComparison.OrdinalIgnoreCase))
+        var isDocumentUpload = string.Equals(
+            context.Request.Path.Value,
+            "/api/phase1/documents/upload",
+            StringComparison.OrdinalIgnoreCase);
+
+        if (!HttpMethods.IsPost(context.Request.Method) || !isDocumentUpload)
         {
             await next(context);
             return;
