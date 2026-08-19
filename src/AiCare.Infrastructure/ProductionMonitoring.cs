@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using System.IdentityModel.Tokens.Jwt;
-using System.Net;
+using System.Net.Http.Json;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -187,7 +187,6 @@ public sealed class ProductionMonitoringMiddleware(
     private async Task WriteReadinessAsync(HttpContext context, CareDbContext dbContext)
     {
         var databaseHealthy = false;
-        var storageHealthy = false;
         try
         {
             databaseHealthy = await dbContext.Database.CanConnectAsync(context.RequestAborted);
@@ -197,7 +196,7 @@ public sealed class ProductionMonitoringMiddleware(
             databaseHealthy = false;
         }
 
-        storageHealthy = await CheckStorageAsync(context.RequestAborted);
+        var storageHealthy = await CheckStorageAsync(context.RequestAborted);
         var ready = databaseHealthy && storageHealthy;
         context.Response.StatusCode = ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable;
         await context.Response.WriteAsJsonAsync(new
