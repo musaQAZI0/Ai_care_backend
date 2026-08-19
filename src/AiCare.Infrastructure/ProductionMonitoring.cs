@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Builder;
@@ -144,7 +143,7 @@ public sealed class ProductionMonitoringMiddleware(
         finally
         {
             stopwatch.Stop();
-            var userId = context.User.FindFirstValue(JwtRegisteredClaimNames.Sub) ?? context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var userId = context.User.FindFirstValue("sub") ?? context.User.FindFirstValue(ClaimTypes.NameIdentifier);
             var organizationId = context.User.FindFirstValue("organization_id");
             var branchId = context.User.FindFirstValue("branch_id");
             logger.LogInformation(
