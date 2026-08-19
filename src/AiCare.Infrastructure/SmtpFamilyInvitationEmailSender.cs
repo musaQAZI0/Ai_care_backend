@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Mail;
-using System.Net.Security;
 using AiCare.Application.FamilyPortal;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -20,9 +19,11 @@ public sealed class SmtpFamilyInvitationEmailSender(
         DateTimeOffset expiresAt,
         CancellationToken cancellationToken)
     {
-        if (!environment.IsProduction() && !configuration.GetValue<bool>("Email:Enabled"))
+        if (!configuration.GetValue<bool>("Email:Enabled"))
         {
-            logger.LogInformation("Family invitation email suppressed outside Production because Email:Enabled is false.");
+            logger.LogWarning(
+                "Family invitation email suppressed because Email:Enabled is false in {EnvironmentName}.",
+                environment.EnvironmentName);
             return;
         }
 
@@ -43,9 +44,7 @@ public sealed class SmtpFamilyInvitationEmailSender(
         };
         message.To.Add(new MailAddress(recipientEmail, recipientName));
 
-#pragma warning disable SYSLIB0014
         using var client = new SmtpClient(host, port)
-#pragma warning restore SYSLIB0014
         {
             EnableSsl = enableSsl,
             UseDefaultCredentials = false,
