@@ -58,6 +58,10 @@ public static class ProductionConfigurationValidator
             errors.Add("Supabase:ServiceRoleKey must not use a placeholder/default value.");
         }
         Require(configuration["Supabase:Bucket"], "Supabase:Bucket", errors);
+        if (!string.IsNullOrWhiteSpace(configuration["Supabase:PublicFileBaseUrl"]))
+        {
+            errors.Add("Supabase:PublicFileBaseUrl must be empty in Production so care documents use short-lived signed URLs.");
+        }
 
         var origins = configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
         var configuredOrigins = origins.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
