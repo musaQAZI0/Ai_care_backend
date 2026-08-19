@@ -35,14 +35,14 @@ public sealed class MessagingAttachmentsController : ControllerBase
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var serviceUserId = await GetAccessibleServiceUserIdAsync(connection, conversationId, userId.Value, cancellationToken);
-        if (serviceUserId == ConversationAccessResult.NotFound) return NotFound();
+        var access = await GetAccessibleServiceUserIdAsync(connection, conversationId, userId.Value, cancellationToken);
+        if (!access.Found) return NotFound();
 
         if (_user.IsFamilyMember)
         {
-            if (_user.FamilyMemberId is null || serviceUserId.ServiceUserId is null) return Forbid();
-            if (!await FamilyHasPermissionAsync(connection, serviceUserId.ServiceUserId.Value, "MessageCareTeam", cancellationToken)) return NotFound();
-            if (!await FamilyHasPermissionAsync(connection, serviceUserId.ServiceUserId.Value, "ViewDocuments", cancellationToken)) return Forbid();
+            if (_user.FamilyMemberId is null || access.ServiceUserId is null) return Forbid();
+            if (!await FamilyHasPermissionAsync(connection, access.ServiceUserId.Value, "MessageCareTeam", cancellationToken)) return NotFound();
+            if (!await FamilyHasPermissionAsync(connection, access.ServiceUserId.Value, "ViewDocuments", cancellationToken)) return Forbid();
         }
 
         var rows = new List<MessageAttachmentDto>();
@@ -81,8 +81,9 @@ public sealed class MessagingAttachmentsController : ControllerBase
         Add(command, "organizationId", _tenant.OrganizationId);
         Add(command, "userId", userId);
         var value = await command.ExecuteScalarAsync(cancellationToken);
-        if (value is null) return ConversationAccessResult.NotFound;
-        return new ConversationAccessResult(true, value is DBNull ? null : (Guid)value);
+        return value is null
+            ? new ConversationAccessResult(false, null)
+            : new ConversationAccessResult(true, value is DBNull ? null : (Guid)value);
     }
 
     private async Task<bool> FamilyHasPermissionAsync(DbConnection connection, Guid serviceUserId, string permission, CancellationToken cancellationToken)
@@ -116,13 +117,7 @@ public sealed class MessagingAttachmentsController : ControllerBase
         command.Parameters.Add(parameter);
     }
 
-    private readonly record struct ConversationAccessResult(bool Found, Guid? ServiceUserId)
-    {
-        public static ConversationAccessResult NotFound => new(false, null);
-        public static bool operator ==(ConversationAccessResult left, ConversationAccessResult right) => left.Found == right.Found && left.ServiceUserId == right.ServiceUserId;
-        public static bool operator !=(ConversationAccessResult left, ConversationAccessResult right) => !(left == right);
-        public override int GetHashCode() => HashCode.Combine(Found, ServiceUserId);
-    }
+    private readonly record struct ConversationAccessResult(bool Found, Guid? ServiceUserId);
 }
 
 public sealed record MessageAttachmentDto(Guid MessageId, Guid DocumentId, string FileName, string Category);
