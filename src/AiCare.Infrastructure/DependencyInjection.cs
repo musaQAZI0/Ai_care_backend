@@ -15,6 +15,7 @@ public static class DependencyInjection
             options
                 .UseNpgsql(connectionString)
                 .AddInterceptors(serviceProvider.GetRequiredService<DocumentStorageCleanupInterceptor>()));
+        services.AddHostedService<ProductionConfigurationValidationService>();
 
         services.AddScoped<ICareRepository, EfCoreCareRepository>();
         services.AddScoped<ICarePlanLifecycleStore, CarePlanLifecycleStore>();
