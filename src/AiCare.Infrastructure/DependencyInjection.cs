@@ -1,6 +1,7 @@
 using AiCare.Application;
 using AiCare.Application.CarePlans;
 using AiCare.Application.FamilyPortal;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -16,6 +17,8 @@ public static class DependencyInjection
                 .UseNpgsql(connectionString)
                 .AddInterceptors(serviceProvider.GetRequiredService<DocumentStorageCleanupInterceptor>()));
         services.AddHostedService<ProductionConfigurationValidationService>();
+        services.AddSingleton<IDocumentMalwareScanner, BasicDocumentMalwareScanner>();
+        services.AddSingleton<IStartupFilter, DocumentUploadSecurityStartupFilter>();
 
         services.AddScoped<ICareRepository, EfCoreCareRepository>();
         services.AddScoped<ICarePlanLifecycleStore, CarePlanLifecycleStore>();
