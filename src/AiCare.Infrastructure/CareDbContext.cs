@@ -38,6 +38,42 @@ public sealed class CareDbContext : DbContext
     public DbSet<AdminUser> AdminUsers => Set<AdminUser>();
     public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
     public DbSet<AppUser> AppUsers => Set<AppUser>();
+    public DbSet<RetentionPolicy> RetentionPolicies => Set<RetentionPolicy>();
+    public DbSet<DataGovernanceRequest> DataGovernanceRequests => Set<DataGovernanceRequest>();
+
+    public override int SaveChanges()
+    {
+        EnforceImmutableAuditEvents();
+        return base.SaveChanges();
+    }
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        EnforceImmutableAuditEvents();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        EnforceImmutableAuditEvents();
+        return base.SaveChangesAsync(cancellationToken);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        EnforceImmutableAuditEvents();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private void EnforceImmutableAuditEvents()
+    {
+        var forbidden = ChangeTracker.Entries<AuditEvent>()
+            .FirstOrDefault(entry => entry.State is EntityState.Modified or EntityState.Deleted);
+        if (forbidden is not null)
+        {
+            throw new InvalidOperationException("Audit events are immutable and cannot be modified or deleted.");
+        }
+    }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -309,6 +345,27 @@ public sealed class CareDbContext : DbContext
             builder.Property(audit => audit.Action).IsRequired();
             builder.Property(audit => audit.Actor).IsRequired();
             builder.Property(audit => audit.EntityType).IsRequired();
+        });
+
+        modelBuilder.Entity<RetentionPolicy>(builder =>
+        {
+            builder.HasKey(policy => policy.Id);
+            builder.HasIndex(policy => new { policy.OrganizationId, policy.DataCategory }).IsUnique();
+            builder.Property(policy => policy.DataCategory).IsRequired();
+            builder.Property(policy => policy.LegalBasis).IsRequired();
+            builder.Property(policy => policy.DispositionAction).IsRequired();
+            builder.Property(policy => policy.OrganizationId).IsRequired();
+        });
+
+        modelBuilder.Entity<DataGovernanceRequest>(builder =>
+        {
+            builder.HasKey(request => request.Id);
+            builder.HasIndex(request => new { request.OrganizationId, request.ServiceUserId, request.RequestedAt });
+            builder.Property(request => request.RequestType).IsRequired();
+            builder.Property(request => request.Status).IsRequired();
+            builder.Property(request => request.RequestedBy).IsRequired();
+            builder.Property(request => request.Reason).IsRequired();
+            builder.Property(request => request.OrganizationId).IsRequired();
         });
 
         base.OnModelCreating(modelBuilder);
