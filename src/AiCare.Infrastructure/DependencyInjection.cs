@@ -17,6 +17,7 @@ public static class DependencyInjection
                 .UseNpgsql(connectionString)
                 .AddInterceptors(serviceProvider.GetRequiredService<DocumentStorageCleanupInterceptor>()));
         services.AddHostedService<ProductionConfigurationValidationService>();
+        services.AddHostedService<RenderTestPatientSeeder>();
         services.AddSingleton<IDocumentMalwareScanner, BasicDocumentMalwareScanner>();
         services.AddSingleton<IProductionAlertSink, WebhookProductionAlertSink>();
         services.AddSingleton<IStartupFilter, ApiSecurityHardeningStartupFilter>();
