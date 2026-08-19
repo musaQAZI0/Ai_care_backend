@@ -12,6 +12,12 @@ RUN dotnet restore AiCare.Backend.sln
 COPY . .
 RUN dotnet publish src/AiCare.Api/AiCare.Api.csproj -c Release -o /app/publish --no-restore
 
+FROM build AS migrations
+RUN dotnet tool install --global dotnet-ef --version 8.0.0
+ENV PATH="${PATH}:/root/.dotnet/tools"
+ENV ASPNETCORE_ENVIRONMENT=Production
+ENTRYPOINT ["dotnet", "ef", "database", "update", "--project", "src/AiCare.Infrastructure/AiCare.Infrastructure.csproj", "--startup-project", "src/AiCare.Api/AiCare.Api.csproj", "--no-build"]
+
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
