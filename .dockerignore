@@ -1,0 +1,16 @@
+**/bin
+**/obj
+.git
+.github
+.vs
+.vscode
+.idea
+TestResults
+App_Data
+.env
+.env.*
+!.env.example
+!.env.hostinger.example
+deploy/hostinger/backups
+*.user
+*.suo
