@@ -40,10 +40,31 @@ public sealed class MessagingController : ControllerBase
             from conversations c
             join conversation_participants p on p.conversation_id=c.id and p.user_id=@userId and p.left_at is null
             where c.organization_id=@organizationId
+              and (
+                    not @isFamilyMember
+                    or (
+                        c.service_user_id is not null
+                        and exists(
+                            select 1
+                            from family_access_grants g
+                            join family_access_permissions fp on fp.access_grant_id=g.id
+                            where g.organization_id=@organizationId
+                              and g.family_member_id=@familyMemberId
+                              and g.service_user_id=c.service_user_id
+                              and g.verification_status='Verified'
+                              and g.access_status='Active'
+                              and (g.valid_from is null or g.valid_from<=now())
+                              and (g.valid_until is null or g.valid_until>now())
+                              and fp.permission='MessageCareTeam'
+                        )
+                    )
+                  )
             order by c.updated_at desc
             """;
         Add(command, "userId", userId);
         Add(command, "organizationId", _tenant.OrganizationId);
+        Add(command, "isFamilyMember", _user.IsFamilyMember);
+        Add(command, "familyMemberId", _user.FamilyMemberId ?? Guid.Empty);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -160,6 +181,8 @@ public sealed class MessagingController : ControllerBase
         if (attachmentIds.Length > 0)
         {
             var serviceUserId = await GetConversationServiceUserIdAsync(conversationId, cancellationToken);
+            if (_user.IsFamilyMember && (serviceUserId is null || !await FamilyCanViewDocumentsAsync(serviceUserId.Value, cancellationToken)))
+                return Forbid();
             var validDocuments = await _db.Documents.AsNoTracking().CountAsync(x =>
                 x.OrganizationId == _tenant.OrganizationId && attachmentIds.Contains(x.Id) &&
                 (serviceUserId == null || x.ServiceUserId == serviceUserId), cancellationToken);
@@ -225,11 +248,39 @@ public sealed class MessagingController : ControllerBase
         await using var command = connection.CreateCommand();
         command.CommandText = """
             select exists(
-                select 1 from conversations c
+                select 1
+                from conversations c
                 join conversation_participants p on p.conversation_id=c.id
-                where c.id=@conversationId and c.organization_id=@organizationId and p.user_id=@userId and p.left_at is null)
+                where c.id=@conversationId
+                  and c.organization_id=@organizationId
+                  and p.user_id=@userId
+                  and p.left_at is null
+                  and (
+                        not @isFamilyMember
+                        or (
+                            c.service_user_id is not null
+                            and exists(
+                                select 1
+                                from family_access_grants g
+                                join family_access_permissions fp on fp.access_grant_id=g.id
+                                where g.organization_id=@organizationId
+                                  and g.family_member_id=@familyMemberId
+                                  and g.service_user_id=c.service_user_id
+                                  and g.verification_status='Verified'
+                                  and g.access_status='Active'
+                                  and (g.valid_from is null or g.valid_from<=now())
+                                  and (g.valid_until is null or g.valid_until>now())
+                                  and fp.permission='MessageCareTeam'
+                            )
+                        )
+                      )
+            )
             """;
-        Add(command, "conversationId", conversationId); Add(command, "organizationId", _tenant.OrganizationId); Add(command, "userId", userId);
+        Add(command, "conversationId", conversationId);
+        Add(command, "organizationId", _tenant.OrganizationId);
+        Add(command, "userId", userId);
+        Add(command, "isFamilyMember", _user.IsFamilyMember);
+        Add(command, "familyMemberId", _user.FamilyMemberId ?? Guid.Empty);
         return Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken));
     }
 
@@ -252,9 +303,16 @@ public sealed class MessagingController : ControllerBase
         return result is null or DBNull ? null : (Guid)result;
     }
 
-    private async Task<bool> FamilyCanMessageAsync(Guid serviceUserId, CancellationToken cancellationToken)
+    private Task<bool> FamilyCanMessageAsync(Guid serviceUserId, CancellationToken cancellationToken) =>
+        FamilyHasPermissionAsync(serviceUserId, "MessageCareTeam", cancellationToken);
+
+    private Task<bool> FamilyCanViewDocumentsAsync(Guid serviceUserId, CancellationToken cancellationToken) =>
+        FamilyHasPermissionAsync(serviceUserId, "ViewDocuments", cancellationToken);
+
+    private async Task<bool> FamilyHasPermissionAsync(Guid serviceUserId, string permission, CancellationToken cancellationToken)
     {
-        if (!_user.IsFamilyMember || _user.FamilyMemberId is null) return !_user.IsFamilyMember;
+        if (!_user.IsFamilyMember) return true;
+        if (_user.FamilyMemberId is null) return false;
         await using var connection = await OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -264,9 +322,12 @@ public sealed class MessagingController : ControllerBase
                 where g.organization_id=@organizationId and g.family_member_id=@familyMemberId and g.service_user_id=@serviceUserId
                   and g.verification_status='Verified' and g.access_status='Active'
                   and (g.valid_from is null or g.valid_from<=now()) and (g.valid_until is null or g.valid_until>now())
-                  and p.permission='MessageCareTeam')
+                  and p.permission=@permission)
             """;
-        Add(command, "organizationId", _tenant.OrganizationId); Add(command, "familyMemberId", _user.FamilyMemberId.Value); Add(command, "serviceUserId", serviceUserId);
+        Add(command, "organizationId", _tenant.OrganizationId);
+        Add(command, "familyMemberId", _user.FamilyMemberId.Value);
+        Add(command, "serviceUserId", serviceUserId);
+        Add(command, "permission", permission);
         return Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken));
     }
 
