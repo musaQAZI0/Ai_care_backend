@@ -24,5 +24,6 @@ public static class RenderVercelTestConfiguration
         configuration["FamilyPortal:FrontendBaseUrl"] = FrontendBaseUrl;
         configuration["Supabase:PublicFileBaseUrl"] = null;
         configuration["Demo:Enabled"] = "false";
+        configuration["TestingData:Enabled"] = "true";
     }
 }
