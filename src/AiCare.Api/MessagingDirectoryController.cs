@@ -71,13 +71,13 @@ public sealed class MessagingDirectoryController : ControllerBase
 
         if (_user.IsFamilyMember)
         {
-            if (_user.FamilyMemberId is null || conversation.Value.ServiceUserId is null) return Forbid();
+            if (_user.FamilyMemberId is null || conversation.ServiceUserId is null) return Forbid();
             try
             {
                 await _familyPortal.EnsurePermissionAsync(
                     _tenant.OrganizationId,
                     _user.FamilyMemberId.Value,
-                    conversation.Value.ServiceUserId.Value,
+                    conversation.ServiceUserId.Value,
                     FamilyPermissions.ViewDocuments,
                     cancellationToken);
             }
@@ -115,7 +115,7 @@ public sealed class MessagingDirectoryController : ControllerBase
         return Ok(rows);
     }
 
-    private async Task<(Guid? ServiceUserId)?> GetAccessibleConversationAsync(
+    private async Task<AccessibleConversation?> GetAccessibleConversationAsync(
         Guid conversationId,
         Guid userId,
         CancellationToken cancellationToken)
@@ -138,7 +138,7 @@ public sealed class MessagingDirectoryController : ControllerBase
 
         var value = await command.ExecuteScalarAsync(cancellationToken);
         if (value is null) return null;
-        return value is DBNull ? new ValueTuple<Guid?>((Guid?)null) : new ValueTuple<Guid?>((Guid)value);
+        return new AccessibleConversation(value is DBNull ? null : (Guid)value);
     }
 
     private async Task<DbConnection> OpenAsync(CancellationToken cancellationToken)
@@ -157,6 +157,8 @@ public sealed class MessagingDirectoryController : ControllerBase
         parameter.Value = value ?? DBNull.Value;
         command.Parameters.Add(parameter);
     }
+
+    private sealed record AccessibleConversation(Guid? ServiceUserId);
 }
 
 public sealed record MessagingParticipantDto(
