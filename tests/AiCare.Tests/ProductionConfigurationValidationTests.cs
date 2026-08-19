@@ -30,7 +30,8 @@ public sealed class ProductionConfigurationValidationTests
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["Supabase:ServiceRoleKey"] = "",
-            ["FamilyPortal:FrontendBaseUrl"] = ""
+            ["FamilyPortal:FrontendBaseUrl"] = "",
+            ["Email:Password"] = ""
         });
 
         var exception = Assert.Throws<InvalidOperationException>(() =>
@@ -38,7 +39,9 @@ public sealed class ProductionConfigurationValidationTests
 
         Assert.Contains("Supabase:ServiceRoleKey is required", exception.Message);
         Assert.Contains("FamilyPortal:FrontendBaseUrl is required", exception.Message);
+        Assert.Contains("Email:Password is required", exception.Message);
         Assert.DoesNotContain(ValidSigningKey, exception.Message);
+        Assert.DoesNotContain(ValidEmailPassword, exception.Message);
     }
 
     [Fact]
@@ -119,6 +122,27 @@ public sealed class ProductionConfigurationValidationTests
         Assert.Contains("short-lived signed URLs", exception.Message);
     }
 
+    [Theory]
+    [InlineData("false", "smtp.hostinger.com", "587", "true")]
+    [InlineData("true", "", "587", "true")]
+    [InlineData("true", "smtp.hostinger.com", "0", "true")]
+    [InlineData("true", "smtp.hostinger.com", "587", "false")]
+    public void InvalidProductionEmailConfigurationFails(string enabled, string host, string port, string enableSsl)
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Email:Enabled"] = enabled,
+            ["Email:SmtpHost"] = host,
+            ["Email:SmtpPort"] = port,
+            ["Email:EnableSsl"] = enableSsl
+        });
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ProductionConfigurationValidator.Validate(configuration, "Production"));
+
+        Assert.Contains("Email:", exception.Message);
+    }
+
     [Fact]
     public void DemoModeCannotBeEnabledInProduction()
     {
@@ -134,6 +158,7 @@ public sealed class ProductionConfigurationValidationTests
     }
 
     private const string ValidSigningKey = "prod-test-signing-key-2026-very-long-and-random-value";
+    private const string ValidEmailPassword = "smtp-test-only-secret-value";
 
     private static IConfiguration BuildConfiguration(Dictionary<string, string?>? overrides = null)
     {
@@ -148,8 +173,16 @@ public sealed class ProductionConfigurationValidationTests
             ["Supabase:ServiceRoleKey"] = "service-role-test-only-value",
             ["Supabase:Bucket"] = "care-documents",
             ["Supabase:PublicFileBaseUrl"] = "",
-            ["Cors:AllowedOrigins:0"] = "https://ai-care-frontend.vercel.app",
-            ["FamilyPortal:FrontendBaseUrl"] = "https://ai-care-frontend.vercel.app",
+            ["Cors:AllowedOrigins:0"] = "https://care.example.com",
+            ["FamilyPortal:FrontendBaseUrl"] = "https://care.example.com",
+            ["Email:Enabled"] = "true",
+            ["Email:SmtpHost"] = "smtp.hostinger.com",
+            ["Email:SmtpPort"] = "587",
+            ["Email:Username"] = "no-reply@care.example.com",
+            ["Email:Password"] = ValidEmailPassword,
+            ["Email:FromAddress"] = "no-reply@care.example.com",
+            ["Email:FromName"] = "AiCare",
+            ["Email:EnableSsl"] = "true",
             ["Demo:Enabled"] = "false"
         };
 
