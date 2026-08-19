@@ -15,7 +15,7 @@ namespace AiCare.Infrastructure.Migrations
             migrationBuilder.Sql("""
                 create table if not exists conversations (
                     id uuid primary key,
-                    service_user_id uuid not null,
+                    service_user_id uuid null,
                     subject text not null,
                     status text not null,
                     created_by_user_id uuid not null,
@@ -30,17 +30,15 @@ namespace AiCare.Infrastructure.Migrations
                     on conversations(organization_id, service_user_id);
 
                 create table if not exists conversation_participants (
-                    id uuid primary key,
                     conversation_id uuid not null references conversations(id) on delete cascade,
                     user_id uuid not null,
                     joined_at timestamptz not null,
                     left_at timestamptz null,
                     last_read_at timestamptz null,
-                    organization_id uuid not null,
-                    unique(conversation_id, user_id)
+                    primary key(conversation_id, user_id)
                 );
                 create index if not exists ix_conversation_participants_user
-                    on conversation_participants(organization_id, user_id, left_at);
+                    on conversation_participants(user_id, left_at);
 
                 create table if not exists conversation_messages (
                     id uuid primary key,
@@ -49,26 +47,34 @@ namespace AiCare.Infrastructure.Migrations
                     body text not null,
                     sent_at timestamptz not null,
                     edited_at timestamptz null,
-                    reply_to_message_id uuid null references conversation_messages(id),
-                    organization_id uuid not null
+                    deleted_at timestamptz null,
+                    reply_to_message_id uuid null references conversation_messages(id)
                 );
                 create index if not exists ix_conversation_messages_order
-                    on conversation_messages(organization_id, conversation_id, sent_at);
+                    on conversation_messages(conversation_id, sent_at);
 
-                create table if not exists message_attachments (
-                    id uuid primary key,
+                create table if not exists conversation_message_attachments (
                     message_id uuid not null references conversation_messages(id) on delete cascade,
                     document_id uuid not null,
-                    organization_id uuid not null,
-                    unique(message_id, document_id)
+                    primary key(message_id, document_id)
                 );
+
+                create table if not exists conversation_message_reads (
+                    message_id uuid not null references conversation_messages(id) on delete cascade,
+                    user_id uuid not null,
+                    read_at timestamptz not null,
+                    primary key(message_id, user_id)
+                );
+                create index if not exists ix_conversation_message_reads_user
+                    on conversation_message_reads(user_id, read_at desc);
                 """);
         }
 
         protected override void Down(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.Sql("""
-                drop table if exists message_attachments;
+                drop table if exists conversation_message_reads;
+                drop table if exists conversation_message_attachments;
                 drop table if exists conversation_messages;
                 drop table if exists conversation_participants;
                 drop table if exists conversations;
