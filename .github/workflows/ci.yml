@@ -13,7 +13,7 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -57,3 +57,6 @@ jobs:
           JwtOptions__TokenLifetimeMinutes: '30'
           Storage__Provider: Local
           ASPNETCORE_ENVIRONMENT: Development
+
+      - name: Build production container
+        run: docker build --pull --tag aicare-backend:ci .
