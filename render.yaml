@@ -3,7 +3,7 @@ services:
     name: ai-care-backend
     runtime: docker
     plan: free
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - key: ASPNETCORE_ENVIRONMENT
         value: Production
@@ -13,10 +13,18 @@ services:
         value: false
       - key: ConnectionStrings__DefaultConnection
         sync: false
+      - key: JwtOptions__Issuer
+        value: AiCare
+      - key: JwtOptions__Audience
+        value: AiCareClient
       - key: JwtOptions__SigningKey
         sync: false
       - key: Cors__AllowedOrigins__0
-        sync: false
+        value: https://ai-care-frontend.vercel.app
+      - key: FamilyPortal__FrontendBaseUrl
+        value: https://ai-care-frontend.vercel.app
+      - key: Demo__Enabled
+        value: false
       - key: Storage__Provider
         value: Supabase
       - key: Supabase__Url
