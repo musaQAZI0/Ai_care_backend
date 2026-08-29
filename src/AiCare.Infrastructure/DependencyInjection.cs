@@ -14,7 +14,10 @@ public static class DependencyInjection
         services.AddScoped<DocumentStorageCleanupInterceptor>();
         services.AddDbContext<CareDbContext>((serviceProvider, options) =>
             options
-                .UseNpgsql(connectionString)
+                .UseNpgsql(connectionString, postgres => postgres.EnableRetryOnFailure(
+                    maxRetryCount: 3,
+                    maxRetryDelay: TimeSpan.FromSeconds(2),
+                    errorCodesToAdd: null))
                 .AddInterceptors(serviceProvider.GetRequiredService<DocumentStorageCleanupInterceptor>()));
         services.AddHostedService<ProductionConfigurationValidationService>();
         services.AddHostedService<RenderTestPatientSeeder>();

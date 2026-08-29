@@ -98,6 +98,55 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
+    public async Task CareWorkerCannotAccessUnassignedPersonRecord()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "worker", "WorkerPassword123!");
+
+        var response = await client.GetAsync($"/api/phase1/service-users/{TestIds.OtherServiceUserId}/complete-record");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CareWorkerCannotCreateServiceUsers()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "worker", "WorkerPassword123!");
+
+        var response = await client.PostAsJsonAsync("/api/phase1/service-users", new
+        {
+            fullName = "Unauthorized Person",
+            dateOfBirth = "1980-01-01",
+            phoneNumber = "+10000009999",
+            careNeeds = "None",
+            emergencyContact = "Contact",
+            preferredCareWorker = "Worker"
+        });
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DuplicateServiceUserIsRejected()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+
+        var response = await client.PostAsJsonAsync("/api/phase1/service-users", new
+        {
+            fullName = "  test service user  ",
+            dateOfBirth = "1970-01-01",
+            phoneNumber = "+10000009998",
+            careNeeds = "Personal care",
+            emergencyContact = "Contact",
+            preferredCareWorker = "Test Worker"
+        });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
     public async Task AdminCanAccessAdminUsers()
     {
         var client = _factory.CreateClient();
@@ -251,6 +300,22 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
+    public async Task ViewingCompletePersonRecordIsAudited()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "admin", "AdminPassword123!");
+
+        var view = await client.GetAsync($"/api/phase1/service-users/{TestIds.ServiceUserId}/complete-record");
+        Assert.Equal(HttpStatusCode.OK, view.StatusCode);
+
+        var audits = await client.GetFromJsonAsync<List<AuditResponse>>("/api/phase1/audit-events");
+        Assert.Contains(audits ?? [], audit =>
+            audit.Action == "person_record.viewed" &&
+            audit.Actor == "admin" &&
+            audit.EntityId == TestIds.ServiceUserId);
+    }
+
+    [Fact]
     public async Task ResponsesIncludeRequestIdAndSecurityHeaders()
     {
         var client = _factory.CreateClient();
@@ -278,6 +343,42 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
+    public async Task PhaseOneEndpointsRequireAuthentication()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/phase1/service-users");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RefreshTokenRejectsFabricatedToken()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/auth/refresh-token", new { refreshToken = "fabricated-refresh-token" });
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task SharedLocalPasswordResetCodeIsRejected()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/auth/reset-password", new
+        {
+            resetToken = "local-reset",
+            newPassword = "AttackerPassword123!"
+        });
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task MfaSetupRequiresAuthentication()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/auth/setup-mfa", new { userName = "admin" });
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task FamilyMemberCanAccessLinkedServiceUserDashboard()
     {
         var client = _factory.CreateClient();
@@ -289,12 +390,48 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
+    public async Task FamilyMemberCanResolveOnlyLinkedPortalIdentity()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "family", "FamilyPassword123!");
+
+        var response = await client.GetAsync("/api/phase1/family/me");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains(TestIds.ServiceUserId.ToString(), body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(TestIds.OtherServiceUserId.ToString(), body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task FamilyMemberCannotAccessAnotherServiceUserDashboard()
     {
         var client = _factory.CreateClient();
         await Login(client, "family", "FamilyPassword123!");
 
         var response = await client.GetAsync($"/api/phase1/family/service-users/{TestIds.OtherServiceUserId}/dashboard");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FamilyMemberCannotAccessTenantWideServiceUserList()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "family", "FamilyPassword123!");
+
+        var response = await client.GetAsync("/api/phase1/service-users");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FamilyMemberCannotAccessTenantWideMessages()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "family", "FamilyPassword123!");
+
+        var response = await client.GetAsync("/api/phase1/messages");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
@@ -414,7 +551,8 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
                 ["JwtOptions:Issuer"] = "AiCare",
                 ["JwtOptions:Audience"] = "AiCareClient",
                 ["JwtOptions:SigningKey"] = "test-signing-key-with-enough-length-for-hmac",
-                ["JwtOptions:TokenLifetimeMinutes"] = "120"
+                ["JwtOptions:TokenLifetimeMinutes"] = "120",
+                ["RateLimiting:AuthPermitLimit"] = "1000"
             });
         });
         builder.ConfigureServices(services =>

@@ -155,13 +155,15 @@ public sealed record CreateVisitRequest(
     DateTimeOffset StartsAt,
     string VisitType,
     int DurationMinutes = 30,
-    string RequiredSkills = "");
+    string RequiredSkills = "",
+    IReadOnlyCollection<Guid>? AdditionalCareWorkerIds = null,
+    string ChangeReason = "Scheduled visit");
 
 public sealed record VisitCheckInRequest(decimal Latitude, decimal Longitude);
 
 public sealed record VisitCheckOutRequest(decimal Latitude, decimal Longitude);
 
-public sealed record UpdateVisitStatusRequest(VisitStatus Status);
+public sealed record UpdateVisitStatusRequest(VisitStatus Status, string Reason = "Status updated");
 
 public sealed record CreateCarePlanRequest(
     Guid ServiceUserId,

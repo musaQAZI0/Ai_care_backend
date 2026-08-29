@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using AiCare.Application.FamilyPortal;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -21,6 +22,7 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
     [Fact]
     public async Task VerifiedRepresentativeActivationPermissionsCarePlanAndRevocationAreEnforced()
     {
+        await _factory.EnsureClinicalSeedAsync();
         var seed = await CreateIsolatedFamilyScenario();
         var admin = _factory.CreateClient();
         var adminLogin = await Login(admin, "admin", "Admin123!");
@@ -109,6 +111,13 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
         Assert.Equal(HttpStatusCode.Created, feedback.StatusCode);
 
         var plan = await CreateApprovedManagerSignedPlan(admin, seed.PersonId);
+        using (var permissionScope = _factory.Services.CreateScope())
+        {
+            var permissionService = permissionScope.ServiceProvider.GetRequiredService<IFamilyPortalService>();
+            await permissionService.EnsurePermissionAsync(TenantDefaults.OrganizationId, seed.FamilyMemberId, seed.PersonId, FamilyPermissions.ViewCarePlan, CancellationToken.None);
+        }
+        var identity = await family.GetStringAsync("/api/auth/me");
+        Assert.Contains(seed.FamilyMemberId.ToString(), identity, StringComparison.OrdinalIgnoreCase);
         var lifecycleRead = await family.GetAsync($"/api/phase1/care-plans/{plan.CarePlanId}/lifecycle");
         Assert.Equal(HttpStatusCode.OK, lifecycleRead.StatusCode);
 
@@ -215,7 +224,8 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
         var lifecycle = await admin.GetFromJsonAsync<LifecycleDto>($"/api/phase1/care-plans/{carePlanId}/lifecycle");
         Assert.NotNull(lifecycle);
         var review = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{carePlanId}/submit-review", new { expectedRevision = lifecycle!.Version.Revision, comment = "Family regression review" });
-        Assert.Equal(HttpStatusCode.OK, review.StatusCode);
+        Assert.True(review.StatusCode == HttpStatusCode.OK,
+            $"Submit-review failed with {(int)review.StatusCode}: {await review.Content.ReadAsStringAsync()}");
         var reviewed = (await review.Content.ReadFromJsonAsync<LifecycleDto>())!;
         var approve = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{carePlanId}/lifecycle/approve", new { expectedRevision = reviewed.Version.Revision, comment = "Family regression approved" });
         Assert.Equal(HttpStatusCode.OK, approve.StatusCode);

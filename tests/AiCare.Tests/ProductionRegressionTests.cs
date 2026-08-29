@@ -5,6 +5,7 @@ using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -187,6 +188,11 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>
         _ = CreateClient();
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+        var admin = await db.AppUsers.SingleOrDefaultAsync(user => user.UserName == "admin");
+        if (admin is null)
+            db.AppUsers.Add(new AppUser(Guid.NewGuid(), "admin", "admin@aicare.local", PasswordHasher.HashPassword("Admin123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, null, null));
+        else
+            db.Entry(admin).CurrentValues.SetValues(admin with { PasswordHash = PasswordHasher.HashPassword("Admin123!"), IsActive = true });
         if (await db.ServiceUsers.FindAsync(RegressionIds.ServiceUserId) is null)
             db.ServiceUsers.Add(new ServiceUser(RegressionIds.ServiceUserId, "Regression Person", new DateOnly(1980, 1, 1), "07000000000", "Personal care", "Regression Contact", "Regression Worker", RiskLevel.Medium, "Active", "1 Test Street", "None", "None", "Local authority", "Other", "", "Independent", "Full capacity", "Verbal", "None", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         if (await db.CareWorkers.FindAsync(RegressionIds.WorkerId) is null)
@@ -198,6 +204,7 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>
         if (await db.MedicationAdministrationRecords.FindAsync(RegressionIds.MarId) is null)
             db.MedicationAdministrationRecords.Add(new MedicationAdministrationRecord(RegressionIds.MarId, RegressionIds.MedicationId, RegressionIds.VisitId, RegressionIds.WorkerId, DateTimeOffset.UtcNow.AddHours(1), null, "Scheduled", "", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         await db.SaveChangesAsync();
+        await db.Database.ExecuteSqlRawAsync("update auth_user_security set failed_attempts=0, lockout_until=null where user_id in (select \"Id\" from \"AppUsers\")");
     }
 }
 

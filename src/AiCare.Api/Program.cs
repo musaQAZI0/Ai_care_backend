@@ -1,6 +1,7 @@
 using System.Text;
 using System.Net.Http.Json;
 using System.Diagnostics;
+using System.Threading.RateLimiting;
 using AiCare.Application;
 using AiCare.Api;
 using AiCare.Domain;
@@ -31,7 +32,6 @@ builder.Services.AddCors(options =>
     });
 });
 
-builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("JwtOptions"));
 var connectionString = NormalizePostgresConnectionString(
     builder.Configuration.GetConnectionString("DefaultConnection")
         ?? throw new InvalidOperationException("Missing DefaultConnection"));
@@ -47,6 +47,8 @@ if (builder.Environment.IsEnvironment("Testing") && string.IsNullOrWhiteSpace(jw
     jwtOptions.SigningKey = "test-signing-key-with-enough-length-for-hmac";
 }
 ValidateJwtOptions(jwtOptions, builder.Environment);
+builder.Services.AddSingleton<Microsoft.Extensions.Options.IOptions<JwtOptions>>(
+    Microsoft.Extensions.Options.Options.Create(jwtOptions));
 var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.SigningKey));
 
 builder.Services.AddAuthentication(options =>
@@ -79,6 +81,32 @@ builder.Services.Configure<RouteHandlerOptions>(options =>
 });
 
 builder.Services.AddControllers();
+var authPermitLimit = builder.Environment.IsEnvironment("Testing")
+    ? 1000
+    : builder.Configuration.GetValue<int?>("RateLimiting:AuthPermitLimit") ?? 10;
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = authPermitLimit,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.User.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 300,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+});
 
 var app = builder.Build();
 
@@ -115,8 +143,9 @@ app.UseExceptionHandler(errorApp =>
             return;
         }
 
+        app.Logger.LogError(exception, "Unhandled API exception requestId={RequestId}", context.TraceIdentifier);
         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-        await context.Response.WriteAsJsonAsync(new { message = "An unexpected error occurred." });
+        await context.Response.WriteAsJsonAsync(new { message = "An unexpected error occurred.", requestId = context.TraceIdentifier });
     });
 });
 app.Use(async (context, next) =>
@@ -150,6 +179,24 @@ app.Use(async (context, next) =>
 });
 app.UseCors("ReactClient");
 app.UseAuthentication();
+app.UseRateLimiter();
+app.Use(async (context, next) =>
+{
+    var isFamilyMember = context.User.IsInRole(nameof(UserRole.FamilyMember));
+    var isRestrictedPortalRole = isFamilyMember || context.User.IsInRole(nameof(UserRole.ServiceUser));
+    var isPhaseOneApi = context.Request.Path.StartsWithSegments("/api/phase1");
+    var isFamilyScopedApi = context.Request.Path.StartsWithSegments("/api/phase1/family");
+    var isAuthorizedFamilyCarePlanRoute = isFamilyMember && IsFamilyCarePlanRoute(context.Request);
+
+    if (isRestrictedPortalRole && isPhaseOneApi && !isFamilyScopedApi && !isAuthorizedFamilyCarePlanRoute)
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { message = "This account can only access its linked care portal." });
+        return;
+    }
+
+    await next();
+});
 app.UseAuthorization();
 
 app.MapControllers();
@@ -205,9 +252,9 @@ app.MapGet("/status/config", (IConfiguration configuration, IWebHostEnvironment 
     checkedAt = DateTimeOffset.UtcNow
 }));
 
-var phase1 = app.Environment.IsDevelopment()
-    ? app.MapGroup("/api/phase1")
-    : app.MapGroup("/api/phase1").RequireAuthorization("Phase1User");
+// Keep authorization behavior consistent in every environment. Local development
+// must use a real seeded account instead of silently exposing all care endpoints.
+var phase1 = app.MapGroup("/api/phase1").RequireAuthorization("Phase1User");
 
 phase1.MapGet("/dashboard", (CareDbContext context, ITenantContext tenant) =>
 {
@@ -259,13 +306,20 @@ phase1.MapGet("/service-users", (ICareRepository repository, CareDbContext conte
         .ToList();
     return Results.Ok(serviceUsers);
 });
-phase1.MapGet("/service-users/{id:guid}", (Guid id, ICareRepository repository) =>
+phase1.MapGet("/service-users/{id:guid}", (Guid id, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireServiceUserAccess(id, context, tenant, currentUser);
+    if (denied is not null) return denied;
     var serviceUser = repository.GetServiceUser(id);
-    return serviceUser is null ? Results.NotFound() : Results.Ok(serviceUser);
+    if (serviceUser is null) return Results.NotFound();
+    AddAudit(context, tenant, currentUser, "service_user.viewed", nameof(ServiceUser), id);
+    context.SaveChanges();
+    return Results.Ok(serviceUser);
 });
-phase1.MapPost("/service-users", (CreateServiceUserRequest request, ICareRepository repository) =>
+phase1.MapPost("/service-users", (CreateServiceUserRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
     if (Missing(request.FullName, request.PhoneNumber, request.CareNeeds, request.EmergencyContact, request.PreferredCareWorker))
     {
         return Error("Full name, phone number, care needs, emergency contact, and preferred care worker are required.");
@@ -276,11 +330,20 @@ phase1.MapPost("/service-users", (CreateServiceUserRequest request, ICareReposit
         return Error("Date of birth cannot be in the future.");
     }
 
+    var normalizedName = request.FullName.Trim().ToUpperInvariant();
+    var duplicate = context.ServiceUsers.AsNoTracking().AsEnumerable().Any(item =>
+        TenantVisible(tenant, item.OrganizationId, item.BranchId) &&
+        item.DateOfBirth == request.DateOfBirth &&
+        item.FullName.Trim().ToUpperInvariant() == normalizedName);
+    if (duplicate) return Results.Conflict(new { message = "A person with the same name and date of birth already exists." });
+
     var serviceUser = repository.AddServiceUser(request);
     return Results.Created($"/api/phase1/service-users/{serviceUser.Id}", serviceUser);
 });
-phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest request, ICareRepository repository) =>
+phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest request, ICareRepository repository, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
     if (Missing(request.FullName, request.PhoneNumber, request.CareNeeds, request.EmergencyContact, request.PreferredCareWorker))
     {
         return Error("Full name, phone number, care needs, emergency contact, and preferred care worker are required.");
@@ -296,6 +359,8 @@ phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest req
 });
 phase1.MapDelete("/service-users/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager);
+    if (denied is not null) return denied;
     var serviceUser = context.ServiceUsers.Find(id);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId)) return Results.NotFound();
     context.ServiceUsers.Remove(serviceUser);
@@ -304,25 +369,31 @@ phase1.MapDelete("/service-users/{id:guid}", (Guid id, CareDbContext context, IT
     return Results.NoContent();
 });
 
-phase1.MapGet("/service-users/{id:guid}/complete-record", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/service-users/{id:guid}/complete-record", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireServiceUserAccess(id, context, tenant, currentUser);
+    if (denied is not null) return denied;
     var person = context.ServiceUsers.AsNoTracking().FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return Results.NotFound();
 
     var record = context.PersonRecords.AsNoTracking().FirstOrDefault(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId);
-    var assessments = context.CareAssessments.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.CompletedAt).ToList();
+    var assessments = context.CareAssessments.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).AsEnumerable().OrderByDescending(item => item.CompletedAt).ToList();
     var plans = context.CarePlans.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.Version).ToList();
     var planIds = plans.Select(item => item.Id).ToList();
     var outcomes = context.CarePlanOutcomes.AsNoTracking().Where(item => planIds.Contains(item.CarePlanId) && item.OrganizationId == tenant.OrganizationId).ToList();
     var risks = context.RiskAssessments.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).ToList();
     var family = context.FamilyMembers.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).ToList();
-    var notes = context.CareNotes.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.CreatedAt).Take(20).ToList();
-    var incidents = context.Incidents.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.ReportedAt).Take(20).ToList();
+    var notes = context.CareNotes.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).AsEnumerable().OrderByDescending(item => item.CreatedAt).Take(20).ToList();
+    var incidents = context.Incidents.AsNoTracking().Where(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId).AsEnumerable().OrderByDescending(item => item.ReportedAt).Take(20).ToList();
+    AddAudit(context, tenant, currentUser, "person_record.viewed", nameof(ServiceUser), id);
+    context.SaveChanges();
     return Results.Ok(new { person, record, assessments, plans, outcomes, risks, family, notes, incidents });
 });
 
 phase1.MapPut("/service-users/{id:guid}/person-record", (Guid id, UpsertPersonRecordRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
+    if (denied is not null) return denied;
     var person = context.ServiceUsers.FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return Results.NotFound();
     var existing = context.PersonRecords.FirstOrDefault(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId);
@@ -493,11 +564,15 @@ phase1.MapPost("/visits/conflicts", (CreateVisitRequest request, CareDbContext c
         return Error("Care worker and a positive duration are required.");
     }
 
-    var validation = ValidateCareWorkerReference(request.CareWorkerId, context, tenant);
+    var workerIds = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
+    var validation = workerIds.Select(id => ValidateCareWorkerReference(id, context, tenant)).FirstOrDefault(result => result is not null);
     if (validation is not null) return validation;
 
-    var conflicts = FindVisitConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes);
-    return Results.Ok(new { hasConflicts = conflicts.Count > 0, conflicts });
+    var conflicts = workerIds.SelectMany(id => FindVisitConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes)).ToList();
+    var availabilityConflicts = workerIds.SelectMany(id => FindWorkerAvailabilityConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes)).ToList();
+    var safetyConflicts = workerIds.SelectMany(id => FindWorkerSafetyConflicts(context, tenant, id, request.StartsAt, request.RequiredSkills)).ToList();
+    var operationalConflicts = workerIds.SelectMany(id => FindWorkerOperationalConflicts(context, tenant, id, request.ServiceUserId, request.StartsAt, request.DurationMinutes)).ToList();
+    return Results.Ok(new { hasConflicts = conflicts.Count > 0 || availabilityConflicts.Count > 0 || safetyConflicts.Count > 0 || operationalConflicts.Count > 0, conflicts, availabilityConflicts, safetyConflicts, operationalConflicts });
 });
 phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
@@ -509,7 +584,9 @@ phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repositor
         return Error("Service user, care worker, visit type, and a positive duration are required.");
     }
 
-    var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant);
+    var workerIds = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
+    var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant)
+        ?? workerIds.Skip(1).Select(id => ValidateCareWorkerReference(id, context, tenant)).FirstOrDefault(result => result is not null);
     if (validation is not null) return validation;
 
     var conflicts = FindVisitConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes);
@@ -517,8 +594,25 @@ phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repositor
     {
         return Error("Care worker already has a conflicting visit.");
     }
+    var availabilityConflicts = FindWorkerAvailabilityConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes);
+    if (availabilityConflicts.Count > 0)
+    {
+        return Error("Care worker is unavailable for the requested visit time. Check structured availability rules.");
+    }
+    var safetyConflicts = FindWorkerSafetyConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.RequiredSkills);
+    if (safetyConflicts.Count > 0)
+    {
+        return Error("Care worker does not meet the visit's current compliance or skill requirements.");
+    }
+    var additionalConflicts = workerIds.Skip(1).SelectMany(id => FindVisitConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes)
+        .Concat(FindWorkerAvailabilityConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes))
+        .Concat(FindWorkerSafetyConflicts(context, tenant, id, request.StartsAt, request.RequiredSkills))).ToList();
+    var operationalConflicts = workerIds.SelectMany(id => FindWorkerOperationalConflicts(context, tenant, id, request.ServiceUserId, request.StartsAt, request.DurationMinutes)).ToList();
+    if (additionalConflicts.Count > 0 || operationalConflicts.Count > 0) return Error("One or more assigned workers fail availability, compliance, working-time, absence, or travel requirements.");
 
     var visit = repository.AddVisit(request);
+    SyncVisitWorkerAssignments(context, tenant, visit.Id, request.CareWorkerId, request.AdditionalCareWorkerIds);
+    RecordScheduleChange(context, tenant, currentUser, visit.Id, "Created", null, visit, request.ChangeReason);
     return Results.Created($"/api/phase1/visits/{visit.Id}", visit);
 });
 phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
@@ -531,7 +625,9 @@ phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRe
         return Error("Service user, care worker, visit type, and a positive duration are required.");
     }
 
-    var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant);
+    var workerIds = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
+    var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant)
+        ?? workerIds.Skip(1).Select(workerId => ValidateCareWorkerReference(workerId, context, tenant)).FirstOrDefault(result => result is not null);
     if (validation is not null) return validation;
 
     var conflicts = FindVisitConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes, id);
@@ -539,8 +635,26 @@ phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRe
     {
         return Error("Care worker already has a conflicting visit.");
     }
+    var availabilityConflicts = FindWorkerAvailabilityConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes);
+    if (availabilityConflicts.Count > 0)
+    {
+        return Error("Care worker is unavailable for the requested visit time. Check structured availability rules.");
+    }
+    var safetyConflicts = FindWorkerSafetyConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.RequiredSkills);
+    if (safetyConflicts.Count > 0)
+    {
+        return Error("Care worker does not meet the visit's current compliance or skill requirements.");
+    }
+    var additionalConflicts = workerIds.Skip(1).SelectMany(workerId => FindVisitConflicts(context, tenant, workerId, request.StartsAt, request.DurationMinutes, id)
+        .Concat(FindWorkerAvailabilityConflicts(context, tenant, workerId, request.StartsAt, request.DurationMinutes))
+        .Concat(FindWorkerSafetyConflicts(context, tenant, workerId, request.StartsAt, request.RequiredSkills))).ToList();
+    var operationalConflicts = workerIds.SelectMany(workerId => FindWorkerOperationalConflicts(context, tenant, workerId, request.ServiceUserId, request.StartsAt, request.DurationMinutes, id)).ToList();
+    if (additionalConflicts.Count > 0 || operationalConflicts.Count > 0) return Error("One or more assigned workers fail availability, compliance, working-time, absence, or travel requirements.");
 
+    var previousVisit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == id);
     var visit = repository.UpdateVisit(id, request);
+    if (visit is not null) SyncVisitWorkerAssignments(context, tenant, visit.Id, request.CareWorkerId, request.AdditionalCareWorkerIds);
+    if (visit is not null) RecordScheduleChange(context, tenant, currentUser, visit.Id, previousVisit?.CareWorkerId != visit.CareWorkerId ? "Reassigned" : previousVisit?.StartsAt != visit.StartsAt ? "Rescheduled" : "Updated", previousVisit, visit, request.ChangeReason);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
 });
 phase1.MapPost("/visits/recurring", (CreateRecurringVisitRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
@@ -567,6 +681,24 @@ phase1.MapPost("/visits/recurring", (CreateRecurringVisitRequest request, CareDb
     {
         return Error("Recurring series has conflicts. Use /api/phase1/visits/conflicts to inspect the rota.");
     }
+    var availabilityConflicts = starts.SelectMany(startsAt => FindWorkerAvailabilityConflicts(context, tenant, request.CareWorkerId, startsAt, request.DurationMinutes)).ToList();
+    if (availabilityConflicts.Count > 0)
+    {
+        return Error("Recurring series includes times when the care worker is unavailable. Check structured availability rules.");
+    }
+    var safetyConflicts = starts.SelectMany(startsAt => FindWorkerSafetyConflicts(context, tenant, request.CareWorkerId, startsAt, request.RequiredSkills)).ToList();
+    if (safetyConflicts.Count > 0)
+    {
+        return Error("Recurring series includes assignments that fail current compliance or skill requirements.");
+    }
+    var workerIds = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
+    var secondaryValidation = workerIds.Skip(1).Select(id => ValidateCareWorkerReference(id, context, tenant)).FirstOrDefault(result => result is not null);
+    if (secondaryValidation is not null) return secondaryValidation;
+    var additionalConflicts = starts.SelectMany(startsAt => workerIds.Skip(1).SelectMany(id => FindVisitConflicts(context, tenant, id, startsAt, request.DurationMinutes)
+        .Concat(FindWorkerAvailabilityConflicts(context, tenant, id, startsAt, request.DurationMinutes))
+        .Concat(FindWorkerSafetyConflicts(context, tenant, id, startsAt, request.RequiredSkills)))).ToList();
+    var operationalConflicts = starts.SelectMany(startsAt => workerIds.SelectMany(id => FindWorkerOperationalConflicts(context, tenant, id, request.ServiceUserId, startsAt, request.DurationMinutes))).ToList();
+    if (additionalConflicts.Count > 0 || operationalConflicts.Count > 0) return Error("Recurring series fails workforce absence, working-time, travel, or double-up worker requirements.");
 
     var visits = starts.Select(startsAt => new Visit(
         Guid.NewGuid(),
@@ -588,14 +720,17 @@ phase1.MapPost("/visits/recurring", (CreateRecurringVisitRequest request, CareDb
     context.Visits.AddRange(visits);
     AddAudit(context, tenant, currentUser, $"visit.recurring_scheduled:{visits.Count}", nameof(Visit), visits.First().Id);
     context.SaveChanges();
+    foreach (var visit in visits) { SyncVisitWorkerAssignments(context, tenant, visit.Id, request.CareWorkerId, request.AdditionalCareWorkerIds); RecordScheduleChange(context, tenant, currentUser, visit.Id, "RecurringCreated", null, visit, "Recurring series created"); }
     return Results.Created("/api/phase1/visits/recurring", new { count = visits.Count, visits });
 });
-phase1.MapPatch("/visits/{id:guid}/status", (Guid id, UpdateVisitStatusRequest request, ICareRepository repository, ICurrentUserContext currentUser) =>
+phase1.MapPatch("/visits/{id:guid}/status", (Guid id, UpdateVisitStatusRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
 
+    var previousVisit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == id);
     var visit = repository.UpdateVisitStatus(id, request.Status);
+    if (visit is not null) RecordScheduleChange(context, tenant, currentUser, id, request.Status == VisitStatus.Cancelled ? "Cancelled" : "StatusChanged", previousVisit, visit, request.Reason);
     return visit is null ? Results.NotFound() : Results.Ok(visit);
 });
 phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
@@ -605,6 +740,7 @@ phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantCo
 
     var visit = context.Visits.Find(id);
     if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return Results.NotFound();
+    RecordScheduleChange(context, tenant, currentUser, id, "Deleted", visit, null, "Visit removed from the rota");
     context.Visits.Remove(visit);
     AddAudit(context, tenant, currentUser, "visit.deleted", nameof(Visit), id);
     context.SaveChanges();
@@ -1384,6 +1520,32 @@ phase1.MapGet("/audit-events", (ICareRepository repository, ICurrentUserContext 
     return denied ?? Results.Ok(repository.GetAuditEvents());
 });
 
+phase1.MapGet("/family/me", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    if (!currentUser.IsFamilyMember || currentUser.FamilyMemberId is null)
+    {
+        return Results.Forbid();
+    }
+
+    var familyMember = context.FamilyMembers.AsNoTracking()
+        .FirstOrDefault(item => item.Id == currentUser.FamilyMemberId.Value);
+    if (familyMember is null || !tenant.CanAccess(familyMember.OrganizationId, familyMember.BranchId))
+    {
+        return Results.Forbid();
+    }
+
+    var serviceUser = context.ServiceUsers.AsNoTracking()
+        .FirstOrDefault(item => item.Id == familyMember.ServiceUserId);
+    if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
+    {
+        return Results.Forbid();
+    }
+
+    AddAudit(context, tenant, currentUser, "family.portal_accessed", nameof(ServiceUser), serviceUser.Id);
+    context.SaveChanges();
+    return Results.Ok(new { familyMember, serviceUser });
+});
+
 phase1.MapGet("/family/service-users/{id:guid}/timeline", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireFamilyServiceUserAccess(id, context, tenant, currentUser);
@@ -1919,6 +2081,27 @@ static bool LooksLikeEmail(string value) => value.Contains('@', StringComparison
 
 static bool TenantVisible(ITenantContext tenant, Guid? organizationId, Guid? branchId) => tenant.CanAccess(organizationId, branchId);
 
+static IResult? RequireServiceUserAccess(Guid serviceUserId, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+{
+    var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(item => item.Id == serviceUserId);
+    if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
+    {
+        return Results.NotFound();
+    }
+
+    if (!currentUser.IsCareWorker) return null;
+    if (currentUser.CareWorkerId is null)
+    {
+        return Error("Care worker account is not linked to a care worker profile.", StatusCodes.Status403Forbidden);
+    }
+
+    var assigned = context.Visits.AsNoTracking().Any(visit =>
+        visit.ServiceUserId == serviceUserId &&
+        visit.CareWorkerId == currentUser.CareWorkerId &&
+        visit.OrganizationId == tenant.OrganizationId);
+    return assigned ? null : Error("Care workers can only access people assigned through their visits.", StatusCodes.Status403Forbidden);
+}
+
 static IResult? RequireAssignedVisitForCareWorker(Guid visitId, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
 {
     if (!currentUser.IsCareWorker)
@@ -2049,8 +2232,9 @@ static IResult? ValidateCareNoteReferences(Guid visitId, Guid serviceUserId, Gui
 static List<object> FindVisitConflicts(CareDbContext context, ITenantContext tenant, Guid careWorkerId, DateTimeOffset startsAt, int durationMinutes, Guid? excludeVisitId = null)
 {
     var endsAt = startsAt.AddMinutes(durationMinutes);
+    var additionalVisitIds = ReadAdditionalVisitIds(context, tenant, careWorkerId);
     return context.Visits.AsNoTracking()
-        .Where(visit => visit.CareWorkerId == careWorkerId && (excludeVisitId == null || visit.Id != excludeVisitId))
+        .Where(visit => (visit.CareWorkerId == careWorkerId || additionalVisitIds.Contains(visit.Id)) && (excludeVisitId == null || visit.Id != excludeVisitId))
         .AsEnumerable()
         .Where(visit => TenantVisible(tenant, visit.OrganizationId, visit.BranchId))
         .Where(visit =>
@@ -2071,6 +2255,203 @@ static List<object> FindVisitConflicts(CareDbContext context, ITenantContext ten
         })
         .Cast<object>()
         .ToList();
+}
+
+static Guid[] VisitWorkerIds(Guid primaryWorkerId, IReadOnlyCollection<Guid>? additionalWorkerIds) =>
+    new[] { primaryWorkerId }.Concat(additionalWorkerIds ?? []).Where(id => id != Guid.Empty).Distinct().ToArray();
+
+static HashSet<Guid> ReadAdditionalVisitIds(CareDbContext context, ITenantContext tenant, Guid careWorkerId)
+{
+    var ids = new HashSet<Guid>(); var connection = context.Database.GetDbConnection(); var opened = connection.State != System.Data.ConnectionState.Open;
+    try { if (opened) connection.Open(); using var command=connection.CreateCommand(); command.CommandText="select visit_id from visit_care_worker_assignments where care_worker_id=@worker and organization_id=@organization"; AddParameter(command,"worker",careWorkerId); AddParameter(command,"organization",tenant.OrganizationId); using var reader=command.ExecuteReader(); while(reader.Read())ids.Add(reader.GetGuid(0)); }
+    catch(System.Data.Common.DbException){ }
+    finally { if(opened&&connection.State==System.Data.ConnectionState.Open)connection.Close(); }
+    return ids;
+}
+
+static List<object> FindWorkerOperationalConflicts(CareDbContext context, ITenantContext tenant, Guid workerId, Guid serviceUserId, DateTimeOffset startsAt, int durationMinutes, Guid? excludeVisitId = null)
+{
+    var result=new List<object>(); var end=startsAt.AddMinutes(durationMinutes); var policy=(MinimumRest:660,Daily:720,Weekly:2880,Travel:15); var absence=false;
+    var connection=context.Database.GetDbConnection();var opened=connection.State!=System.Data.ConnectionState.Open;
+    try { if(opened)connection.Open(); using(var command=connection.CreateCommand()){command.CommandText="select exists(select 1 from worker_absences where care_worker_id=@worker and organization_id=@organization and status in ('Approved','Confirmed') and starts_at < @end and ends_at > @start)";AddParameter(command,"worker",workerId);AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"start",startsAt);AddParameter(command,"end",end);absence=(bool)(command.ExecuteScalar()??false);} using(var command=connection.CreateCommand()){command.CommandText="select minimum_rest_minutes,maximum_daily_minutes,maximum_weekly_minutes,travel_buffer_minutes from scheduling_policies where organization_id=@organization and branch_id=@branch";AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"branch",tenant.BranchId??TenantDefaults.BranchId);using var reader=command.ExecuteReader();if(reader.Read())policy=(reader.GetInt32(0),reader.GetInt32(1),reader.GetInt32(2),reader.GetInt32(3));}}
+    catch(System.Data.Common.DbException){return result;} finally{if(opened&&connection.State==System.Data.ConnectionState.Open)connection.Close();}
+    if(absence)result.Add(new{careWorkerId=workerId,category="Absence",code="worker-absent",reason="Worker has approved leave or sickness overlapping this visit."});
+    var additional=ReadAdditionalVisitIds(context,tenant,workerId);
+    var visits=context.Visits.AsNoTracking().AsEnumerable().Where(v=>TenantVisible(tenant,v.OrganizationId,v.BranchId)&&(v.CareWorkerId==workerId||additional.Contains(v.Id))&&(excludeVisitId is null||v.Id!=excludeVisitId)).ToList();
+    var dayMinutes=visits.Where(v=>v.StartsAt.Date==startsAt.Date).Sum(v=>v.DurationMinutes)+durationMinutes;
+    if(dayMinutes>policy.Daily)result.Add(new{careWorkerId=workerId,category="WorkingTime",code="daily-hours",reason=$"Assignment would exceed the {policy.Daily}-minute daily limit."});
+    var weekStart=startsAt.Date.AddDays(-(((int)startsAt.DayOfWeek+6)%7));var weekEnd=weekStart.AddDays(7);
+    var weekMinutes=visits.Where(v=>v.StartsAt>=weekStart&&v.StartsAt<weekEnd).Sum(v=>v.DurationMinutes)+durationMinutes;
+    if(weekMinutes>policy.Weekly)result.Add(new{careWorkerId=workerId,category="WorkingTime",code="weekly-hours",reason=$"Assignment would exceed the {policy.Weekly}-minute weekly limit."});
+    foreach(var visit in visits){var visitEnd=visit.StartsAt.AddMinutes(visit.DurationMinutes);if(visitEnd<=startsAt){var gap=(startsAt-visitEnd).TotalMinutes;if(visit.StartsAt.Date!=startsAt.Date&&gap<policy.MinimumRest)result.Add(new{careWorkerId=workerId,category="WorkingTime",code="minimum-rest",reason=$"Only {Math.Floor(gap)} minutes rest precede this visit; {policy.MinimumRest} are required."});else if(visit.ServiceUserId!=serviceUserId&&gap<policy.Travel)result.Add(new{careWorkerId=workerId,category="Travel",code="travel-time",reason=$"Only {Math.Floor(gap)} travel minutes are available; {policy.Travel} are required."});}else if(end<=visit.StartsAt){var gap=(visit.StartsAt-end).TotalMinutes;if(visit.StartsAt.Date!=startsAt.Date&&gap<policy.MinimumRest)result.Add(new{careWorkerId=workerId,category="WorkingTime",code="minimum-rest",reason=$"Only {Math.Floor(gap)} minutes rest follow this visit; {policy.MinimumRest} are required."});else if(visit.ServiceUserId!=serviceUserId&&gap<policy.Travel)result.Add(new{careWorkerId=workerId,category="Travel",code="travel-time",reason=$"Only {Math.Floor(gap)} travel minutes are available; {policy.Travel} are required."});}}
+    return result.GroupBy(x=>System.Text.Json.JsonSerializer.Serialize(x)).Select(g=>g.First()).ToList();
+}
+
+static void SyncVisitWorkerAssignments(CareDbContext context, ITenantContext tenant, Guid visitId, Guid primaryWorkerId, IReadOnlyCollection<Guid>? additionalWorkerIds)
+{
+    var connection=context.Database.GetDbConnection();var opened=connection.State!=System.Data.ConnectionState.Open;
+    try{if(opened)connection.Open();using(var delete=connection.CreateCommand()){delete.CommandText="delete from visit_care_worker_assignments where visit_id=@visit and organization_id=@organization";AddParameter(delete,"visit",visitId);AddParameter(delete,"organization",tenant.OrganizationId);delete.ExecuteNonQuery();}foreach(var workerId in VisitWorkerIds(primaryWorkerId,additionalWorkerIds).Where(id=>id!=primaryWorkerId)){using var insert=connection.CreateCommand();insert.CommandText="insert into visit_care_worker_assignments(visit_id,care_worker_id,organization_id,branch_id,assignment_role) values(@visit,@worker,@organization,@branch,'Additional')";AddParameter(insert,"visit",visitId);AddParameter(insert,"worker",workerId);AddParameter(insert,"organization",tenant.OrganizationId);AddParameter(insert,"branch",tenant.BranchId??TenantDefaults.BranchId);insert.ExecuteNonQuery();}}
+    catch(System.Data.Common.DbException){if((additionalWorkerIds?.Count??0)>0)throw;}
+    finally{if(opened&&connection.State==System.Data.ConnectionState.Open)connection.Close();}
+}
+
+static void RecordScheduleChange(CareDbContext context, ITenantContext tenant, ICurrentUserContext user, Guid visitId, string changeType, object? oldValue, object? newValue, string? reason)
+{
+    var connection=context.Database.GetDbConnection();var opened=connection.State!=System.Data.ConnectionState.Open;
+    try{if(opened)connection.Open();using var command=connection.CreateCommand();command.CommandText="insert into schedule_change_history(id,visit_id,organization_id,branch_id,change_type,old_values_json,new_values_json,reason,changed_by) values(@id,@visit,@organization,@branch,@type,@old,@new,@reason,@actor)";AddParameter(command,"id",Guid.NewGuid());AddParameter(command,"visit",visitId);AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"branch",tenant.BranchId??TenantDefaults.BranchId);AddParameter(command,"type",changeType);AddParameter(command,"old",System.Text.Json.JsonSerializer.Serialize(oldValue));AddParameter(command,"new",System.Text.Json.JsonSerializer.Serialize(newValue));AddParameter(command,"reason",string.IsNullOrWhiteSpace(reason)?changeType:reason.Trim());AddParameter(command,"actor",user.UserName);command.ExecuteNonQuery();}
+    catch(System.Data.Common.DbException){ }
+    finally{if(opened&&connection.State==System.Data.ConnectionState.Open)connection.Close();}
+}
+
+static List<object> FindWorkerAvailabilityConflicts(CareDbContext context, ITenantContext tenant, Guid careWorkerId, DateTimeOffset startsAt, int durationMinutes)
+{
+    var result = new List<object>();
+    var rules = new List<(int DayOfWeek, TimeOnly StartTime, TimeOnly EndTime, bool IsAvailable, DateOnly EffectiveFrom, DateOnly? EffectiveTo)>();
+    var connection = context.Database.GetDbConnection();
+    var opened = connection.State != System.Data.ConnectionState.Open;
+    try
+    {
+        if (opened) connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "select day_of_week,start_time,end_time,is_available,effective_from,effective_to from worker_availability_rules where care_worker_id=@worker and organization_id=@organization";
+        AddParameter(command, "worker", careWorkerId);
+        AddParameter(command, "organization", tenant.OrganizationId);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            rules.Add((reader.GetInt32(0), reader.GetFieldValue<TimeOnly>(1), reader.GetFieldValue<TimeOnly>(2), reader.GetBoolean(3), reader.GetFieldValue<DateOnly>(4), reader.IsDBNull(5) ? null : reader.GetFieldValue<DateOnly>(5)));
+        }
+    }
+    catch (System.Data.Common.DbException)
+    {
+        // Compatibility fallback while older/test databases are awaiting the workforce migration.
+        return result;
+    }
+    finally
+    {
+        if (opened && connection.State == System.Data.ConnectionState.Open) connection.Close();
+    }
+
+    if (rules.Count == 0) return result;
+    var visitDate = DateOnly.FromDateTime(startsAt.DateTime);
+    var visitStart = TimeOnly.FromDateTime(startsAt.DateTime);
+    var visitEndAt = startsAt.AddMinutes(durationMinutes);
+    var visitEnd = TimeOnly.FromDateTime(visitEndAt.DateTime);
+    var applicable = rules.Where(rule => rule.EffectiveFrom <= visitDate && (rule.EffectiveTo is null || rule.EffectiveTo >= visitDate)).ToList();
+    var dayRules = applicable.Where(rule => rule.DayOfWeek == (int)startsAt.DayOfWeek).ToList();
+    var crossesDay = DateOnly.FromDateTime(visitEndAt.DateTime) != visitDate;
+    var insideAvailableWindow = !crossesDay && dayRules.Any(rule => rule.IsAvailable && visitStart >= rule.StartTime && visitEnd <= rule.EndTime);
+    var overlapsUnavailableWindow = dayRules.Any(rule => !rule.IsAvailable && visitStart < rule.EndTime && visitEnd > rule.StartTime);
+    if (!insideAvailableWindow || overlapsUnavailableWindow)
+    {
+        result.Add(new
+        {
+            careWorkerId,
+            startsAt,
+            endsAt = visitEndAt,
+            reason = overlapsUnavailableWindow ? "The visit overlaps an explicit unavailable period." : "The visit is outside the worker's available hours."
+        });
+    }
+    return result;
+}
+
+static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantContext tenant, Guid careWorkerId, DateTimeOffset startsAt, string? requiredSkills)
+{
+    var result = new List<object>();
+    var compliance = new List<(string Type, string Status, DateTimeOffset? ExpiresAt)>();
+    var training = new List<(string Name, string Category, string Status, DateTimeOffset? ExpiresAt)>();
+    var competencies = new List<(string Name, string Status, DateTimeOffset? ExpiresAt)>();
+    var connection = context.Database.GetDbConnection();
+    var opened = connection.State != System.Data.ConnectionState.Open;
+
+    try
+    {
+        if (opened) connection.Open();
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "select compliance_type,status,expires_at from worker_compliance_records where care_worker_id=@worker and organization_id=@organization";
+            AddParameter(command, "worker", careWorkerId);
+            AddParameter(command, "organization", tenant.OrganizationId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) compliance.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetFieldValue<DateTimeOffset>(2)));
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "select course_name,category,status,expires_at from worker_training_records where care_worker_id=@worker and organization_id=@organization";
+            AddParameter(command, "worker", careWorkerId);
+            AddParameter(command, "organization", tenant.OrganizationId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) training.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetFieldValue<DateTimeOffset>(3)));
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "select competency,status,expires_at from worker_competency_records where care_worker_id=@worker and organization_id=@organization";
+            AddParameter(command, "worker", careWorkerId);
+            AddParameter(command, "organization", tenant.OrganizationId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) competencies.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetFieldValue<DateTimeOffset>(2)));
+        }
+    }
+    catch (System.Data.Common.DbException)
+    {
+        // Compatibility fallback while older/test databases are awaiting the workforce migration.
+        return result;
+    }
+    finally
+    {
+        if (opened && connection.State == System.Data.ConnectionState.Open) connection.Close();
+    }
+
+    var activeAt = startsAt.ToUniversalTime();
+    static bool Valid(string status, DateTimeOffset? expiresAt, DateTimeOffset activeAt) =>
+        status.Equals("Valid", StringComparison.OrdinalIgnoreCase) && (expiresAt is null || expiresAt > activeAt);
+
+    foreach (var complianceType in new[] { "DBS", "Right to Work" })
+    {
+        var records = compliance.Where(item => item.Type.Equals(complianceType, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (records.Count > 0 && !records.Any(item => Valid(item.Status, item.ExpiresAt, activeAt)))
+        {
+            result.Add(new { careWorkerId, category = "Compliance", code = complianceType == "DBS" ? "dbs-invalid" : "right-to-work-invalid", reason = $"{complianceType} evidence is expired or invalid at the visit time." });
+        }
+    }
+
+    var mandatoryTraining = training.Where(item => item.Category.Equals("Mandatory", StringComparison.OrdinalIgnoreCase)).ToList();
+    if (mandatoryTraining.Count > 0 && !mandatoryTraining.Any(item => Valid(item.Status, item.ExpiresAt, activeAt)))
+    {
+        result.Add(new { careWorkerId, category = "Compliance", code = "mandatory-training-invalid", reason = "All recorded mandatory training is expired or invalid at the visit time." });
+    }
+
+    var required = (requiredSkills ?? "")
+        .Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+    if (required.Count == 0) return result;
+
+    var validEvidence = competencies
+        .Where(item => Valid(item.Status, item.ExpiresAt, activeAt))
+        .Select(item => item.Name)
+        .Concat(training.Where(item => Valid(item.Status, item.ExpiresAt, activeAt)).Select(item => item.Name))
+        .ToList();
+    var worker = context.CareWorkers.AsNoTracking().FirstOrDefault(item => item.Id == careWorkerId);
+    if (worker is not null) validEvidence.Add(worker.Specialization);
+
+    foreach (var skill in required.Where(skill => !validEvidence.Any(evidence => evidence.Contains(skill, StringComparison.OrdinalIgnoreCase))))
+    {
+        result.Add(new { careWorkerId, category = "Skill", code = "skill-gap", skill, reason = $"No current competency or training evidence matches required skill '{skill}'." });
+    }
+
+    return result;
+}
+
+static void AddParameter(System.Data.Common.DbCommand command, string name, object value)
+{
+    var parameter = command.CreateParameter();
+    parameter.ParameterName = name;
+    parameter.Value = value;
+    command.Parameters.Add(parameter);
 }
 
 static IEnumerable<DateTimeOffset> ExpandRecurringStarts(DateTimeOffset startsAt, string frequency, int occurrences)
@@ -2145,6 +2526,15 @@ static bool DemoAccessAllowed(HttpContext httpContext, IConfiguration configurat
     return !string.IsNullOrWhiteSpace(expectedKey) &&
         httpContext.Request.Headers.TryGetValue("X-Demo-Key", out var providedKey) &&
         string.Equals(providedKey.ToString(), expectedKey, StringComparison.Ordinal);
+}
+
+static bool IsFamilyCarePlanRoute(HttpRequest request)
+{
+    var path = request.Path.Value ?? string.Empty;
+    if (!path.StartsWith("/api/phase1/care-plans/", StringComparison.OrdinalIgnoreCase)) return false;
+    if (HttpMethods.IsGet(request.Method) &&
+        (path.EndsWith("/lifecycle", StringComparison.OrdinalIgnoreCase) || path.EndsWith("/versions", StringComparison.OrdinalIgnoreCase))) return true;
+    return HttpMethods.IsPost(request.Method) && path.EndsWith("/signatures", StringComparison.OrdinalIgnoreCase);
 }
 
 static string SanitizeFileName(string fileName)
@@ -2303,7 +2693,7 @@ public sealed record BuildReportRequest(string Name, string Category, string Sch
 public sealed record SendNotificationRequest(string Channel, string Title, string Detail);
 public sealed record InvestigateIncidentRequest(string Outcome, string ActionPlan, bool CloseIncident);
 public sealed record AiSummaryRequest(Guid? ServiceUserId);
-public sealed record CreateRecurringVisitRequest(Guid ServiceUserId, Guid CareWorkerId, DateTimeOffset StartsAt, string VisitType, int DurationMinutes, string RequiredSkills, string Frequency, int Occurrences);
+public sealed record CreateRecurringVisitRequest(Guid ServiceUserId, Guid CareWorkerId, DateTimeOffset StartsAt, string VisitType, int DurationMinutes, string RequiredSkills, string Frequency, int Occurrences, IReadOnlyCollection<Guid>? AdditionalCareWorkerIds = null);
 public sealed record CreateMedicationRequest(Guid ServiceUserId, string Name, string Dosage, string Route, string Schedule, bool IsPrn, string Pharmacy, string AllergyWarning);
 public sealed record CreateMedicationAdministrationRecordRequest(Guid MedicationId, Guid VisitId, Guid CareWorkerId, DateTimeOffset ScheduledAt, string Notes);
 public sealed record CompleteMedicationAdministrationRequest(DateTimeOffset? AdministeredAt, string Notes);

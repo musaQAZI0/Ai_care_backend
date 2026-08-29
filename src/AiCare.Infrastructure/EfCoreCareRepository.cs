@@ -172,6 +172,7 @@ public sealed class EfCoreCareRepository : ICareRepository
             DurationMinutes = request.DurationMinutes,
             RequiredSkills = request.RequiredSkills
         };
+        _context.Entry(visit).State = EntityState.Detached;
         _context.Visits.Update(updated);
         AddAudit("visit.updated", "system", nameof(Visit), id);
         _context.SaveChanges();

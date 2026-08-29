@@ -22,6 +22,7 @@ public sealed class CarePlanLifecycleRegressionTests : IClassFixture<PostgresReg
     {
         await _factory.EnsureClinicalSeedAsync();
         await EnsureWorkerLoginAsync();
+        var serviceUserId = await CreateIsolatedPersonAsync();
 
         var admin = _factory.CreateClient();
         var adminLogin = await Login(admin, "admin", "Admin123!");
@@ -29,7 +30,7 @@ public sealed class CarePlanLifecycleRegressionTests : IClassFixture<PostgresReg
 
         var createPlan = await admin.PostAsJsonAsync("/api/phase1/care-plans", new
         {
-            serviceUserId = RegressionIds.ServiceUserId,
+            serviceUserId,
             personalCare = "Support with morning personal care",
             medicationSupport = "Prompt and record medication support",
             mobilityAndTransfers = "One worker support",
@@ -163,7 +164,7 @@ public sealed class CarePlanLifecycleRegressionTests : IClassFixture<PostgresReg
         var stillActive = await GetLifecycle(admin, plan.Id);
         Assert.Equal("Active", stillActive.Version.Status);
 
-        var versionsResponse = await admin.GetAsync($"/api/phase1/care-plans/service-user/{RegressionIds.ServiceUserId}/versions");
+        var versionsResponse = await admin.GetAsync($"/api/phase1/care-plans/service-user/{serviceUserId}/versions");
         Assert.Equal(HttpStatusCode.OK, versionsResponse.StatusCode);
         var versions = (await versionsResponse.Content.ReadFromJsonAsync<List<VersionDto>>())!;
         Assert.Contains(versions, x => x.CarePlanId == plan.Id && x.Status == "Active");
@@ -196,6 +197,21 @@ public sealed class CarePlanLifecycleRegressionTests : IClassFixture<PostgresReg
                 null));
             await db.SaveChangesAsync();
         }
+    }
+
+    private async Task<Guid> CreateIsolatedPersonAsync()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+        var id = Guid.NewGuid();
+        db.ServiceUsers.Add(new ServiceUser(
+            id, $"Lifecycle Regression {id:N}", new DateOnly(1970, 1, 1), "+10000000000",
+            "Regression care needs", "Regression contact", "Regression worker", RiskLevel.Medium,
+            "Onboarded", "Regression address", "None", "None", "Private", "Other", "",
+            "Independent", "Independent", "Verbal", "None", "Standard",
+            TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+        await db.SaveChangesAsync();
+        return id;
     }
 
     private async Task AssertClinicalContentIsImmutableAsync(Guid carePlanId)

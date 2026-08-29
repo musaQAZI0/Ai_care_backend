@@ -92,6 +92,13 @@ public sealed class CareTasksController : ControllerBase
         }, cancellationToken);
         if (affected == 0) return NotFound();
 
+        if (!request.Outcome.Equals("Completed", StringComparison.OrdinalIgnoreCase) && !request.Outcome.Equals("Not required", StringComparison.OrdinalIgnoreCase))
+        {
+            var exceptionId=Guid.NewGuid();
+            await Execute("insert into visit_exceptions(id,visit_id,service_user_id,organization_id,branch_id,exception_type,severity,reason,immediate_action,notify_manager,follow_up_owner,escalation_due_at,status,created_by) values(@id,@visit,@person,@organization,@branch,'TaskException','High',@reason,'Review care delivery exception',true,'Care coordinator',now()+interval '1 hour','Open',@actor)", command=>{Add(command,"id",exceptionId);Add(command,"visit",visit.Id);Add(command,"person",visit.ServiceUserId);Add(command,"organization",visit.OrganizationId??_tenant.OrganizationId);Add(command,"branch",visit.BranchId??_tenant.BranchId??TenantDefaults.BranchId);Add(command,"reason",$"{request.Outcome}: {request.ExceptionReason}");Add(command,"actor",_currentUser.UserName);},cancellationToken);
+            Audit("visit_task.exception_escalated","VisitException",exceptionId,visit.OrganizationId,visit.BranchId);
+        }
+
         Audit("visit_task.outcome_recorded","VisitTask",taskId,visit.OrganizationId,visit.BranchId);
         await _context.SaveChangesAsync(cancellationToken);
         return Ok((await QueryVisitTasks(visit.Id, cancellationToken)).Single(item => item.Id == taskId));

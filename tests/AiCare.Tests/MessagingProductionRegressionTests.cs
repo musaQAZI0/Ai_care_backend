@@ -1,13 +1,9 @@
-using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Security.Claims;
-using System.Text;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.IdentityModel.Tokens;
 using Xunit;
 
 namespace AiCare.Tests;
@@ -97,8 +93,10 @@ public sealed class MessagingProductionRegressionTests : IClassFixture<PostgresR
         create.EnsureSuccessStatusCode();
         var conversationId = (await create.Content.ReadFromJsonAsync<CreatedId>())!.Id;
 
+        var attackerUserName = await CreateCrossTenantUserAsync();
         var attacker = _factory.CreateClient();
-        attacker.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateCrossTenantToken());
+        var attackerLogin = await Login(attacker, attackerUserName, "CrossTenant123!");
+        attacker.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", attackerLogin.Token);
         var response = await attacker.GetAsync($"/api/messaging/conversations/{conversationId}");
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 
@@ -118,25 +116,24 @@ public sealed class MessagingProductionRegressionTests : IClassFixture<PostgresR
         }
     }
 
-    private static async Task<LoginResponse> Login(HttpClient client)
+    private async Task<string> CreateCrossTenantUserAsync()
     {
-        var response = await client.PostAsJsonAsync("/api/auth/login", new { userName = "admin", password = "Admin123!", mfaCode = (string?)null });
-        response.EnsureSuccessStatusCode();
-        return (await response.Content.ReadFromJsonAsync<LoginResponse>())!;
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+        var userName = $"cross.tenant.{Guid.NewGuid():N}";
+        var organizationId = Guid.NewGuid();
+        db.AppUsers.Add(new AppUser(Guid.NewGuid(), userName, $"{userName}@aicare.local", PasswordHasher.HashPassword("CrossTenant123!"), UserRole.Administrator, true, organizationId, null, null, null));
+        await db.SaveChangesAsync();
+        return userName;
     }
 
-    private static string CreateCrossTenantToken()
+    private static Task<LoginResponse> Login(HttpClient client) => Login(client, "admin", "Admin123!");
+
+    private static async Task<LoginResponse> Login(HttpClient client, string userName, string password)
     {
-        var credentials = new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("regression-signing-key-with-enough-length-for-hmac-2026")), SecurityAlgorithms.HmacSha256);
-        var claims = new[]
-        {
-            new Claim(JwtRegisteredClaimNames.Sub, Guid.NewGuid().ToString()),
-            new Claim(JwtRegisteredClaimNames.UniqueName, "cross-tenant-messaging"),
-            new Claim(ClaimTypes.Role, "Administrator"),
-            new Claim("organization_id", Guid.Parse("77777777-7777-7777-7777-777777777777").ToString()),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
-        };
-        return new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken("AiCare", "AiCareClient", claims, expires: DateTime.UtcNow.AddMinutes(30), signingCredentials: credentials));
+        var response = await client.PostAsJsonAsync("/api/auth/login", new { userName, password, mfaCode = (string?)null });
+        response.EnsureSuccessStatusCode();
+        return (await response.Content.ReadFromJsonAsync<LoginResponse>())!;
     }
 
     private sealed record LoginResponse(string Token, string RefreshToken, int ExpiresInMinutes);

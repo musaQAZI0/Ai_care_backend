@@ -1,0 +1,62 @@
+﻿using System.Data.Common;
+using System.Text;
+using System.Text.Json;
+using AiCare.Application;
+using AiCare.Domain;
+using AiCare.Infrastructure;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+
+namespace AiCare.Api;
+
+[ApiController]
+[Authorize(Roles="Administrator,BackOffice,CareManager,CareCoordinator")]
+[Route("api/phase1/reporting-compliance")]
+public sealed class ReportingComplianceController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user):ControllerBase
+{
+    [HttpGet("dashboard")]
+    public async Task<IActionResult> Dashboard(CancellationToken t)=>Ok(new{
+        generatedReports=await Scalar("select count(*) from report_runs where organization_id=@organization",t),
+        openEvidence=await Scalar("select count(*) from compliance_evidence_items where organization_id=@organization and status<>'Archived'",t),
+        overdueEvidence=await Scalar("select count(*) from compliance_evidence_items where organization_id=@organization and status<>'Archived' and review_due_at<now()",t),
+        openActions=await Scalar("select count(*) from compliance_actions where organization_id=@organization and status='Open'",t),
+        overdueActions=await Scalar("select count(*) from compliance_actions where organization_id=@organization and status='Open' and due_at<now()",t),
+        recentReports=await Reports(t),
+        evidence=await Evidence(t),
+        actions=await Actions(t)});
+
+    [HttpPost("report-runs")]
+    public async Task<IActionResult> RunReport(RunGovernedReportRequest request,CancellationToken t){if(string.IsNullOrWhiteSpace(request.Name)||request.Metrics.Count==0)return BadRequest(new{message="Report name and at least one metric are required."});var metrics=await BuildMetrics(request.Metrics,t);var id=Guid.NewGuid();await Exec("insert into report_runs(id,report_definition_id,organization_id,branch_id,name,category,format,status,filters_json,metrics_json,generated_by) values(@id,@definition,@organization,@branch,@name,@category,@format,'Generated',cast(@filters as jsonb),cast(@metrics as jsonb),@actor)",c=>{Add(c,"id",id);Add(c,"definition",request.ReportDefinitionId);Add(c,"name",request.Name.Trim());Add(c,"category",Clean(request.Category,"Operational"));Add(c,"format",Clean(request.Format,"JSON"));Add(c,"filters",JsonSerializer.Serialize(request.Filters));Add(c,"metrics",JsonSerializer.Serialize(metrics));},t);Audit("report_run.generated","ReportRun",id);await db.SaveChangesAsync(t);return Created($"/api/phase1/reporting-compliance/report-runs/{id}",new{id,request.Name,metrics,request.Filters,generatedAt=DateTimeOffset.UtcNow});}
+
+    [HttpGet("report-runs/{id:guid}/csv")]
+    public async Task<IActionResult> ReportCsv(Guid id,CancellationToken t){var rows=await Query("select name,metrics_json from report_runs where id=@id and organization_id=@organization",c=>Add(c,"id",id),r=>new{rName=r.GetString(0),Metrics=r.GetString(1)},t);if(rows.Count==0)return NotFound();var metrics=JsonSerializer.Deserialize<Dictionary<string,decimal>>(rows[0].Metrics)??new();var csv=new StringBuilder("metric,value\n");foreach(var item in metrics)csv.Append(item.Key).Append(',').Append(item.Value).Append('\n');Audit("report_run.exported","ReportRun",id);await db.SaveChangesAsync(t);return File(Encoding.UTF8.GetBytes(csv.ToString()),"text/csv",$"{rows[0].rName}.csv");}
+
+    [HttpPost("evidence")]
+    public async Task<IActionResult> AddEvidence(CreateComplianceEvidenceRequest request,CancellationToken t){if(string.IsNullOrWhiteSpace(request.Domain)||string.IsNullOrWhiteSpace(request.Requirement)||string.IsNullOrWhiteSpace(request.EvidenceReference))return BadRequest(new{message="Domain, requirement, and evidence reference are required."});var id=Guid.NewGuid();await Exec("insert into compliance_evidence_items(id,organization_id,branch_id,domain,requirement,evidence_type,evidence_reference,status,owner,review_due_at,notes,created_by) values(@id,@organization,@branch,@domain,@requirement,@type,@reference,@status,@owner,@due,@notes,@actor)",c=>{Add(c,"id",id);Add(c,"domain",request.Domain.Trim());Add(c,"requirement",request.Requirement.Trim());Add(c,"type",Clean(request.EvidenceType,"Record"));Add(c,"reference",request.EvidenceReference.Trim());Add(c,"status",Clean(request.Status,"Ready"));Add(c,"owner",request.Owner?.Trim()??user.UserName);Add(c,"due",request.ReviewDueAt);Add(c,"notes",request.Notes?.Trim()??"");},t);Audit("compliance_evidence.created","ComplianceEvidence",id);await db.SaveChangesAsync(t);return Created($"/api/phase1/reporting-compliance/evidence/{id}",new{id});}
+
+    [HttpPost("actions")]
+    public async Task<IActionResult> AddAction(CreateComplianceActionRequest request,CancellationToken t){if(string.IsNullOrWhiteSpace(request.ActionType)||string.IsNullOrWhiteSpace(request.Detail))return BadRequest(new{message="Action type and detail are required."});var id=Guid.NewGuid();await Exec("insert into compliance_actions(id,organization_id,branch_id,evidence_id,action_type,detail,owner,status,due_at,created_by) values(@id,@organization,@branch,@evidence,@type,@detail,@owner,'Open',@due,@actor)",c=>{Add(c,"id",id);Add(c,"evidence",request.EvidenceId);Add(c,"type",request.ActionType.Trim());Add(c,"detail",request.Detail.Trim());Add(c,"owner",request.Owner?.Trim()??user.UserName);Add(c,"due",request.DueAt);},t);Audit("compliance_action.created","ComplianceAction",id);await db.SaveChangesAsync(t);return Created($"/api/phase1/reporting-compliance/actions/{id}",new{id});}
+
+    [HttpPatch("actions/{id:guid}")]
+    public async Task<IActionResult> CompleteAction(Guid id,CompleteComplianceActionRequest request,CancellationToken t){if(string.IsNullOrWhiteSpace(request.Outcome))return BadRequest(new{message="Action outcome is required."});var n=await Exec("update compliance_actions set status='Completed',completed_at=now(),detail=detail||E'\nOutcome: '||@outcome where id=@id and organization_id=@organization and status='Open'",c=>{Add(c,"id",id);Add(c,"outcome",request.Outcome.Trim());},t);if(n==0)return NotFound();Audit("compliance_action.completed","ComplianceAction",id);await db.SaveChangesAsync(t);return NoContent();}
+
+    [HttpGet("evidence-pack.csv")]
+    public async Task<IActionResult> EvidencePack(CancellationToken t){var rows=await Evidence(t);var csv=new StringBuilder("domain,requirement,evidence_type,evidence_reference,status,owner,review_due_at\n");foreach(var e in rows)csv.Append(Escape(e.Domain)).Append(',').Append(Escape(e.Requirement)).Append(',').Append(Escape(e.EvidenceType)).Append(',').Append(Escape(e.EvidenceReference)).Append(',').Append(Escape(e.Status)).Append(',').Append(Escape(e.Owner)).Append(',').Append(e.ReviewDueAt?.ToString("O")??"").Append('\n');Audit("compliance_evidence_pack.exported","ComplianceEvidence",null);await db.SaveChangesAsync(t);return File(Encoding.UTF8.GetBytes(csv.ToString()),"text/csv","compliance-evidence-pack.csv");}
+
+    private async Task<Dictionary<string,decimal>> BuildMetrics(IReadOnlyCollection<string> metrics,CancellationToken t){var result=new Dictionary<string,decimal>(StringComparer.OrdinalIgnoreCase);foreach(var m in metrics){var key=m.Trim();result[key]=key.ToLowerInvariant() switch{"service users"=>await Scalar("select count(*) from \"ServiceUsers\" where \"OrganizationId\"=@organization",t),"completed visits"=>await Scalar("select count(*) from \"Visits\" where \"OrganizationId\"=@organization and \"Status\"='Completed'",t),"open incidents"=>await Scalar("select count(*) from \"Incidents\" where \"OrganizationId\"=@organization and \"Status\"<>'Closed'",t),"invoice total"=>await Money("select coalesce(sum(\"Amount\"),0) from \"Invoices\" where \"OrganizationId\"=@organization and \"Status\"<>'Void'",t),"audit events"=>await Scalar("select count(*) from \"AuditEvents\" where \"OrganizationId\"=@organization",t),_=>0};}return result;}
+    private Task<List<ReportRunResponse>> Reports(CancellationToken t)=>Query("select id,name,category,format,status,generated_by,generated_at from report_runs where organization_id=@organization order by generated_at desc limit 20",_=>{},r=>new ReportRunResponse(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetString(5),r.GetFieldValue<DateTimeOffset>(6)),t);
+    private Task<List<ComplianceEvidenceResponse>> Evidence(CancellationToken t)=>Query("select id,domain,requirement,evidence_type,evidence_reference,status,owner,review_due_at,notes,created_at from compliance_evidence_items where organization_id=@organization order by created_at desc limit 100",_=>{},r=>new ComplianceEvidenceResponse(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetString(5),r.GetString(6),r.IsDBNull(7)?null:r.GetFieldValue<DateTimeOffset>(7),r.GetString(8),r.GetFieldValue<DateTimeOffset>(9)),t);
+    private Task<List<ComplianceActionResponse>> Actions(CancellationToken t)=>Query("select id,evidence_id,action_type,detail,owner,status,due_at,completed_at,created_at from compliance_actions where organization_id=@organization order by created_at desc limit 100",_=>{},r=>new ComplianceActionResponse(r.GetGuid(0),r.IsDBNull(1)?null:r.GetGuid(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetString(5),r.IsDBNull(6)?null:r.GetFieldValue<DateTimeOffset>(6),r.IsDBNull(7)?null:r.GetFieldValue<DateTimeOffset>(7),r.GetFieldValue<DateTimeOffset>(8)),t);
+    private async Task<int> Scalar(string sql,CancellationToken t){await using var c=await Command(sql,t);return Convert.ToInt32(await c.ExecuteScalarAsync(t));}private async Task<decimal> Money(string sql,CancellationToken t){await using var c=await Command(sql,t);return Convert.ToDecimal(await c.ExecuteScalarAsync(t));}
+    private async Task<int> Exec(string sql,Action<DbCommand> bind,CancellationToken t){await using var c=await Command(sql,t);bind(c);return await c.ExecuteNonQueryAsync(t);}private async Task<List<T>> Query<T>(string sql,Action<DbCommand> bind,Func<DbDataReader,T> map,CancellationToken t){var a=new List<T>();await using var c=await Command(sql,t);bind(c);await using var r=await c.ExecuteReaderAsync(t);while(await r.ReadAsync(t))a.Add(map(r));return a;}
+    private async Task<DbCommand> Command(string sql,CancellationToken t){var cn=db.Database.GetDbConnection();if(cn.State!=System.Data.ConnectionState.Open)await cn.OpenAsync(t);var c=cn.CreateCommand();c.CommandText=sql;Add(c,"organization",tenant.OrganizationId);Add(c,"branch",tenant.BranchId??TenantDefaults.BranchId);Add(c,"actor",user.UserName);return c;}private static void Add(DbCommand c,string n,object? v){if(c.Parameters.Contains(n))return;var p=c.CreateParameter();p.ParameterName=n;p.Value=v??DBNull.Value;c.Parameters.Add(p);}private void Audit(string action,string entity,Guid? id)=>db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),action,user.UserName,entity,id,DateTimeOffset.UtcNow,tenant.OrganizationId,tenant.BranchId??TenantDefaults.BranchId));private static string Clean(string? v,string d)=>string.IsNullOrWhiteSpace(v)?d:v.Trim();private static string Escape(string v)=>v.Contains(',')||v.Contains('"')?$"\"{v.Replace("\"","\"\"")}\"":v;
+}
+public sealed record RunGovernedReportRequest(Guid? ReportDefinitionId,string Name,string Category,string Format,IReadOnlyCollection<string> Metrics,Dictionary<string,string> Filters);
+public sealed record CreateComplianceEvidenceRequest(string Domain,string Requirement,string EvidenceType,string EvidenceReference,string Status,string? Owner,DateTimeOffset? ReviewDueAt,string? Notes);
+public sealed record CreateComplianceActionRequest(Guid? EvidenceId,string ActionType,string Detail,string? Owner,DateTimeOffset? DueAt);
+public sealed record CompleteComplianceActionRequest(string Outcome);
+public sealed record ReportRunResponse(Guid Id,string Name,string Category,string Format,string Status,string GeneratedBy,DateTimeOffset GeneratedAt);
+public sealed record ComplianceEvidenceResponse(Guid Id,string Domain,string Requirement,string EvidenceType,string EvidenceReference,string Status,string Owner,DateTimeOffset? ReviewDueAt,string Notes,DateTimeOffset CreatedAt);
+public sealed record ComplianceActionResponse(Guid Id,Guid? EvidenceId,string ActionType,string Detail,string Owner,string Status,DateTimeOffset? DueAt,DateTimeOffset? CompletedAt,DateTimeOffset CreatedAt);
+
