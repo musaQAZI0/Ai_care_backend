@@ -124,6 +124,11 @@ public sealed class CarePlanLifecycleRegressionTests : IClassFixture<PostgresReg
         Assert.True(signed.RequiredSignaturesSatisfied);
         Assert.Equal(2, signed.Signatures.Count);
 
+        var blockedPrerequisites = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{plan.Id}/activate", new { expectedRevision = signed.Version.Revision });
+        Assert.Equal(HttpStatusCode.BadRequest, blockedPrerequisites.StatusCode);
+        Assert.Contains("active consent", await blockedPrerequisites.Content.ReadAsStringAsync());
+        await _factory.SeedCarePlanActivationPrerequisitesAsync(serviceUserId);
+
         var activateResponse = await admin.PostAsJsonAsync($"/api/phase1/care-plans/{plan.Id}/activate", new
         {
             expectedRevision = signed.Version.Revision

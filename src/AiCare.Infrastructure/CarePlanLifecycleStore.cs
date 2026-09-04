@@ -129,6 +129,7 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
         EnsureRevision(snapshot.Version, expectedRevision);
         CarePlanLifecyclePolicy.EnsureTransition(snapshot.Version.Status, CarePlanLifecycleStatus.Active);
         if (!snapshot.RequiredSignaturesSatisfied) throw new InvalidOperationException("Required signatures are incomplete.");
+        await EnsureActivationPrerequisitesAsync(snapshot.CarePlan.ServiceUserId, actor, cancellationToken);
 
         await ExecuteTransactionAsync(async () =>
         {
@@ -162,6 +163,29 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
         }, cancellationToken);
 
         return await RequireSnapshotAsync(carePlanId, actor, cancellationToken);
+    }
+
+    private async Task EnsureActivationPrerequisitesAsync(Guid serviceUserId,CarePlanActor actor,CancellationToken cancellationToken)
+    {
+        var connection=context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(cancellationToken);
+        try
+        {
+            await using var command=connection.CreateCommand();
+            command.CommandText="""
+                select
+                 exists(select 1 from consent_records where service_user_id=@person and organization_id=@organization and branch_id=@branch and status='Active' and effective_from<=now() and (expires_at is null or expires_at>now())),
+                 exists(select 1 from capacity_decisions where service_user_id=@person and organization_id=@organization and branch_id=@branch and status='Current' and (review_due_at is null or review_due_at>now())),
+                 not exists(select 1 from capacity_decisions where service_user_id=@person and organization_id=@organization and branch_id=@branch and status='Current' and outcome='LacksCapacity')
+                   or exists(select 1 from best_interest_decisions b join capacity_decisions c on c.id=b.capacity_decision_id where b.service_user_id=@person and b.organization_id=@organization and b.branch_id=@branch and b.status='Current' and c.status='Current' and (b.review_due_at is null or b.review_due_at>now())),
+                 exists(select 1 from governed_assessments where service_user_id=@person and organization_id=@organization and branch_id=@branch and status='Current' and review_due_at>now()),
+                 exists(select 1 from governed_risk_assessments where service_user_id=@person and organization_id=@organization and branch_id=@branch and status='Current' and review_due_at>now())
+                """;
+            AddUuid(command,"person",serviceUserId);AddUuid(command,"organization",actor.OrganizationId);AddUuid(command,"branch",actor.BranchId??TenantDefaults.BranchId);
+            await using var reader=await command.ExecuteReaderAsync(cancellationToken);await reader.ReadAsync(cancellationToken);
+            var missing=new List<string>();if(!reader.GetBoolean(0))missing.Add("active consent");if(!reader.GetBoolean(1))missing.Add("current capacity decision");if(!reader.GetBoolean(2))missing.Add("current best-interest decision");if(!reader.GetBoolean(3))missing.Add("current approved assessment");if(!reader.GetBoolean(4))missing.Add("current approved risk assessment");
+            if(missing.Count>0)throw new InvalidOperationException($"Care plan activation is blocked: missing or overdue {string.Join(", ",missing)}.");
+        }
+        finally{if(opened)await connection.CloseAsync();}
     }
 
     public async Task<CarePlanLifecycleSnapshot> CreateRevisionAsync(Guid carePlanId, CreateCarePlanRevisionCommand command, CarePlanActor actor, CancellationToken cancellationToken)

@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace AiCare.Tests;
@@ -47,7 +48,7 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", rotated.Token);
         var logout = await client.PostAsJsonAsync("/api/auth/logout", new { refreshToken = rotated.RefreshToken });
-        Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, logout.StatusCode);
         var afterLogout = await client.PostAsJsonAsync("/api/auth/refresh-token", new { refreshToken = rotated.RefreshToken });
         Assert.Equal(HttpStatusCode.Unauthorized, afterLogout.StatusCode);
     }
@@ -59,6 +60,7 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
         var client = _factory.CreateClient();
         var login = await Login(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.Token);
+        await StepUpTestGrants.GrantAsync(_factory, client, "medication");
 
         var profile = await client.PutAsJsonAsync($"/api/phase1/medication-safety/medications/{RegressionIds.MedicationId}/profile", new
         {
@@ -134,8 +136,16 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
         Assert.Equal(HttpStatusCode.Created, action.StatusCode);
         var actionId = (await action.Content.ReadFromJsonAsync<CreatedId>())!.Id;
 
-        var complete = await client.PostAsync($"/api/phase1/safeguarding/cases/{created.Id}/actions/{actionId}/complete", null);
+        var prematureClose = await client.PutAsJsonAsync($"/api/phase1/safeguarding/cases/{created.Id}", new { status="Closed", immediateActions="Person protected", riskLevel="High", externalReferral="Local authority", referralReference="SG-REG-1", owner="Regression manager", reviewDueAt=(DateTimeOffset?)null, closureSummary="Premature" });
+        Assert.Equal(HttpStatusCode.Conflict,prematureClose.StatusCode);
+        var complete = await client.PostAsJsonAsync($"/api/phase1/safeguarding/cases/{created.Id}/actions/{actionId}/complete", new { completionEvidence="Protection plan verified by manager" });
         Assert.Equal(HttpStatusCode.NoContent, complete.StatusCode);
+
+        var coordinatorName=$"safeguarding.coordinator.{Guid.NewGuid():N}";
+        using(var scope=_factory.Services.CreateScope()){var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();db.AppUsers.Add(new AppUser(Guid.NewGuid(),coordinatorName,$"{coordinatorName}@aicare.local",PasswordHasher.HashPassword("Admin123!"),UserRole.CareCoordinator,true,TenantDefaults.OrganizationId,TenantDefaults.BranchId,null,null));await db.SaveChangesAsync();}
+        var coordinator=_factory.CreateClient();var coordinatorLogin=await coordinator.PostAsJsonAsync("/api/auth/login",new{userName=coordinatorName,password="Admin123!",mfaCode=(string?)null});coordinatorLogin.EnsureSuccessStatusCode();coordinator.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",(await coordinatorLogin.Content.ReadFromJsonAsync<LoginResponse>())!.Token);
+        var unauthorizedClose=await coordinator.PutAsJsonAsync($"/api/phase1/safeguarding/cases/{created.Id}",new{status="Closed",immediateActions="Protection plan completed",riskLevel="Low",externalReferral="Local authority",referralReference="REG-001",owner="Coordinator",reviewDueAt=(DateTimeOffset?)null,closureSummary="Coordinator cannot approve closure"});
+        Assert.Equal(HttpStatusCode.Forbidden,unauthorizedClose.StatusCode);
 
         var close = await client.PutAsJsonAsync($"/api/phase1/safeguarding/cases/{created.Id}", new
         {
@@ -181,6 +191,11 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>
             ["JwtOptions:TokenLifetimeMinutes"] = "30",
             ["Storage:Provider"] = "Local"
         }));
+        builder.ConfigureServices(services =>
+        {
+            var worker = services.SingleOrDefault(descriptor => descriptor.ServiceType == typeof(IHostedService) && descriptor.ImplementationType == typeof(IntegrationJobWorker));
+            if (worker is not null) services.Remove(worker);
+        });
     }
 
     public async Task EnsureClinicalSeedAsync()
@@ -188,6 +203,7 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>
         _ = CreateClient();
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+        await db.Database.ExecuteSqlRawAsync("delete from auth_mfa_policies");
         var admin = await db.AppUsers.SingleOrDefaultAsync(user => user.UserName == "admin");
         if (admin is null)
             db.AppUsers.Add(new AppUser(Guid.NewGuid(), "admin", "admin@aicare.local", PasswordHasher.HashPassword("Admin123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, null, null));
@@ -205,6 +221,14 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>
             db.MedicationAdministrationRecords.Add(new MedicationAdministrationRecord(RegressionIds.MarId, RegressionIds.MedicationId, RegressionIds.VisitId, RegressionIds.WorkerId, DateTimeOffset.UtcNow.AddHours(1), null, "Scheduled", "", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         await db.SaveChangesAsync();
         await db.Database.ExecuteSqlRawAsync("update auth_user_security set failed_attempts=0, lockout_until=null where user_id in (select \"Id\" from \"AppUsers\")");
+    }
+    public async Task SeedCarePlanActivationPrerequisitesAsync(Guid personId)
+    {
+        using var scope=Services.CreateScope();var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();var now=DateTimeOffset.UtcNow;var review=now.AddMonths(6);
+        await db.Database.ExecuteSqlRawAsync("insert into capacity_decisions(id,service_user_id,organization_id,branch_id,decision_context,assessment_reason,outcome,can_understand,can_retain,can_use_or_weigh,can_communicate,support_provided,assessor_name,assessor_role,evidence_reference,assessed_at,review_due_at,status,version,supersedes_id,best_interest_required,created_by) values({0},{1},{2},{3},'Care plan agreement','Regression prerequisite','HasCapacity',true,true,true,true,'Accessible explanation','Regression assessor','Care manager','CAP-REG',{4},{5},'Current',1,null,false,'regression')",Guid.NewGuid(),personId,TenantDefaults.OrganizationId,TenantDefaults.BranchId,now,review);
+        await db.Database.ExecuteSqlRawAsync("insert into consent_records(id,service_user_id,organization_id,branch_id,consent_type,scope,status,capacity_basis,decision_maker,evidence_reference,effective_from,expires_at,withdrawn_at,withdrawal_reason,created_at,version,supersedes_id,information_categories,sharing_parties,review_due_at) values({0},{1},{2},{3},'Care and support','Care-plan delivery','Active','Person has capacity','Service user','CONSENT-REG',{4},{5},null,'',now(),1,null,'Care records','Assigned care team',{5})",Guid.NewGuid(),personId,TenantDefaults.OrganizationId,TenantDefaults.BranchId,now,review);
+        await db.Database.ExecuteSqlRawAsync("insert into governed_assessments(id,service_user_id,organization_id,branch_id,assessment_type,template_key,template_version,answers_json,score,risk_level,summary,recommended_actions,status,version,supersedes_id,change_reason,assessor_name,assessor_role,review_due_at,submitted_at,approved_at,approved_by,signed_at,signed_by,signature_declaration,created_by) values({0},{1},{2},{3},'Initial needs','initial-needs','1.0','{{}}'::jsonb,5,'Medium','Regression assessment','Follow care plan','Current',1,null,'','Regression assessor','Care manager',{4},now(),now(),'Regression manager',now(),'Regression manager','Approved exact version','regression')",Guid.NewGuid(),personId,TenantDefaults.OrganizationId,TenantDefaults.BranchId,review);
+        await db.Database.ExecuteSqlRawAsync("insert into governed_risk_assessments(id,service_user_id,organization_id,branch_id,category,hazard,likelihood,severity,score,risk_level,controls,contingency,owner,status,version,supersedes_id,change_reason,review_due_at,submitted_at,approved_at,approved_by,signed_at,signed_by,signature_declaration,created_by) values({0},{1},{2},{3},'General safety','Care delivery hazards',2,2,4,'Low','Follow care plan','Escalate changes','Care manager','Current',1,null,'',{4},now(),now(),'Regression manager',now(),'Regression manager','Approved exact version','regression')",Guid.NewGuid(),personId,TenantDefaults.OrganizationId,TenantDefaults.BranchId,review);
     }
 }
 

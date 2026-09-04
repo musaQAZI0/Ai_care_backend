@@ -45,19 +45,21 @@ public sealed class AdvancedSchedulingController(CareDbContext context, ITenantC
     [HttpPut("policy")]
     public async Task<IActionResult> UpdatePolicy(SchedulingPolicyResponse request, CancellationToken token)
     {
-        if (request.MinimumRestMinutes < 0 || request.MaximumDailyMinutes <= 0 || request.MaximumWeeklyMinutes <= 0 || request.TravelBufferMinutes < 0) return BadRequest(new { message = "Scheduling policy values are invalid." });
-        await using var command = await Command("insert into scheduling_policies(organization_id,branch_id,minimum_rest_minutes,maximum_daily_minutes,maximum_weekly_minutes,travel_buffer_minutes,updated_at) values(@organization,@branch,@rest,@daily,@weekly,@travel,now()) on conflict(organization_id,branch_id) do update set minimum_rest_minutes=@rest,maximum_daily_minutes=@daily,maximum_weekly_minutes=@weekly,travel_buffer_minutes=@travel,updated_at=now()", token);
-        Add(command,"rest",request.MinimumRestMinutes); Add(command,"daily",request.MaximumDailyMinutes); Add(command,"weekly",request.MaximumWeeklyMinutes); Add(command,"travel",request.TravelBufferMinutes);
+        if (request.MinimumRestMinutes < 0 || request.MaximumDailyMinutes <= 0 || request.MaximumWeeklyMinutes <= 0 || request.TravelBufferMinutes < 0 || request.MaximumContinuousMinutes <= 0 || request.RequiredBreakMinutes < 0) return BadRequest(new { message = "Scheduling policy values are invalid." });
+        await using var command = await Command("insert into scheduling_policies(organization_id,branch_id,minimum_rest_minutes,maximum_daily_minutes,maximum_weekly_minutes,travel_buffer_minutes,maximum_continuous_minutes,required_break_minutes,updated_at) values(@organization,@branch,@rest,@daily,@weekly,@travel,@continuous,@break,now()) on conflict(organization_id,branch_id) do update set minimum_rest_minutes=@rest,maximum_daily_minutes=@daily,maximum_weekly_minutes=@weekly,travel_buffer_minutes=@travel,maximum_continuous_minutes=@continuous,required_break_minutes=@break,updated_at=now()", token);
+        Add(command,"rest",request.MinimumRestMinutes); Add(command,"daily",request.MaximumDailyMinutes); Add(command,"weekly",request.MaximumWeeklyMinutes); Add(command,"travel",request.TravelBufferMinutes); Add(command,"continuous",request.MaximumContinuousMinutes); Add(command,"break",request.RequiredBreakMinutes);
         await command.ExecuteNonQueryAsync(token);
+        context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"scheduling_policy.updated",currentUser.UserName,"SchedulingPolicy",null,DateTimeOffset.UtcNow,tenant.OrganizationId,tenant.BranchId??TenantDefaults.BranchId));
+        await context.SaveChangesAsync(token);
         return Ok(request);
     }
 
     private async Task<bool> WorkerExists(Guid id,CancellationToken token) => await context.CareWorkers.AnyAsync(x=>x.Id==id&&x.OrganizationId==tenant.OrganizationId,token);
     private async Task<SchedulingPolicyResponse> ReadPolicy(CancellationToken token)
     {
-        await using var command=await Command("select minimum_rest_minutes,maximum_daily_minutes,maximum_weekly_minutes,travel_buffer_minutes from scheduling_policies where organization_id=@organization and branch_id=@branch",token);
+        await using var command=await Command("select minimum_rest_minutes,maximum_daily_minutes,maximum_weekly_minutes,travel_buffer_minutes,maximum_continuous_minutes,required_break_minutes from scheduling_policies where organization_id=@organization and branch_id=@branch",token);
         await using var reader=await command.ExecuteReaderAsync(token);
-        return await reader.ReadAsync(token)?new(reader.GetInt32(0),reader.GetInt32(1),reader.GetInt32(2),reader.GetInt32(3)):new(660,720,2880,15);
+        return await reader.ReadAsync(token)?new(reader.GetInt32(0),reader.GetInt32(1),reader.GetInt32(2),reader.GetInt32(3),reader.GetInt32(4),reader.GetInt32(5)):new(660,720,2880,15,360,20);
     }
     private async Task<DbCommand> Command(string sql,CancellationToken token){var connection=context.Database.GetDbConnection();if(connection.State!=System.Data.ConnectionState.Open)await connection.OpenAsync(token);var command=connection.CreateCommand();command.CommandText=sql;Add(command,"organization",tenant.OrganizationId);Add(command,"branch",tenant.BranchId??TenantDefaults.BranchId);return command;}
     private static void Add(DbCommand command,string name,object value){if(command.Parameters.Contains(name))return;var p=command.CreateParameter();p.ParameterName=name;p.Value=value;command.Parameters.Add(p);}
@@ -65,4 +67,4 @@ public sealed class AdvancedSchedulingController(CareDbContext context, ITenantC
 
 public sealed record CreateWorkerAbsenceRequest(string AbsenceType,DateTimeOffset StartsAt,DateTimeOffset EndsAt,string? Status,string? Notes);
 public sealed record WorkerAbsenceResponse(Guid Id,string AbsenceType,DateTimeOffset StartsAt,DateTimeOffset EndsAt,string Status,string Notes);
-public sealed record SchedulingPolicyResponse(int MinimumRestMinutes,int MaximumDailyMinutes,int MaximumWeeklyMinutes,int TravelBufferMinutes);
+public sealed record SchedulingPolicyResponse(int MinimumRestMinutes,int MaximumDailyMinutes,int MaximumWeeklyMinutes,int TravelBufferMinutes,int MaximumContinuousMinutes=360,int RequiredBreakMinutes=20);

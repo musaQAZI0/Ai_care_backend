@@ -1,6 +1,7 @@
 using AiCare.Application;
 using AiCare.Domain;
 using AiCare.Infrastructure;
+using System.Data;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -66,6 +67,8 @@ public sealed class DataGovernanceController(
         var person = await db.ServiceUsers.AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == serviceUserId && x.OrganizationId == tenant.OrganizationId, ct);
         if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return NotFound();
+        if (await HasActiveProcessingRestriction(serviceUserId, ct))
+            return Conflict(new { message = "A processing restriction prevents direct export. Use the reviewed privacy disclosure workflow." });
 
         var request = new DataGovernanceRequest(
             Guid.NewGuid(), serviceUserId, "SubjectAccessExport", "Completed", currentUser.UserName,
@@ -107,6 +110,8 @@ public sealed class DataGovernanceController(
 
         var person = await db.ServiceUsers.FirstOrDefaultAsync(x => x.Id == serviceUserId && x.OrganizationId == tenant.OrganizationId, ct);
         if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return NotFound();
+        if (await HasActiveLegalHold(serviceUserId, ct))
+            return Conflict(new { message = "An active legal hold prevents anonymisation or disposal." });
         if (string.Equals(person.Status, "Active", StringComparison.OrdinalIgnoreCase))
             return Conflict(new { message = "Active service users cannot be anonymized. Complete discharge/closure first." });
 
@@ -183,6 +188,25 @@ public sealed class DataGovernanceController(
     }
 
     private bool IsGovernanceStaff() => currentUser.HasAnyRole(UserRole.Administrator, UserRole.CareManager);
+
+    private Task<bool> HasActiveProcessingRestriction(Guid serviceUserId, CancellationToken ct) =>
+        IsPostgres() ? Exists("select exists(select 1 from processing_restrictions where organization_id=@organization and service_user_id=@person and status='Active')", serviceUserId, ct) : Task.FromResult(false);
+
+    private Task<bool> HasActiveLegalHold(Guid serviceUserId, CancellationToken ct) =>
+        IsPostgres() ? Exists("select exists(select 1 from legal_holds where organization_id=@organization and status in ('Active','ReleaseRequested') and (service_user_id is null or service_user_id=@person))", serviceUserId, ct) : Task.FromResult(false);
+
+    private bool IsPostgres() => db.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true;
+
+    private async Task<bool> Exists(string sql, Guid serviceUserId, CancellationToken ct)
+    {
+        var connection = db.Database.GetDbConnection();
+        if (connection.State != ConnectionState.Open) await connection.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        var organization = command.CreateParameter(); organization.ParameterName = "organization"; organization.Value = tenant.OrganizationId; command.Parameters.Add(organization);
+        var person = command.CreateParameter(); person.ParameterName = "person"; person.Value = serviceUserId; command.Parameters.Add(person);
+        return Convert.ToBoolean(await command.ExecuteScalarAsync(ct));
+    }
 
     private void AddAudit(string action, string entityType, Guid entityId) => db.AuditEvents.Add(new AuditEvent(
         Guid.NewGuid(), action, currentUser.UserName, entityType, entityId, DateTimeOffset.UtcNow,

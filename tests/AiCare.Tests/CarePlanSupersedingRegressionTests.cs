@@ -78,6 +78,7 @@ public sealed class CarePlanSupersedingRegressionTests : IClassFixture<PostgresR
         var personSigned = await Sign(admin, plan.Id, managerSigned.Version.Revision, "Representative", "Regression Representative", "Authorized representative", "RepresentativeConfirmation");
         Assert.Equal("Signed", personSigned.Version.Status);
         Assert.True(personSigned.RequiredSignaturesSatisfied);
+        await _factory.SeedCarePlanActivationPrerequisitesAsync(personId);
 
         var active = await Transition(admin, $"/api/phase1/care-plans/{plan.Id}/activate", personSigned.Version.Revision, null);
         Assert.Equal("Active", active.Version.Status);

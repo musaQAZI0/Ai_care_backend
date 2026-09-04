@@ -38,7 +38,7 @@ public sealed class AdvancedSchedulingRegressionTests(PostgresRegressionFactory 
         var login=await client.PostAsJsonAsync("/api/auth/login",new{userName,password="Admin123!",mfaCode=(string?)null});
         login.EnsureSuccessStatusCode();
         client.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",(await login.Content.ReadFromJsonAsync<LoginResponse>())!.Token);
-        var policy=await client.PutAsJsonAsync("/api/phase1/scheduling/policy",new{minimumRestMinutes=660,maximumDailyMinutes=160,maximumWeeklyMinutes=1000,travelBufferMinutes=15});
+        var policy=await client.PutAsJsonAsync("/api/phase1/scheduling/policy",new{minimumRestMinutes=660,maximumDailyMinutes=160,maximumWeeklyMinutes=1000,travelBufferMinutes=15,maximumContinuousMinutes=120,requiredBreakMinutes=45});
         Assert.Equal(HttpStatusCode.OK,policy.StatusCode);
         var absence=await client.PostAsJsonAsync($"/api/phase1/scheduling/care-workers/{workers[0]}/absences",new{absenceType="Sickness",startsAt=baseTime.AddHours(-1),endsAt=baseTime.AddHours(2),status="Approved",notes="Regression"});
         Assert.Equal(HttpStatusCode.Created,absence.StatusCode);
@@ -52,12 +52,13 @@ public sealed class AdvancedSchedulingRegressionTests(PostgresRegressionFactory 
         Assert.Contains("worker-absent",await Conflicts(workers[0],baseTime));
         Assert.Contains("travel-time",await Conflicts(workers[1],baseTime));
         Assert.Contains("daily-hours",await Conflicts(workers[2],baseTime));
+        Assert.Contains("insufficient-break",await Conflicts(workers[2],baseTime));
         Assert.Contains("minimum-rest",await Conflicts(workers[3],baseTime.AddHours(-2)));
 
         var blockedDoubleUp=await client.PostAsJsonAsync("/api/phase1/visits",new{serviceUserId=people[0],careWorkerId=workers[4],additionalCareWorkerIds=new[]{workers[0]},startsAt=baseTime,visitType="Double-up blocked",durationMinutes=30,requiredSkills="Medication administration"});
         Assert.Equal(HttpStatusCode.BadRequest,blockedDoubleUp.StatusCode);
 
-        await client.PutAsJsonAsync("/api/phase1/scheduling/policy",new{minimumRestMinutes=0,maximumDailyMinutes=720,maximumWeeklyMinutes=2880,travelBufferMinutes=0});
+        await client.PutAsJsonAsync("/api/phase1/scheduling/policy",new{minimumRestMinutes=0,maximumDailyMinutes=720,maximumWeeklyMinutes=2880,travelBufferMinutes=0,maximumContinuousMinutes=360,requiredBreakMinutes=20});
         var create=await client.PostAsJsonAsync("/api/phase1/visits",new{serviceUserId=people[0],careWorkerId=workers[4],additionalCareWorkerIds=new[]{workers[1]},startsAt=baseTime.AddDays(10),visitType="Double-up allowed",durationMinutes=30,requiredSkills="Medication administration"});
         Assert.Equal(HttpStatusCode.Created,create.StatusCode);
         using var document=JsonDocument.Parse(await create.Content.ReadAsStringAsync());

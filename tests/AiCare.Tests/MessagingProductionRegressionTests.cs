@@ -78,6 +78,17 @@ public sealed class MessagingProductionRegressionTests : IClassFixture<PostgresR
     }
 
     [Fact]
+    public async Task DeliveryFailureRetryUrgentEscalationRetentionAndHistoryAreGoverned()
+    {
+        await _factory.EnsureClinicalSeedAsync();var client=_factory.CreateClient();var login=await Login(client);client.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",login.Token);
+        var create=await client.PostAsJsonAsync("/api/messaging/conversations",new{serviceUserId=RegressionIds.ServiceUserId,subject="Urgent governed conversation",participantUserIds=new[]{AdminUserId}});Assert.Equal(HttpStatusCode.Created,create.StatusCode);var conversation=(await create.Content.ReadFromJsonAsync<CreatedId>())!.Id;
+        var send=await client.PostAsJsonAsync($"/api/messaging/conversations/{conversation}/messages",new{body="Urgent response required",replyToMessageId=(Guid?)null,documentIds=Array.Empty<Guid>(),classification="Urgent",retentionUntil=DateTimeOffset.UtcNow.AddYears(2)});Assert.Equal(HttpStatusCode.OK,send.StatusCode);var message=(await send.Content.ReadFromJsonAsync<CreatedId>())!.Id;
+        var detail=await client.GetAsync($"/api/messaging/conversations/{conversation}");var detailText=await detail.Content.ReadAsStringAsync();Assert.Contains("Urgent",detailText);Assert.Contains("Delivered",detailText);
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync($"/api/messaging/governance/messages/{message}/fail",new{detail=""})).StatusCode);Assert.Equal(HttpStatusCode.OK,(await client.PostAsJsonAsync($"/api/messaging/governance/messages/{message}/fail",new{detail="Internal queue unavailable"})).StatusCode);Assert.Equal(HttpStatusCode.OK,(await client.PostAsync($"/api/messaging/governance/messages/{message}/retry",null)).StatusCode);Assert.Equal(HttpStatusCode.Conflict,(await client.PostAsync($"/api/messaging/governance/messages/{message}/retry",null)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,(await client.PostAsJsonAsync($"/api/messaging/governance/messages/{message}/retention",new{retentionUntil=DateTimeOffset.UtcNow.AddYears(7),legalHold=true})).StatusCode);var governance=await client.GetAsync($"/api/messaging/governance/conversations/{conversation}");var payload=await governance.Content.ReadAsStringAsync();Assert.Contains("Retried",payload);Assert.Contains("Legal hold applied",payload);Assert.Contains("Urgent family/care-team message",payload);using var document=System.Text.Json.JsonDocument.Parse(payload);var escalation=document.RootElement.GetProperty("escalations")[0].GetProperty("id").GetGuid();Assert.Equal(HttpStatusCode.OK,(await client.PostAsJsonAsync($"/api/messaging/governance/escalations/{escalation}/transition",new{action="Resolve",detail="Care team responded"})).StatusCode);
+    }
+
+    [Fact]
     public async Task CrossTenantUserCannotReadConversationById()
     {
         await _factory.EnsureClinicalSeedAsync();

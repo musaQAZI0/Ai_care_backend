@@ -5,6 +5,7 @@ using AiCare.Application;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -13,7 +14,7 @@ namespace AiCare.Api;
 [ApiController]
 [Authorize(Roles = "Administrator,BackOffice")]
 [Route("api/phase1/integrations")]
-public sealed class IntegrationHubController(CareDbContext db, ITenantContext tenant, ICurrentUserContext user) : ControllerBase
+public sealed class IntegrationHubController(CareDbContext db, ITenantContext tenant, ICurrentUserContext user,IDataProtectionProvider protection) : ControllerBase
 {
     [HttpGet("dashboard")]
     public async Task<IActionResult> Dashboard(CancellationToken token) => Ok(new
@@ -21,9 +22,9 @@ public sealed class IntegrationHubController(CareDbContext db, ITenantContext te
         connectors = await Count("integration_connectors", null, token),
         pendingJobs = await Count("integration_jobs", "status='Pending'", token),
         successfulJobs = await Count("integration_jobs", "status='Succeeded'", token),
-        failedJobs = await Count("integration_jobs", "status='Failed'", token),
+        failedJobs = await Count("integration_jobs", "status in ('Failed','DeadLettered')", token),
         webhookEvents = await Count("integration_webhook_events", null, token),
-        unresolvedFailures = await Count("integration_sync_failures", "status='Pending'", token),
+        unresolvedFailures = await Count("integration_sync_failures", "status in ('Pending','Retrying','DeadLettered')", token),
         connectorItems = await Connectors(token), jobs = await Jobs(token), webhookEventItems = await Events(token), failures = await Failures(token)
     });
 
@@ -35,10 +36,28 @@ public sealed class IntegrationHubController(CareDbContext db, ITenantContext te
     {
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.ConnectorType)) return BadRequest(new { message = "Name and connector type are required." });
         var id = Guid.NewGuid();
-        await Exec("insert into integration_connectors(id,organization_id,branch_id,name,connector_type,endpoint_url,status,configuration_json,created_by) values(@id,@organization,@branch,@name,@type,@endpoint,'Active',cast(@configuration as jsonb),@actor)", command =>
-        { Add(command,"id",id); Add(command,"name",request.Name.Trim()); Add(command,"type",request.ConnectorType.Trim()); Add(command,"endpoint",request.EndpointUrl?.Trim() ?? ""); Add(command,"configuration",JsonSerializer.Serialize(request.Configuration ?? new())); }, token);
+        var webhookSecret=request.EnableWebhook?Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).ToLowerInvariant():null;
+        var protectedSecret=webhookSecret is null?null:protection.CreateProtector("AiCare.Integration.Webhook.v1").Protect(webhookSecret);
+        await Exec("insert into integration_connectors(id,organization_id,branch_id,name,connector_type,endpoint_url,status,configuration_json,created_by,webhook_secret_protected,schedule_minutes) values(@id,@organization,@branch,@name,@type,@endpoint,'Active',cast(@configuration as jsonb),@actor,@secret,@schedule)", command =>
+        { Add(command,"id",id); Add(command,"name",request.Name.Trim()); Add(command,"type",request.ConnectorType.Trim()); Add(command,"endpoint",request.EndpointUrl?.Trim() ?? ""); Add(command,"configuration",JsonSerializer.Serialize(request.Configuration ?? new()));Add(command,"secret",protectedSecret);Add(command,"schedule",request.ScheduleMinutes); }, token);
         await Audit("connector.created", "IntegrationConnector", id, new { request.Name, request.ConnectorType }, token);
-        return Created($"/api/phase1/integrations/connectors/{id}", new { id, name=request.Name.Trim(), connectorType=request.ConnectorType.Trim(), status="Active" });
+        return Created($"/api/phase1/integrations/connectors/{id}", new { id, name=request.Name.Trim(), connectorType=request.ConnectorType.Trim(), status="Active",webhookSecret });
+    }
+
+    [HttpPatch("connectors/{id:guid}")]
+    public async Task<IActionResult> UpdateConnector(Guid id,UpdateIntegrationConnectorRequest request,CancellationToken token)
+    {
+        if(request.ScheduleMinutes is < 1 or > 10080)return BadRequest(new{message="Schedule must be between 1 minute and 7 days."});
+        var changed=await Exec("update integration_connectors set name=coalesce(nullif(trim(@name),''),name),endpoint_url=coalesce(@endpoint,endpoint_url),status=coalesce(@status,status),schedule_minutes=coalesce(@schedule,schedule_minutes),updated_at=now() where id=@id and organization_id=@organization",c=>{Add(c,"id",id);Add(c,"name",request.Name);Add(c,"endpoint",request.EndpointUrl);Add(c,"status",request.Status is "Active" or "Disabled"?request.Status:null);Add(c,"schedule",request.ScheduleMinutes);},token);
+        if(changed==0)return NotFound();await Audit("connector.updated","IntegrationConnector",id,request,token);return NoContent();
+    }
+
+    [HttpPost("connectors/{id:guid}/rotate-webhook-secret")]
+    public async Task<IActionResult> RotateWebhookSecret(Guid id,CancellationToken token)
+    {
+        var secret=Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();var protectedSecret=protection.CreateProtector("AiCare.Integration.Webhook.v1").Protect(secret);
+        var changed=await Exec("update integration_connectors set webhook_secret_protected=@secret,updated_at=now() where id=@id and organization_id=@organization",c=>{Add(c,"id",id);Add(c,"secret",protectedSecret);},token);
+        if(changed==0)return NotFound();await Audit("connector.webhook_secret_rotated","IntegrationConnector",id,new{},token);return Ok(new{webhookSecret=secret});
     }
 
     [HttpPost("jobs/import")]
@@ -68,24 +87,33 @@ public sealed class IntegrationHubController(CareDbContext db, ITenantContext te
     [HttpPost("failures/{id:guid}/retry")]
     public async Task<IActionResult> Retry(Guid id, CancellationToken token)
     {
-        var changed=await Exec("update integration_sync_failures set status='Resolved',retry_count=retry_count+1,last_retried_at=now(),resolved_at=now() where id=@id and organization_id=@organization and status='Pending'", c=>Add(c,"id",id), token);
+        var changed=await Exec("update integration_sync_failures set status='Retrying',retry_count=retry_count+1,last_retried_at=now(),next_retry_at=now() where id=@id and organization_id=@organization and status in ('Pending','DeadLettered')", c=>Add(c,"id",id), token);
         if(changed==0)return NotFound(new { message="Pending failure not found." });
-        await Audit("sync_failure.retried", "IntegrationSyncFailure", id, new { result="Resolved" }, token);
-        return Ok(new { id, status="Resolved" });
+        await Exec("update integration_jobs set status='Retrying',next_attempt_at=now(),completed_at=null where id=(select job_id from integration_sync_failures where id=@id) and organization_id=@organization",c=>Add(c,"id",id),token);
+        await Audit("sync_failure.retried", "IntegrationSyncFailure", id, new { result="Queued" }, token);
+        return Ok(new { id, status="Retrying" });
+    }
+
+    [HttpGet("jobs/{id:guid}/output")]
+    public async Task<IActionResult> DownloadOutput(Guid id,CancellationToken token)
+    {
+        var rows=await Query("select output_json::text,coalesce(output_content_type,'application/json') from integration_jobs where id=@id and organization_id=@organization and status='Succeeded'",c=>Add(c,"id",id),r=>new{Content=r.GetString(0),Type=r.GetString(1)},token);
+        if(rows.Count==0)return NotFound(new{message="Completed export output not found."});
+        return File(System.Text.Encoding.UTF8.GetBytes(rows[0].Content),rows[0].Type,$"integration-{id}.json");
     }
 
     private async Task<IActionResult> CreateJob(string direction, CreateIntegrationJobRequest request, CancellationToken token)
     {
         if (request.ConnectorId==Guid.Empty || string.IsNullOrWhiteSpace(request.ResourceType)) return BadRequest(new { message="Connector and resource type are required." });
         if (!await ConnectorExists(request.ConnectorId, token)) return NotFound(new { message="Connector not found." });
-        var id=Guid.NewGuid(); var failed=request.SimulateFailure; var status=failed?"Failed":"Pending";
-        await Exec("insert into integration_jobs(id,connector_id,organization_id,branch_id,direction,status,resource_type,requested_by,error_message) values(@id,@connector,@organization,@branch,@direction,@status,@resource,@actor,@error)",c=>{Add(c,"id",id);Add(c,"connector",request.ConnectorId);Add(c,"direction",direction);Add(c,"status",status);Add(c,"resource",request.ResourceType.Trim());Add(c,"error",failed?"Simulated sync failure":null);},token);
-        if(failed)await Exec("insert into integration_sync_failures(id,connector_id,job_id,organization_id,branch_id,operation,error_message,payload_json,status) values(@failure,@connector,@id,@organization,@branch,@direction,'Simulated sync failure',cast(@payload as jsonb),'Pending')",c=>{Add(c,"failure",Guid.NewGuid());Add(c,"connector",request.ConnectorId);Add(c,"id",id);Add(c,"direction",direction);Add(c,"payload",JsonSerializer.Serialize(request.Options??new()));},token);
+        var id=Guid.NewGuid();var status="Pending";var options=request.Options??new Dictionary<string,string>();if(request.SimulateFailure)options["simulateFailure"]="true";
+        await Exec("insert into integration_jobs(id,connector_id,organization_id,branch_id,direction,status,resource_type,requested_by,options_json) values(@id,@connector,@organization,@branch,@direction,@status,@resource,@actor,cast(@options as jsonb))",c=>{Add(c,"id",id);Add(c,"connector",request.ConnectorId);Add(c,"direction",direction);Add(c,"status",status);Add(c,"resource",request.ResourceType.Trim());Add(c,"options",JsonSerializer.Serialize(options));},token);
+        if(request.SimulateFailure)await Exec("insert into integration_sync_failures(id,connector_id,job_id,organization_id,branch_id,operation,error_message,payload_json,status,next_retry_at) values(@failure,@connector,@id,@organization,@branch,@direction,'Simulated sync failure',cast(@payload as jsonb),'Pending',now())",c=>{Add(c,"failure",Guid.NewGuid());Add(c,"connector",request.ConnectorId);Add(c,"id",id);Add(c,"direction",direction);Add(c,"payload",JsonSerializer.Serialize(options));},token);
         await Audit($"{direction.ToLowerInvariant()}_job.created", "IntegrationJob", id, new { request.ConnectorId, request.ResourceType, status }, token);
         return Created($"/api/phase1/integrations/jobs/{id}",new{id,direction,status});
     }
 
-    private Task<List<ConnectorResponse>> Connectors(CancellationToken t)=>Query("select id,name,connector_type,endpoint_url,status,created_by,created_at from integration_connectors where organization_id=@organization order by created_at desc limit 100",_=>{},r=>new ConnectorResponse(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetString(5),r.GetFieldValue<DateTimeOffset>(6)),t);
+    private Task<List<ConnectorResponse>> Connectors(CancellationToken t)=>Query("select id,name,connector_type,endpoint_url,status,created_by,created_at,schedule_minutes from integration_connectors where organization_id=@organization order by created_at desc limit 100",_=>{},r=>new ConnectorResponse(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetString(5),r.GetFieldValue<DateTimeOffset>(6),r.IsDBNull(7)?null:r.GetInt32(7)),t);
     private Task<List<JobResponse>> Jobs(CancellationToken t)=>Query("select id,connector_id,direction,status,resource_type,requested_by,record_count,error_message,created_at,completed_at from integration_jobs where organization_id=@organization order by created_at desc limit 100",_=>{},r=>new JobResponse(r.GetGuid(0),r.GetGuid(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.IsDBNull(7)?null:r.GetString(7),r.GetFieldValue<DateTimeOffset>(8),r.IsDBNull(9)?null:r.GetFieldValue<DateTimeOffset>(9)),t);
     private Task<List<WebhookResponse>> Events(CancellationToken t)=>Query("select id,connector_id,event_type,external_event_id,status,received_at from integration_webhook_events where organization_id=@organization order by received_at desc limit 100",_=>{},r=>new WebhookResponse(r.GetGuid(0),r.IsDBNull(1)?null:r.GetGuid(1),r.GetString(2),r.IsDBNull(3)?null:r.GetString(3),r.GetString(4),r.GetFieldValue<DateTimeOffset>(5)),t);
     private Task<List<FailureResponse>> Failures(CancellationToken t)=>Query("select id,connector_id,job_id,operation,error_message,status,retry_count,created_at,last_retried_at from integration_sync_failures where organization_id=@organization order by created_at desc limit 100",_=>{},r=>new FailureResponse(r.GetGuid(0),r.IsDBNull(1)?null:r.GetGuid(1),r.IsDBNull(2)?null:r.GetGuid(2),r.GetString(3),r.GetString(4),r.GetString(5),r.GetInt32(6),r.GetFieldValue<DateTimeOffset>(7),r.IsDBNull(8)?null:r.GetFieldValue<DateTimeOffset>(8)),t);
@@ -99,10 +127,11 @@ public sealed class IntegrationHubController(CareDbContext db, ITenantContext te
     private static void Add(DbCommand c,string n,object? v){if(c.Parameters.Contains(n))return;var p=c.CreateParameter();p.ParameterName=n;p.Value=v??DBNull.Value;c.Parameters.Add(p);}
 }
 
-public sealed record CreateIntegrationConnectorRequest(string Name,string ConnectorType,string? EndpointUrl,Dictionary<string,string>? Configuration);
+public sealed record CreateIntegrationConnectorRequest(string Name,string ConnectorType,string? EndpointUrl,Dictionary<string,string>? Configuration,bool EnableWebhook=true,int? ScheduleMinutes=null);
 public sealed record CreateIntegrationJobRequest(Guid ConnectorId,string ResourceType,Dictionary<string,string>? Options,bool SimulateFailure=false);
 public sealed record ReceiveIntegrationWebhookRequest(string EventType,string? ExternalEventId,Dictionary<string,object>? Payload);
-public sealed record ConnectorResponse(Guid Id,string Name,string ConnectorType,string EndpointUrl,string Status,string CreatedBy,DateTimeOffset CreatedAt);
+public sealed record ConnectorResponse(Guid Id,string Name,string ConnectorType,string EndpointUrl,string Status,string CreatedBy,DateTimeOffset CreatedAt,int? ScheduleMinutes);
+public sealed record UpdateIntegrationConnectorRequest(string? Name,string? EndpointUrl,string? Status,int? ScheduleMinutes);
 public sealed record JobResponse(Guid Id,Guid ConnectorId,string Direction,string Status,string ResourceType,string RequestedBy,int RecordCount,string? ErrorMessage,DateTimeOffset CreatedAt,DateTimeOffset? CompletedAt);
 public sealed record WebhookResponse(Guid Id,Guid? ConnectorId,string EventType,string? ExternalEventId,string Status,DateTimeOffset ReceivedAt);
 public sealed record FailureResponse(Guid Id,Guid? ConnectorId,Guid? JobId,string Operation,string ErrorMessage,string Status,int RetryCount,DateTimeOffset CreatedAt,DateTimeOffset? LastRetriedAt);

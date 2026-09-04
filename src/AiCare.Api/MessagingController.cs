@@ -1,5 +1,6 @@
 using System.Data.Common;
 using AiCare.Application;
+using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -149,7 +150,8 @@ public sealed class MessagingController : ControllerBase
         await using var command = connection.CreateCommand();
         command.CommandText = """
             select m.id,m.sender_user_id,m.body,m.reply_to_message_id,m.sent_at,m.edited_at,
-                   coalesce((select count(*) from conversation_message_reads r where r.message_id=m.id),0)
+                   coalesce((select count(*) from conversation_message_reads r where r.message_id=m.id),0),
+                   m.classification,m.delivery_status,m.failure_reason,m.retry_count,m.retention_until,m.legal_hold
             from conversation_messages m
             where m.conversation_id=@conversationId and m.deleted_at is null
             order by m.sent_at
@@ -161,7 +163,8 @@ public sealed class MessagingController : ControllerBase
             messages.Add(new MessageDto(
                 reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetGuid(3), reader.GetFieldValue<DateTimeOffset>(4),
-                reader.IsDBNull(5) ? null : reader.GetFieldValue<DateTimeOffset>(5), reader.GetInt64(6)));
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<DateTimeOffset>(5), reader.GetInt64(6),
+                reader.GetString(7),reader.GetString(8),reader.GetString(9),reader.GetInt32(10),reader.IsDBNull(11)?null:reader.GetFieldValue<DateTimeOffset>(11),reader.GetBoolean(12)));
         }
         return Ok(new { id = conversationId, messages });
     }
@@ -173,6 +176,8 @@ public sealed class MessagingController : ControllerBase
         if (!await CanAccessConversationAsync(conversationId, cancellationToken)) return NotFound();
         var body = request.Body?.Trim() ?? string.Empty;
         if (body.Length == 0 || body.Length > 5000) return BadRequest(new { message = "Message body must contain 1 to 5000 characters." });
+        var classification=string.IsNullOrWhiteSpace(request.Classification)?"Routine":request.Classification.Trim();
+        if(classification is not("Routine" or "Sensitive" or "Urgent"))return BadRequest(new{message="Classification must be Routine, Sensitive, or Urgent."});
         if (request.ReplyToMessageId is not null && !await MessageBelongsToConversationAsync(request.ReplyToMessageId.Value, conversationId, cancellationToken))
             return BadRequest(new { message = "Reply target is invalid." });
 
@@ -196,10 +201,15 @@ public sealed class MessagingController : ControllerBase
         await using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
-            command.CommandText = "insert into conversation_messages(id,conversation_id,sender_user_id,body,reply_to_message_id,sent_at) values(@id,@conversationId,@sender,@body,@replyTo,@now)";
+            command.CommandText = "insert into conversation_messages(id,conversation_id,sender_user_id,body,reply_to_message_id,sent_at,classification,delivery_status,retention_until) values(@id,@conversationId,@sender,@body,@replyTo,@now,@classification,'Delivered',@retention);insert into conversation_message_events(id,message_id,conversation_id,organization_id,event_type,detail,actor,occurred_at) values(@eventId,@id,@conversationId,@organizationId,'Delivered','Internal in-app delivery completed',@actor,@now)";
             Add(command, "id", messageId); Add(command, "conversationId", conversationId); Add(command, "sender", userId);
             Add(command, "body", body); Add(command, "replyTo", request.ReplyToMessageId); Add(command, "now", now);
+            Add(command,"classification",classification);Add(command,"retention",request.RetentionUntil);Add(command,"eventId",Guid.NewGuid());Add(command,"organizationId",_tenant.OrganizationId);Add(command,"actor",_user.UserName);
             await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        if(classification=="Urgent")
+        {
+            await using var command=connection.CreateCommand();command.Transaction=transaction;command.CommandText="insert into conversation_escalations(id,conversation_id,message_id,organization_id,branch_id,severity,status,owner,response_due_at,reason) values(@id,@conversation,@message,@organization,@branch,'High','Open','Care team',@due,'Urgent family/care-team message');";Add(command,"id",Guid.NewGuid());Add(command,"conversation",conversationId);Add(command,"message",messageId);Add(command,"organization",_tenant.OrganizationId);Add(command,"branch",_tenant.BranchId??TenantDefaults.BranchId);Add(command,"due",now.AddHours(4));await command.ExecuteNonQueryAsync(cancellationToken);
         }
         foreach (var documentId in attachmentIds)
         {
@@ -217,6 +227,9 @@ public sealed class MessagingController : ControllerBase
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         await transaction.CommitAsync(cancellationToken);
+        _db.Notifications.Add(new NotificationItem(Guid.NewGuid(),classification=="Urgent"?"Urgent secure message":"New secure message",$"In-app: {request.SubjectOrFallback(body)}",now,false,_tenant.OrganizationId,_tenant.BranchId??TenantDefaults.BranchId));
+        _db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"messaging.message_delivered",_user.UserName,"ConversationMessage",messageId,now,_tenant.OrganizationId,_tenant.BranchId??TenantDefaults.BranchId));
+        await _db.SaveChangesAsync(cancellationToken);
         return Ok(new { id = messageId, sentAt = now });
     }
 
@@ -233,6 +246,7 @@ public sealed class MessagingController : ControllerBase
             select m.id,@userId,@now from conversation_messages m where m.conversation_id=@conversationId and m.deleted_at is null
             on conflict(message_id,user_id) do update set read_at=excluded.read_at;
             update conversation_participants set last_read_at=@now where conversation_id=@conversationId and user_id=@userId;
+            update conversation_messages set delivery_status='Read' where conversation_id=@conversationId and sender_user_id<>@userId and delivery_status='Delivered';
             """;
         Add(command, "userId", userId); Add(command, "now", now); Add(command, "conversationId", conversationId);
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -350,6 +364,7 @@ public sealed class MessagingController : ControllerBase
 }
 
 public sealed record CreateConversationRequest(Guid? ServiceUserId, string Subject, IReadOnlyCollection<Guid> ParticipantUserIds);
-public sealed record SendMessageRequest(string Body, Guid? ReplyToMessageId, IReadOnlyCollection<Guid> DocumentIds);
+public sealed record SendMessageRequest(string Body, Guid? ReplyToMessageId, IReadOnlyCollection<Guid> DocumentIds,string? Classification=null,DateTimeOffset? RetentionUntil=null);
+public static class SendMessageRequestExtensions{public static string SubjectOrFallback(this SendMessageRequest request,string body)=>body.Length<=120?body:body[..120];}
 public sealed record ConversationSummaryDto(Guid Id, Guid? ServiceUserId, string Subject, string Status, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string LastMessage, long UnreadCount);
-public sealed record MessageDto(Guid Id, Guid SenderUserId, string Body, Guid? ReplyToMessageId, DateTimeOffset SentAt, DateTimeOffset? EditedAt, long ReadCount);
+public sealed record MessageDto(Guid Id, Guid SenderUserId, string Body, Guid? ReplyToMessageId, DateTimeOffset SentAt, DateTimeOffset? EditedAt, long ReadCount,string Classification,string DeliveryStatus,string FailureReason,int RetryCount,DateTimeOffset? RetentionUntil,bool LegalHold);

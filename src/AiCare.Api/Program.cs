@@ -182,13 +182,38 @@ app.UseAuthentication();
 app.UseRateLimiter();
 app.Use(async (context, next) =>
 {
+    var sessionClaim = context.User.FindFirst("sid")?.Value;
+    if (Guid.TryParse(sessionClaim, out var authenticatedSessionId))
+    {
+        var scopedDb = context.RequestServices.GetRequiredService<CareDbContext>();
+        var connection = scopedDb.Database.GetDbConnection();
+        if (connection.State != System.Data.ConnectionState.Open) await connection.OpenAsync(context.RequestAborted);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "select exists(select 1 from auth_sessions where id=@id and revoked_at is null and compromise_detected_at is null and expires_at>now())";
+        var parameter = command.CreateParameter(); parameter.ParameterName = "id"; parameter.Value = authenticatedSessionId; command.Parameters.Add(parameter);
+        if (!Convert.ToBoolean(await command.ExecuteScalarAsync(context.RequestAborted)))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { message = "Session is no longer active." });
+            return;
+        }
+    }
+    var enrollmentRequired = string.Equals(context.User.FindFirst("mfa_enrollment_required")?.Value, "true", StringComparison.OrdinalIgnoreCase);
+    var enrollmentPath = context.Request.Path.StartsWithSegments("/api/security/mfa") || context.Request.Path.Equals("/api/auth/me", StringComparison.OrdinalIgnoreCase) || context.Request.Path.Equals("/api/auth/logout", StringComparison.OrdinalIgnoreCase);
+    if (enrollmentRequired && !enrollmentPath)
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new { message = "MFA enrollment is required before accessing care data.", mfaEnrollmentRequired = true });
+        return;
+    }
     var isFamilyMember = context.User.IsInRole(nameof(UserRole.FamilyMember));
     var isRestrictedPortalRole = isFamilyMember || context.User.IsInRole(nameof(UserRole.ServiceUser));
     var isPhaseOneApi = context.Request.Path.StartsWithSegments("/api/phase1");
     var isFamilyScopedApi = context.Request.Path.StartsWithSegments("/api/phase1/family");
+    var isFamilyComplaintHistory = isFamilyMember && context.Request.Method == HttpMethods.Get && context.Request.Path.Equals("/api/phase1/complaints/mine", StringComparison.OrdinalIgnoreCase);
     var isAuthorizedFamilyCarePlanRoute = isFamilyMember && IsFamilyCarePlanRoute(context.Request);
 
-    if (isRestrictedPortalRole && isPhaseOneApi && !isFamilyScopedApi && !isAuthorizedFamilyCarePlanRoute)
+    if (isRestrictedPortalRole && isPhaseOneApi && !isFamilyScopedApi && !isAuthorizedFamilyCarePlanRoute && !isFamilyComplaintHistory)
     {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         await context.Response.WriteAsJsonAsync(new { message = "This account can only access its linked care portal." });
@@ -197,6 +222,8 @@ app.Use(async (context, next) =>
 
     await next();
 });
+app.UseMiddleware<PrivilegedAccessMiddleware>();
+if (!app.Environment.IsEnvironment("Testing")) app.UseMiddleware<SensitiveOperationStepUpMiddleware>();
 app.UseAuthorization();
 
 app.MapControllers();
@@ -1652,6 +1679,12 @@ phase1.MapGet("/family/service-users/{id:guid}/monthly-report", (Guid id, CareDb
 
 phase1.MapPost("/incidents/{id:guid}/investigate", (Guid id, InvestigateIncidentRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator);
+    if (denied is not null) return denied;
+    if (request.CloseIncident)
+    {
+        return Error("Direct incident closure is disabled. Complete the governed investigation and CAPA workflow before closure.", StatusCodes.Status409Conflict);
+    }
     if (Missing(request.Outcome, request.ActionPlan))
     {
         return Error("Outcome and action plan are required.");
@@ -1663,7 +1696,7 @@ phase1.MapPost("/incidents/{id:guid}/investigate", (Guid id, InvestigateIncident
         return Results.NotFound();
     }
 
-    var updated = incident with { Status = request.CloseIncident ? "Closed" : "Under investigation", Description = $"{incident.Description}\nInvestigation outcome: {request.Outcome}\nAction plan: {request.ActionPlan}" };
+    var updated = incident with { Status = "Under investigation", Description = $"{incident.Description}\nLegacy triage note: {request.Outcome}\nProposed action: {request.ActionPlan}" };
     context.Entry(incident).CurrentValues.SetValues(updated);
     AddAudit(context, tenant, currentUser, "incident.investigated", nameof(Incident), id);
     context.SaveChanges();
@@ -2271,9 +2304,9 @@ static HashSet<Guid> ReadAdditionalVisitIds(CareDbContext context, ITenantContex
 
 static List<object> FindWorkerOperationalConflicts(CareDbContext context, ITenantContext tenant, Guid workerId, Guid serviceUserId, DateTimeOffset startsAt, int durationMinutes, Guid? excludeVisitId = null)
 {
-    var result=new List<object>(); var end=startsAt.AddMinutes(durationMinutes); var policy=(MinimumRest:660,Daily:720,Weekly:2880,Travel:15); var absence=false;
+    var result=new List<object>(); var end=startsAt.AddMinutes(durationMinutes); var policy=(MinimumRest:660,Daily:720,Weekly:2880,Travel:15,MaximumContinuous:360,RequiredBreak:20); var absence=false;
     var connection=context.Database.GetDbConnection();var opened=connection.State!=System.Data.ConnectionState.Open;
-    try { if(opened)connection.Open(); using(var command=connection.CreateCommand()){command.CommandText="select exists(select 1 from worker_absences where care_worker_id=@worker and organization_id=@organization and status in ('Approved','Confirmed') and starts_at < @end and ends_at > @start)";AddParameter(command,"worker",workerId);AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"start",startsAt);AddParameter(command,"end",end);absence=(bool)(command.ExecuteScalar()??false);} using(var command=connection.CreateCommand()){command.CommandText="select minimum_rest_minutes,maximum_daily_minutes,maximum_weekly_minutes,travel_buffer_minutes from scheduling_policies where organization_id=@organization and branch_id=@branch";AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"branch",tenant.BranchId??TenantDefaults.BranchId);using var reader=command.ExecuteReader();if(reader.Read())policy=(reader.GetInt32(0),reader.GetInt32(1),reader.GetInt32(2),reader.GetInt32(3));}}
+    try { if(opened)connection.Open(); using(var command=connection.CreateCommand()){command.CommandText="select exists(select 1 from worker_absences where care_worker_id=@worker and organization_id=@organization and status in ('Approved','Confirmed') and starts_at < @end and ends_at > @start)";AddParameter(command,"worker",workerId);AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"start",startsAt);AddParameter(command,"end",end);absence=(bool)(command.ExecuteScalar()??false);} using(var command=connection.CreateCommand()){command.CommandText="select minimum_rest_minutes,maximum_daily_minutes,maximum_weekly_minutes,travel_buffer_minutes,maximum_continuous_minutes,required_break_minutes from scheduling_policies where organization_id=@organization and branch_id=@branch";AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"branch",tenant.BranchId??TenantDefaults.BranchId);using var reader=command.ExecuteReader();if(reader.Read())policy=(reader.GetInt32(0),reader.GetInt32(1),reader.GetInt32(2),reader.GetInt32(3),reader.GetInt32(4),reader.GetInt32(5));}}
     catch(System.Data.Common.DbException){return result;} finally{if(opened&&connection.State==System.Data.ConnectionState.Open)connection.Close();}
     if(absence)result.Add(new{careWorkerId=workerId,category="Absence",code="worker-absent",reason="Worker has approved leave or sickness overlapping this visit."});
     var additional=ReadAdditionalVisitIds(context,tenant,workerId);
@@ -2283,6 +2316,11 @@ static List<object> FindWorkerOperationalConflicts(CareDbContext context, ITenan
     var weekStart=startsAt.Date.AddDays(-(((int)startsAt.DayOfWeek+6)%7));var weekEnd=weekStart.AddDays(7);
     var weekMinutes=visits.Where(v=>v.StartsAt>=weekStart&&v.StartsAt<weekEnd).Sum(v=>v.DurationMinutes)+durationMinutes;
     if(weekMinutes>policy.Weekly)result.Add(new{careWorkerId=workerId,category="WorkingTime",code="weekly-hours",reason=$"Assignment would exceed the {policy.Weekly}-minute weekly limit."});
+    var duties=visits.Where(v=>v.StartsAt.Date==startsAt.Date).Select(v=>(Start:v.StartsAt,End:v.StartsAt.AddMinutes(v.DurationMinutes),Minutes:v.DurationMinutes,Proposed:false)).ToList();
+    duties.Add((Start:startsAt,End:end,Minutes:durationMinutes,Proposed:true));duties.Sort((left,right)=>left.Start.CompareTo(right.Start));
+    var clusterMinutes=0;var clusterContainsProposed=false;DateTimeOffset? clusterEnd=null;
+    foreach(var duty in duties){if(clusterEnd is not null&&(duty.Start-clusterEnd.Value).TotalMinutes>=policy.RequiredBreak){if(clusterContainsProposed&&clusterMinutes>policy.MaximumContinuous)break;clusterMinutes=0;clusterContainsProposed=false;}clusterMinutes+=duty.Minutes;clusterContainsProposed|=duty.Proposed;clusterEnd=clusterEnd is null||duty.End>clusterEnd?duty.End:clusterEnd;}
+    if(clusterContainsProposed&&clusterMinutes>policy.MaximumContinuous)result.Add(new{careWorkerId=workerId,category="WorkingTime",code="insufficient-break",reason=$"Assignment creates {clusterMinutes} continuous working minutes; a {policy.RequiredBreak}-minute break is required before exceeding {policy.MaximumContinuous} minutes."});
     foreach(var visit in visits){var visitEnd=visit.StartsAt.AddMinutes(visit.DurationMinutes);if(visitEnd<=startsAt){var gap=(startsAt-visitEnd).TotalMinutes;if(visit.StartsAt.Date!=startsAt.Date&&gap<policy.MinimumRest)result.Add(new{careWorkerId=workerId,category="WorkingTime",code="minimum-rest",reason=$"Only {Math.Floor(gap)} minutes rest precede this visit; {policy.MinimumRest} are required."});else if(visit.ServiceUserId!=serviceUserId&&gap<policy.Travel)result.Add(new{careWorkerId=workerId,category="Travel",code="travel-time",reason=$"Only {Math.Floor(gap)} travel minutes are available; {policy.Travel} are required."});}else if(end<=visit.StartsAt){var gap=(visit.StartsAt-end).TotalMinutes;if(visit.StartsAt.Date!=startsAt.Date&&gap<policy.MinimumRest)result.Add(new{careWorkerId=workerId,category="WorkingTime",code="minimum-rest",reason=$"Only {Math.Floor(gap)} minutes rest follow this visit; {policy.MinimumRest} are required."});else if(visit.ServiceUserId!=serviceUserId&&gap<policy.Travel)result.Add(new{careWorkerId=workerId,category="Travel",code="travel-time",reason=$"Only {Math.Floor(gap)} travel minutes are available; {policy.Travel} are required."});}}
     return result.GroupBy(x=>System.Text.Json.JsonSerializer.Serialize(x)).Select(g=>g.First()).ToList();
 }
@@ -2361,6 +2399,7 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
     var compliance = new List<(string Type, string Status, DateTimeOffset? ExpiresAt)>();
     var training = new List<(string Name, string Category, string Status, DateTimeOffset? ExpiresAt)>();
     var competencies = new List<(string Name, string Status, DateTimeOffset? ExpiresAt)>();
+    var restrictions = new List<(string Type, string Skill, string Reason, DateTimeOffset StartsAt, DateTimeOffset? EndsAt)>();
     var connection = context.Database.GetDbConnection();
     var opened = connection.State != System.Data.ConnectionState.Open;
 
@@ -2394,6 +2433,15 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
             using var reader = command.ExecuteReader();
             while (reader.Read()) competencies.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetFieldValue<DateTimeOffset>(2)));
         }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "select restriction_type,skill,reason,starts_at,ends_at from worker_assignment_restrictions where care_worker_id=@worker and organization_id=@organization and status='Active'";
+            AddParameter(command, "worker", careWorkerId);
+            AddParameter(command, "organization", tenant.OrganizationId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) restrictions.Add((reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetFieldValue<DateTimeOffset>(3),reader.IsDBNull(4)?null:reader.GetFieldValue<DateTimeOffset>(4)));
+        }
     }
     catch (System.Data.Common.DbException)
     {
@@ -2408,6 +2456,12 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
     var activeAt = startsAt.ToUniversalTime();
     static bool Valid(string status, DateTimeOffset? expiresAt, DateTimeOffset activeAt) =>
         status.Equals("Valid", StringComparison.OrdinalIgnoreCase) && (expiresAt is null || expiresAt > activeAt);
+
+    foreach (var restriction in restrictions.Where(x => x.StartsAt <= activeAt && (x.EndsAt is null || x.EndsAt > activeAt)))
+    {
+        var matches = restriction.Type != "Skill" || string.IsNullOrWhiteSpace(restriction.Skill) || (requiredSkills ?? "").Contains(restriction.Skill,StringComparison.OrdinalIgnoreCase);
+        if (matches) result.Add(new { careWorkerId, category = "Restriction", code = restriction.Type == "Medication" ? "medication-restricted" : "assignment-restricted", skill = restriction.Skill, reason = restriction.Reason });
+    }
 
     foreach (var complianceType in new[] { "DBS", "Right to Work" })
     {

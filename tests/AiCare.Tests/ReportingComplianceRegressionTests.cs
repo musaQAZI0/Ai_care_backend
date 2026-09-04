@@ -28,7 +28,7 @@ public sealed class ReportingComplianceRegressionTests(PostgresRegressionFactory
             await seedDb.SaveChangesAsync();
         }
 
-        var admin=await Client(adminName);var worker=await Client(workerName);
+        var admin=await Client(adminName);var worker=await Client(workerName);await StepUpTestGrants.GrantAsync(factory,admin,"export");
         Assert.Equal(HttpStatusCode.Forbidden,(await worker.GetAsync("/api/phase1/reporting-compliance/dashboard")).StatusCode);
 
         var report=await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="Governed operations report",category="Operational",format="CSV",metrics=new[]{"Service users","Completed visits","Open incidents","Invoice total","Audit events"},filters=new Dictionary<string,string>{{"period","Last 7 days"}}});

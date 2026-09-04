@@ -130,7 +130,8 @@ public sealed class PersonGovernanceController : ControllerBase
         return Ok(await QueryAsync(
             """
             select id, service_user_id, consent_type, scope, status, capacity_basis, decision_maker,
-                   evidence_reference, effective_from, expires_at, withdrawn_at, withdrawal_reason, created_at
+                   evidence_reference, effective_from, expires_at, withdrawn_at, withdrawal_reason, created_at,
+                   version, supersedes_id, information_categories, sharing_parties, review_due_at
             from consent_records
             where service_user_id=@serviceUserId and organization_id=@organizationId
             order by created_at desc
@@ -140,25 +141,51 @@ public sealed class PersonGovernanceController : ControllerBase
                 reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
                 reader.GetString(5), reader.GetString(6), reader.GetString(7), reader.GetDateTime(8),
                 reader.IsDBNull(9) ? null : reader.GetDateTime(9), reader.IsDBNull(10) ? null : reader.GetDateTime(10),
-                reader.GetString(11), reader.GetDateTime(12))));
+                reader.GetString(11), reader.GetDateTime(12), reader.GetInt32(13),
+                reader.IsDBNull(14) ? null : reader.GetGuid(14), reader.GetString(15), reader.GetString(16),
+                reader.IsDBNull(17) ? null : reader.GetDateTime(17))));
     }
 
     [HttpPost("consents")]
     public async Task<IActionResult> CreateConsent(Guid serviceUserId, CreateConsentRecordRequest request)
     {
         if (!await CanManagePerson(serviceUserId)) return Forbid();
-        if (string.IsNullOrWhiteSpace(request.ConsentType) || string.IsNullOrWhiteSpace(request.Scope))
-            return BadRequest(new { message = "Consent type and scope are required." });
+        if (string.IsNullOrWhiteSpace(request.ConsentType) || string.IsNullOrWhiteSpace(request.Scope)
+            || string.IsNullOrWhiteSpace(request.InformationCategories) || string.IsNullOrWhiteSpace(request.SharingParties))
+            return BadRequest(new { message = "Consent type, scope, information categories, and sharing parties are required." });
+        if (request.ExpiresAt is not null && request.ExpiresAt <= request.EffectiveFrom)
+            return BadRequest(new { message = "Consent expiry must follow its effective date." });
+        var basis = request.CapacityBasis?.Trim() ?? "Not recorded";
+        var basisEvidence = basis switch
+        {
+            "Person has capacity" => await ScalarAsync("select count(*) from capacity_decisions where service_user_id=@serviceUserId and organization_id=@organizationId and status='Current' and outcome='HasCapacity'", serviceUserId),
+            "Best-interest decision" => await ScalarAsync("select count(*) from best_interest_decisions where service_user_id=@serviceUserId and organization_id=@organizationId and status='Current'", serviceUserId),
+            "Legal representative authority" => await ScalarAsync("select count(*) from authority_records where service_user_id=@serviceUserId and organization_id=@organizationId and status='Active' and verification_status='Verified' and valid_from<=now() and (valid_until is null or valid_until>now())", serviceUserId),
+            _ => 0
+        };
+        if (basisEvidence == 0) return Conflict(new { message = "A current capacity, best-interest, or verified-authority record matching the selected basis is required." });
 
         var id = Guid.NewGuid();
+        Guid? previousId = null;
+        var version = 1;
+        var previous = await QueryAsync(
+            "select id,version from consent_records where service_user_id=@serviceUserId and organization_id=@organizationId and consent_type=@consentType and status='Active' order by version desc limit 1",
+            command => { AddPersonParameters(command, serviceUserId); Add(command, "consentType", request.ConsentType.Trim()); },
+            reader => (reader.GetGuid(0), reader.GetInt32(1)));
+        if (previous.Count > 0) { previousId = previous[0].Item1; version = previous[0].Item2 + 1; }
+        if (previousId is not null)
+            await ExecuteAsync("update consent_records set status='Superseded' where id=@id and organization_id=@organizationId",
+                command => { Add(command, "id", previousId); Add(command, "organizationId", _tenant.OrganizationId); });
         await ExecuteAsync(
             """
             insert into consent_records
               (id, service_user_id, organization_id, branch_id, consent_type, scope, status, capacity_basis,
-               decision_maker, evidence_reference, effective_from, expires_at, withdrawn_at, withdrawal_reason, created_at)
+               decision_maker, evidence_reference, effective_from, expires_at, withdrawn_at, withdrawal_reason, created_at,
+               version, supersedes_id, information_categories, sharing_parties, review_due_at)
             values
               (@id,@serviceUserId,@organizationId,@branchId,@consentType,@scope,'Active',@capacityBasis,
-               @decisionMaker,@evidenceReference,@effectiveFrom,@expiresAt,null,'',now())
+               @decisionMaker,@evidenceReference,@effectiveFrom,@expiresAt,null,'',now(),
+               @version,@supersedesId,@informationCategories,@sharingParties,@reviewDueAt)
             """,
             command =>
             {
@@ -167,11 +194,16 @@ public sealed class PersonGovernanceController : ControllerBase
                 Add(command, "branchId", _tenant.BranchId ?? TenantDefaults.BranchId);
                 Add(command, "consentType", request.ConsentType.Trim());
                 Add(command, "scope", request.Scope.Trim());
-                Add(command, "capacityBasis", request.CapacityBasis?.Trim() ?? "Not recorded");
+                Add(command, "capacityBasis", basis);
                 Add(command, "decisionMaker", request.DecisionMaker?.Trim() ?? "");
                 Add(command, "evidenceReference", request.EvidenceReference?.Trim() ?? "");
                 Add(command, "effectiveFrom", request.EffectiveFrom.UtcDateTime);
                 Add(command, "expiresAt", request.ExpiresAt?.UtcDateTime);
+                Add(command, "version", version);
+                Add(command, "supersedesId", previousId);
+                Add(command, "informationCategories", request.InformationCategories.Trim());
+                Add(command, "sharingParties", request.SharingParties.Trim());
+                Add(command, "reviewDueAt", request.ReviewDueAt?.UtcDateTime);
             });
         AddAudit("consent.created", "ConsentRecord", id);
         await _context.SaveChangesAsync();
@@ -329,9 +361,9 @@ public sealed class PersonGovernanceController : ControllerBase
 }
 
 public sealed record UpsertPersonContactRequest(string ContactType, string FullName, string? Relationship, string? PhoneNumber, string? Email, string? OrganizationName, bool IsPrimary, bool IsEmergency);
-public sealed record CreateConsentRecordRequest(string ConsentType, string Scope, string? CapacityBasis, string? DecisionMaker, string? EvidenceReference, DateTimeOffset EffectiveFrom, DateTimeOffset? ExpiresAt);
+public sealed record CreateConsentRecordRequest(string ConsentType, string Scope, string? CapacityBasis, string? DecisionMaker, string? EvidenceReference, DateTimeOffset EffectiveFrom, DateTimeOffset? ExpiresAt, string InformationCategories, string SharingParties, DateTimeOffset? ReviewDueAt);
 public sealed record WithdrawConsentRequest(string Reason);
 public sealed record CreateFundingArrangementRequest(string FundingSource, string? FunderName, string? ContractReference, string? CarePackageType, decimal AuthorizedHoursPerWeek, decimal HourlyRate, DateTimeOffset ValidFrom, DateTimeOffset? ValidTo, string? Status, string? Notes);
 public sealed record PersonContactResponse(Guid Id, Guid ServiceUserId, string ContactType, string FullName, string Relationship, string PhoneNumber, string Email, string OrganizationName, bool IsPrimary, bool IsEmergency, DateTime CreatedAt, DateTime UpdatedAt);
-public sealed record ConsentRecordResponse(Guid Id, Guid ServiceUserId, string ConsentType, string Scope, string Status, string CapacityBasis, string DecisionMaker, string EvidenceReference, DateTime EffectiveFrom, DateTime? ExpiresAt, DateTime? WithdrawnAt, string WithdrawalReason, DateTime CreatedAt);
+public sealed record ConsentRecordResponse(Guid Id, Guid ServiceUserId, string ConsentType, string Scope, string Status, string CapacityBasis, string DecisionMaker, string EvidenceReference, DateTime EffectiveFrom, DateTime? ExpiresAt, DateTime? WithdrawnAt, string WithdrawalReason, DateTime CreatedAt, int Version, Guid? SupersedesId, string InformationCategories, string SharingParties, DateTime? ReviewDueAt);
 public sealed record FundingArrangementResponse(Guid Id, Guid ServiceUserId, string FundingSource, string FunderName, string ContractReference, string CarePackageType, decimal AuthorizedHoursPerWeek, decimal HourlyRate, DateTime ValidFrom, DateTime? ValidTo, string Status, string Notes, DateTime CreatedAt, DateTime UpdatedAt);
