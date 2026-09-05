@@ -76,6 +76,9 @@ public sealed class PrivacyRightsGovernanceRegressionTests(PostgresRegressionFac
         var hold = await manager.PostAsJsonAsync("/api/phase1/privacy-rights/legal-holds", new { serviceUserId = personId, scope = "All person records", reason = "Active investigation", authority = "DPO instruction", reviewDueAt = DateTimeOffset.UtcNow.AddDays(30), organizationWide = false });
         Assert.Equal(HttpStatusCode.Created, hold.StatusCode);
         var holdId = (await hold.Content.ReadFromJsonAsync<Created>())!.Id;
+        var holdBlocksArchive = await admin.DeleteAsync($"/api/phase1/service-users/{personId}");
+        Assert.Equal(HttpStatusCode.Conflict, holdBlocksArchive.StatusCode);
+
         Assert.Equal(HttpStatusCode.Forbidden, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/legal-holds/{holdId}/release", new { evidence = "Not independently approved" })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/legal-holds/{holdId}/release-request", new { evidence = "Investigation owner confirms completion" })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await admin.PostAsJsonAsync($"/api/phase1/privacy-rights/legal-holds/{holdId}/release", new { evidence = "Administrator independently approved release" })).StatusCode);

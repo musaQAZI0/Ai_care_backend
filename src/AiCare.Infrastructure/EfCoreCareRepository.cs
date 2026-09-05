@@ -279,8 +279,8 @@ public sealed class EfCoreCareRepository : ICareRepository
             return false;
         }
 
-        _context.CarePlans.Remove(carePlan);
-        AddAudit("care_plan.deleted", "system", nameof(CarePlan), id);
+        _context.Entry(carePlan).CurrentValues.SetValues(carePlan with { Status = "Archived" });
+        AddAudit("care_plan.archived", "system", nameof(CarePlan), id);
         _context.SaveChanges();
         return true;
     }
@@ -326,8 +326,8 @@ public sealed class EfCoreCareRepository : ICareRepository
             return false;
         }
 
-        _context.RiskAssessments.Remove(risk);
-        AddAudit("risk_assessment.deleted", "system", nameof(RiskAssessment), id);
+        _context.Entry(risk).CurrentValues.SetValues(risk with { MitigationPlan = $"[Archived] {risk.MitigationPlan}" });
+        AddAudit("risk_assessment.archived", "system", nameof(RiskAssessment), id);
         _context.SaveChanges();
         return true;
     }
@@ -384,8 +384,8 @@ public sealed class EfCoreCareRepository : ICareRepository
             return false;
         }
 
-        _context.Documents.Remove(document);
-        AddAudit("document.deleted", "system", nameof(DocumentItem), id);
+        _context.Entry(document).CurrentValues.SetValues(document with { Category = "Withdrawn", FileName = $"[Withdrawn] {document.FileName}" });
+        AddAudit("document.withdrawn", "system", nameof(DocumentItem), id);
         _context.SaveChanges();
         return true;
     }
@@ -449,8 +449,8 @@ public sealed class EfCoreCareRepository : ICareRepository
             return false;
         }
 
-        _context.Incidents.Remove(incident);
-        AddAudit("incident.deleted", "system", nameof(Incident), id);
+        _context.Entry(incident).CurrentValues.SetValues(incident with { Status = "Archived" });
+        AddAudit("incident.archived", "system", nameof(Incident), id);
         _context.SaveChanges();
         return true;
     }

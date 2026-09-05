@@ -109,6 +109,39 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
+    public async Task AssignedCareWorkerCanAccessAssignedPersonRecord()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "worker", "WorkerPassword123!");
+
+        var response = await client.GetAsync($"/api/phase1/service-users/{TestIds.ServiceUserId}/complete-record");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AssignedCareWorkerCanAccessAssignedVisit()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "worker", "WorkerPassword123!");
+
+        var response = await client.GetAsync($"/api/phase1/visits/{TestIds.VisitId}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task OtherCareWorkerCannotAccessUnassignedVisit()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "other-worker", "OtherWorkerPassword123!");
+
+        var response = await client.GetAsync($"/api/phase1/visits/{TestIds.VisitId}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task CareWorkerCannotCreateServiceUsers()
     {
         var client = _factory.CreateClient();

@@ -29,6 +29,7 @@ public static class DependencyInjection
         services.AddSingleton<IStartupFilter, DocumentUploadSecurityStartupFilter>();
 
         services.AddScoped<ICareRepository, EfCoreCareRepository>();
+        services.AddScoped<IContextualAuthorization, ContextualAuthorizationService>();
         services.AddScoped<ICarePlanLifecycleStore, CarePlanLifecycleStore>();
         services.AddScoped<ICarePlanLifecycleService, CarePlanLifecycleService>();
         services.AddScoped<IFamilyPortalStore, FamilyPortalStore>();

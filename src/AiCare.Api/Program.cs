@@ -333,10 +333,9 @@ phase1.MapGet("/service-users", (ICareRepository repository, CareDbContext conte
         .ToList();
     return Results.Ok(serviceUsers);
 });
-phase1.MapGet("/service-users/{id:guid}", (Guid id, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapGet("/service-users/{id:guid}", async (Guid id, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
 {
-    var denied = RequireServiceUserAccess(id, context, tenant, currentUser);
-    if (denied is not null) return denied;
+    if (!await authorization.CanReadServiceUserAsync(id)) return currentUser.IsCareWorker || currentUser.IsFamilyMember ? Results.Forbid() : Results.NotFound();
     var serviceUser = repository.GetServiceUser(id);
     if (serviceUser is null) return Results.NotFound();
     AddAudit(context, tenant, currentUser, "service_user.viewed", nameof(ServiceUser), id);
@@ -384,22 +383,25 @@ phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest req
     var serviceUser = repository.UpdateServiceUser(id, request);
     return serviceUser is null ? Results.NotFound() : Results.Ok(serviceUser);
 });
-phase1.MapDelete("/service-users/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapDelete("/service-users/{id:guid}", async (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, CancellationToken cancellationToken) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager);
     if (denied is not null) return denied;
-    var serviceUser = context.ServiceUsers.Find(id);
+    var serviceUser = await context.ServiceUsers.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
     if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId)) return Results.NotFound();
-    context.ServiceUsers.Remove(serviceUser);
-    AddAudit(context, tenant, currentUser, "service_user.deleted", nameof(ServiceUser), id);
-    context.SaveChanges();
+    if (await HasActiveLegalHold(context, tenant, id, cancellationToken)) return Results.Conflict(new { message = "An active legal hold prevents deletion or disposal." });
+    var now = DateTimeOffset.UtcNow;
+    if ((await context.Visits.AsNoTracking().Where(item => item.OrganizationId == tenant.OrganizationId && item.ServiceUserId == id).ToListAsync(cancellationToken)).Any(item => item.StartsAt > now)) return Results.Conflict(new { message = "Future visits must be cancelled or completed before archiving." });
+    if (await context.Incidents.AnyAsync(item => item.OrganizationId == tenant.OrganizationId && item.ServiceUserId == id && item.Status != "Closed", cancellationToken)) return Results.Conflict(new { message = "Open incidents must be resolved before archiving." });
+    context.Entry(serviceUser).CurrentValues.SetValues(serviceUser with { Status = "Archived" });
+    AddAudit(context, tenant, currentUser, "service_user.archived", nameof(ServiceUser), id);
+    await context.SaveChangesAsync(cancellationToken);
     return Results.NoContent();
 });
 
-phase1.MapGet("/service-users/{id:guid}/complete-record", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapGet("/service-users/{id:guid}/complete-record", async (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
 {
-    var denied = RequireServiceUserAccess(id, context, tenant, currentUser);
-    if (denied is not null) return denied;
+    if (!await authorization.CanReadServiceUserAsync(id)) return currentUser.IsCareWorker || currentUser.IsFamilyMember ? Results.Forbid() : Results.NotFound();
     var person = context.ServiceUsers.AsNoTracking().FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return Results.NotFound();
 
@@ -417,10 +419,9 @@ phase1.MapGet("/service-users/{id:guid}/complete-record", (Guid id, CareDbContex
     return Results.Ok(new { person, record, assessments, plans, outcomes, risks, family, notes, incidents });
 });
 
-phase1.MapPut("/service-users/{id:guid}/person-record", (Guid id, UpsertPersonRecordRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapPut("/service-users/{id:guid}/person-record", async (Guid id, UpsertPersonRecordRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
 {
-    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
-    if (denied is not null) return denied;
+    if (!await authorization.CanWriteServiceUserAsync(id)) return Results.NotFound();
     var person = context.ServiceUsers.FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return Results.NotFound();
     var existing = context.PersonRecords.FirstOrDefault(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId);
@@ -512,13 +513,22 @@ phase1.MapPut("/care-workers/{id:guid}", (Guid id, CreateCareWorkerRequest reque
     var careWorker = repository.UpdateCareWorker(id, request);
     return careWorker is null ? Results.NotFound() : Results.Ok(careWorker);
 });
-phase1.MapDelete("/care-workers/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapDelete("/care-workers/{id:guid}", async (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, CancellationToken cancellationToken) =>
 {
-    var worker = context.CareWorkers.Find(id);
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager);
+    if (denied is not null) return denied;
+    var worker = await context.CareWorkers.FirstOrDefaultAsync(item => item.Id == id, cancellationToken);
     if (worker is null || !tenant.CanAccess(worker.OrganizationId, worker.BranchId)) return Results.NotFound();
-    context.CareWorkers.Remove(worker);
-    AddAudit(context, tenant, currentUser, "care_worker.deleted", nameof(CareWorker), id);
-    context.SaveChanges();
+    var now = DateTimeOffset.UtcNow;
+    var activeVisits = (await context.Visits.AsNoTracking().Where(item => item.OrganizationId == tenant.OrganizationId && item.CareWorkerId == id && item.Status != VisitStatus.Cancelled && item.Status != VisitStatus.Completed).ToListAsync(cancellationToken)).Any(item => item.StartsAt >= now);
+    if (activeVisits) return Results.Conflict(new { message = "Future active visits must be reassigned, cancelled, or completed before archiving a care worker." });
+    context.Entry(worker).CurrentValues.SetValues(worker with { Availability = "Archived", AssignedServiceUsers = 0, Utilization = 0 });
+    foreach (var appUser in await context.AppUsers.Where(item => item.OrganizationId == tenant.OrganizationId && item.CareWorkerId == id).ToListAsync(cancellationToken))
+    {
+        context.Entry(appUser).CurrentValues.SetValues(appUser with { IsActive = false });
+    }
+    AddAudit(context, tenant, currentUser, "care_worker.archived", nameof(CareWorker), id);
+    await context.SaveChangesAsync(cancellationToken);
     return Results.NoContent();
 });
 
@@ -541,14 +551,15 @@ phase1.MapGet("/visits", (ICareRepository repository, CareDbContext context, ITe
         .ToList();
     return Results.Ok(visits);
 });
-phase1.MapGet("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/visits/{id:guid}", async (Guid id, CareDbContext context, ITenantContext tenant, IContextualAuthorization authorization) =>
 {
+    if (!await authorization.CanReadVisitAsync(id)) return Results.NotFound();
     var visit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return Results.NotFound();
     var person = context.ServiceUsers.AsNoTracking().FirstOrDefault(item => item.Id == visit.ServiceUserId);
     var worker = context.CareWorkers.AsNoTracking().FirstOrDefault(item => item.Id == visit.CareWorkerId);
-    var notes = context.CareNotes.AsNoTracking().Where(item => item.VisitId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.CreatedAt).ToList();
-    var observations = context.HealthObservations.AsNoTracking().Where(item => item.VisitId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.RecordedAt).ToList();
+    var notes = context.CareNotes.AsNoTracking().Where(item => item.VisitId == id && item.OrganizationId == tenant.OrganizationId).ToList().OrderByDescending(item => item.CreatedAt).ToList();
+    var observations = context.HealthObservations.AsNoTracking().Where(item => item.VisitId == id && item.OrganizationId == tenant.OrganizationId).ToList().OrderByDescending(item => item.RecordedAt).ToList();
     return Results.Ok(new { visit, person, worker, notes, observations });
 });
 phase1.MapGet("/rota", (DateTimeOffset? from, DateTimeOffset? to, Guid? careWorkerId, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
@@ -601,10 +612,17 @@ phase1.MapPost("/visits/conflicts", (CreateVisitRequest request, CareDbContext c
     var operationalConflicts = workerIds.SelectMany(id => FindWorkerOperationalConflicts(context, tenant, id, request.ServiceUserId, request.StartsAt, request.DurationMinutes)).ToList();
     return Results.Ok(new { hasConflicts = conflicts.Count > 0 || availabilityConflicts.Count > 0 || safetyConflicts.Count > 0 || operationalConflicts.Count > 0, conflicts, availabilityConflicts, safetyConflicts, operationalConflicts });
 });
-phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapPost("/visits", (CreateVisitRequest request, HttpContext httpContext, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
+
+    var idempotencyKey = httpContext.Request.Headers["Idempotency-Key"].ToString();
+    if (TryGetIdempotentResource(context, tenant, currentUser, "POST /api/phase1/visits", idempotencyKey, out var existingVisitId))
+    {
+        var existingVisit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == existingVisitId && item.OrganizationId == tenant.OrganizationId);
+        return existingVisit is null ? Results.NotFound() : Results.Ok(existingVisit);
+    }
 
     if (request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || string.IsNullOrWhiteSpace(request.VisitType) || request.DurationMinutes <= 0)
     {
@@ -638,6 +656,7 @@ phase1.MapPost("/visits", (CreateVisitRequest request, ICareRepository repositor
     if (additionalConflicts.Count > 0 || operationalConflicts.Count > 0) return Error("One or more assigned workers fail availability, compliance, working-time, absence, or travel requirements.");
 
     var visit = repository.AddVisit(request);
+    StoreIdempotentResource(context, tenant, currentUser, "POST /api/phase1/visits", idempotencyKey, nameof(Visit), visit.Id);
     SyncVisitWorkerAssignments(context, tenant, visit.Id, request.CareWorkerId, request.AdditionalCareWorkerIds);
     RecordScheduleChange(context, tenant, currentUser, visit.Id, "Created", null, visit, request.ChangeReason);
     return Results.Created($"/api/phase1/visits/{visit.Id}", visit);
@@ -767,9 +786,10 @@ phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantCo
 
     var visit = context.Visits.Find(id);
     if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return Results.NotFound();
-    RecordScheduleChange(context, tenant, currentUser, id, "Deleted", visit, null, "Visit removed from the rota");
-    context.Visits.Remove(visit);
-    AddAudit(context, tenant, currentUser, "visit.deleted", nameof(Visit), id);
+    if (visit.Status == VisitStatus.Completed || visit.Status == VisitStatus.InProgress) return Results.Conflict(new { message = "Started or completed visits require a correction record, not deletion." });
+    context.Entry(visit).CurrentValues.SetValues(visit with { Status = VisitStatus.Cancelled });
+    RecordScheduleChange(context, tenant, currentUser, id, "Cancelled", visit, visit with { Status = VisitStatus.Cancelled }, "Visit archived by delete request");
+    AddAudit(context, tenant, currentUser, "visit.cancelled", nameof(Visit), id);
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -896,8 +916,8 @@ phase1.MapDelete("/family-members/{id:guid}", (Guid id, CareDbContext context, I
 {
     var family = context.FamilyMembers.Find(id);
     if (family is null || !tenant.CanAccess(family.OrganizationId, family.BranchId)) return Results.NotFound();
-    context.FamilyMembers.Remove(family);
-    AddAudit(context, tenant, currentUser, "family_member.deleted", nameof(FamilyMember), id);
+    context.Entry(family).CurrentValues.SetValues(family with { Status = "Revoked" });
+    AddAudit(context, tenant, currentUser, "family_member.revoked", nameof(FamilyMember), id);
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -1050,8 +1070,9 @@ phase1.MapDelete("/medications/{id:guid}", (Guid id, CareDbContext context, ITen
 
     var medication = context.Medications.Find(id);
     if (medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId)) return Results.NotFound();
-    context.Medications.Remove(medication);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.deleted", currentUser.UserName, nameof(Medication), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    if (context.MedicationAdministrationRecords.Any(item => item.MedicationId == id && item.OrganizationId == tenant.OrganizationId)) return Results.Conflict(new { message = "Medication with administration history must be discontinued, not deleted." });
+    context.Entry(medication).CurrentValues.SetValues(medication with { Schedule = "Discontinued", AllergyWarning = $"[Discontinued] {medication.AllergyWarning}" });
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.discontinued", currentUser.UserName, nameof(Medication), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -1160,8 +1181,8 @@ phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITena
     var denied = RequireAssignedVisitForCareWorker(note.VisitId, context, tenant, currentUser);
     if (denied is not null) return denied;
 
-    context.CareNotes.Remove(note);
-    AddAudit(context, tenant, currentUser, "care_note.deleted", nameof(CareNote), id);
+    context.Entry(note).CurrentValues.SetValues(note with { Summary = $"[Corrected/withdrawn] {note.Summary}", Concerns = string.IsNullOrWhiteSpace(note.Concerns) ? "Withdrawn by correction" : $"{note.Concerns} | Withdrawn by correction", RequiresReview = true });
+    AddAudit(context, tenant, currentUser, "care_note.withdrawn", nameof(CareNote), id);
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -1474,8 +1495,8 @@ phase1.MapDelete("/notifications/{id:guid}", (Guid id, CareDbContext context, IT
     var notification = context.Notifications.Find(id);
     if (notification is null || !tenant.CanAccess(notification.OrganizationId, notification.BranchId)) return Results.NotFound();
 
-    context.Notifications.Remove(notification);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "notification.deleted", currentUser.UserName, nameof(NotificationItem), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
+    context.Entry(notification).CurrentValues.SetValues(notification with { IsRead = true });
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "notification.dismissed", currentUser.UserName, nameof(NotificationItem), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
     return Results.NoContent();
 });
@@ -1992,9 +2013,9 @@ phase1.MapGet("/storage/status", (IConfiguration configuration) => Results.Ok(ne
 }));
 
 var demo = app.MapGroup("/api/demo").RequireAuthorization("Phase1User");
-demo.MapPost("/seed", (HttpContext httpContext, IConfiguration configuration, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+demo.MapPost("/seed", (HttpContext httpContext, IConfiguration configuration, IWebHostEnvironment environment, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
-    if (!DemoAccessAllowed(httpContext, configuration))
+    if (!DemoAccessAllowed(httpContext, configuration, environment))
     {
         return Results.NotFound();
     }
@@ -2030,9 +2051,9 @@ demo.MapPost("/seed", (HttpContext httpContext, IConfiguration configuration, Ca
     });
 });
 
-demo.MapDelete("/reset", (HttpContext httpContext, IConfiguration configuration, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+demo.MapDelete("/reset", (HttpContext httpContext, IConfiguration configuration, IWebHostEnvironment environment, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
-    if (!DemoAccessAllowed(httpContext, configuration))
+    if (!DemoAccessAllowed(httpContext, configuration, environment))
     {
         return Results.NotFound();
     }
@@ -2114,25 +2135,24 @@ static bool LooksLikeEmail(string value) => value.Contains('@', StringComparison
 
 static bool TenantVisible(ITenantContext tenant, Guid? organizationId, Guid? branchId) => tenant.CanAccess(organizationId, branchId);
 
-static IResult? RequireServiceUserAccess(Guid serviceUserId, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+static async Task<bool> HasActiveLegalHold(CareDbContext context, ITenantContext tenant, Guid serviceUserId, CancellationToken cancellationToken)
 {
-    var serviceUser = context.ServiceUsers.AsNoTracking().FirstOrDefault(item => item.Id == serviceUserId);
-    if (serviceUser is null || !tenant.CanAccess(serviceUser.OrganizationId, serviceUser.BranchId))
+    if (context.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) != true)
     {
-        return Results.NotFound();
+        return false;
     }
 
-    if (!currentUser.IsCareWorker) return null;
-    if (currentUser.CareWorkerId is null)
+    var connection = context.Database.GetDbConnection();
+    if (connection.State != System.Data.ConnectionState.Open)
     {
-        return Error("Care worker account is not linked to a care worker profile.", StatusCodes.Status403Forbidden);
+        await connection.OpenAsync(cancellationToken);
     }
 
-    var assigned = context.Visits.AsNoTracking().Any(visit =>
-        visit.ServiceUserId == serviceUserId &&
-        visit.CareWorkerId == currentUser.CareWorkerId &&
-        visit.OrganizationId == tenant.OrganizationId);
-    return assigned ? null : Error("Care workers can only access people assigned through their visits.", StatusCodes.Status403Forbidden);
+    await using var command = connection.CreateCommand();
+    command.CommandText = "select exists(select 1 from legal_holds where organization_id=@organization and status in ('Active','ReleaseRequested') and (service_user_id is null or service_user_id=@person))";
+    AddParameter(command, "organization", tenant.OrganizationId);
+    AddParameter(command, "person", serviceUserId);
+    return Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken));
 }
 
 static IResult? RequireAssignedVisitForCareWorker(Guid visitId, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
@@ -2500,6 +2520,70 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
     return result;
 }
 
+static bool TryGetIdempotentResource(CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string endpoint, string key, out Guid resourceId)
+{
+    resourceId = Guid.Empty;
+    if (string.IsNullOrWhiteSpace(key) || context.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) != true)
+    {
+        return false;
+    }
+
+    var connection = context.Database.GetDbConnection();
+    var opened = connection.State != System.Data.ConnectionState.Open;
+    try
+    {
+        if (opened) connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "select resource_id from api_idempotency_keys where organization_id=@organization and actor_user_id=@actor and endpoint=@endpoint and idempotency_key=@key";
+        AddParameter(command, "organization", tenant.OrganizationId);
+        AddParameter(command, "actor", currentUser.UserId ?? Guid.Empty);
+        AddParameter(command, "endpoint", endpoint);
+        AddParameter(command, "key", key.Trim());
+        var value = command.ExecuteScalar();
+        if (value is not Guid id) return false;
+        resourceId = id;
+        return true;
+    }
+    catch
+    {
+        return false;
+    }
+    finally
+    {
+        if (opened) connection.Close();
+    }
+}
+
+static void StoreIdempotentResource(CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string endpoint, string key, string resourceType, Guid resourceId)
+{
+    if (string.IsNullOrWhiteSpace(key) || context.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) != true)
+    {
+        return;
+    }
+
+    var connection = context.Database.GetDbConnection();
+    var opened = connection.State != System.Data.ConnectionState.Open;
+    try
+    {
+        if (opened) connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "insert into api_idempotency_keys(id,organization_id,branch_id,actor_user_id,endpoint,idempotency_key,resource_type,resource_id) values(@id,@organization,@branch,@actor,@endpoint,@key,@type,@resource) on conflict(organization_id,actor_user_id,endpoint,idempotency_key) do nothing";
+        AddParameter(command, "id", Guid.NewGuid());
+        AddParameter(command, "organization", tenant.OrganizationId);
+        AddParameter(command, "branch", tenant.BranchId ?? TenantDefaults.BranchId);
+        AddParameter(command, "actor", currentUser.UserId ?? Guid.Empty);
+        AddParameter(command, "endpoint", endpoint);
+        AddParameter(command, "key", key.Trim());
+        AddParameter(command, "type", resourceType);
+        AddParameter(command, "resource", resourceId);
+        command.ExecuteNonQuery();
+    }
+    finally
+    {
+        if (opened) connection.Close();
+    }
+}
+
 static void AddParameter(System.Data.Common.DbCommand command, string name, object value)
 {
     var parameter = command.CreateParameter();
@@ -2569,8 +2653,13 @@ static IResult CompleteMedicationAdministration(Guid id, string outcome, Complet
     return Results.Ok(completed);
 }
 
-static bool DemoAccessAllowed(HttpContext httpContext, IConfiguration configuration)
+static bool DemoAccessAllowed(HttpContext httpContext, IConfiguration configuration, IWebHostEnvironment environment)
 {
+    if (environment.IsProduction())
+    {
+        return false;
+    }
+
     if (!string.Equals(configuration["Demo:Enabled"], "true", StringComparison.OrdinalIgnoreCase))
     {
         return false;

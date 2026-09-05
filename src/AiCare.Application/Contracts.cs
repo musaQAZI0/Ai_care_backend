@@ -83,6 +83,13 @@ public interface ICurrentUserContext
     bool HasAnyRole(params UserRole[] roles);
 }
 
+public interface IContextualAuthorization
+{
+    Task<bool> CanReadServiceUserAsync(Guid serviceUserId, CancellationToken cancellationToken = default);
+    Task<bool> CanWriteServiceUserAsync(Guid serviceUserId, CancellationToken cancellationToken = default);
+    Task<bool> CanReadVisitAsync(Guid visitId, CancellationToken cancellationToken = default);
+}
+
 public sealed record CreateServiceUserRequest(
     string FullName,
     DateOnly DateOfBirth,
