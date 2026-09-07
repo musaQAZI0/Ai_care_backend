@@ -143,7 +143,9 @@ public class AuthController : ControllerBase
         if (!Guid.TryParse(subject, out var userId)) return Unauthorized();
         var user = _context.AppUsers.SingleOrDefault(item => item.Id == userId && item.IsActive);
         if (user is null) return Unauthorized();
-        return Ok(new { id = user.Id, userName = user.UserName, email = user.Email, role = user.Role.ToString(), organizationId = user.OrganizationId ?? TenantDefaults.OrganizationId, branchId = user.BranchId, familyMemberId = user.FamilyMemberId, careWorkerId = user.CareWorkerId });
+        var organizationId = user.OrganizationId ?? TenantDefaults.OrganizationId;
+        var organizationStatus = _context.Organizations.AsNoTracking().Where(item => item.Id == organizationId).Select(item => item.Status).FirstOrDefault() ?? "Active";
+        return Ok(new { id = user.Id, userName = user.UserName, email = user.Email, role = user.Role.ToString(), organizationId, organizationStatus, branchId = user.BranchId, familyMemberId = user.FamilyMemberId, careWorkerId = user.CareWorkerId });
     }
 
     [HttpPost("refresh-token")]
