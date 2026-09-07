@@ -51,6 +51,24 @@ public sealed class TenantSignupRegressionTests(PostgresRegressionFactory factor
         Assert.Equal(created.OrganizationId, onboarding!.Organization.Id);
         Assert.Contains(onboarding.Steps, step => step.Key == "people" && !step.Complete);
 
+        var blockedActivation = await client.PostAsync("/api/phase1/tenant/activate", null);
+        Assert.Equal(HttpStatusCode.Conflict, blockedActivation.StatusCode);
+
+        using (var setupScope = factory.Services.CreateScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            var workerId = Guid.NewGuid();
+            var personId = Guid.NewGuid();
+            setupDb.CareWorkers.Add(new AiCare.Domain.CareWorker(workerId, "Tenant Worker", "Personal care", "Flexible", 0, 0, "Valid", "Compliant", "10 miles", created.OrganizationId, created.BranchId));
+            setupDb.AppUsers.Add(new AppUser(Guid.NewGuid(), $"tenant.worker.{suffix}", $"tenant.worker.{suffix}@aicare.local", PasswordHasher.HashPassword("WorkerPassword123!"), AiCare.Domain.UserRole.CareWorker, true, created.OrganizationId, created.BranchId, workerId, null));
+            setupDb.ServiceUsers.Add(new AiCare.Domain.ServiceUser(personId, "Tenant Person", new DateOnly(1970, 1, 1), "+10000009999", "Personal care", "Contact", "Worker", AiCare.Domain.RiskLevel.Low, "Active", "Address", "None", "None", "Private", "Not specified", "", "Independent", "None", "None", "None", "None", created.OrganizationId, created.BranchId));
+            setupDb.CarePlans.Add(new AiCare.Domain.CarePlan(Guid.NewGuid(), personId, "v1", "Draft", "Personal care", "Medication", "Mobility", "Nutrition", DateTimeOffset.UtcNow.AddDays(30), created.OrganizationId, created.BranchId));
+            await setupDb.SaveChangesAsync();
+        }
+
+        var activated = await client.PostAsync("/api/phase1/tenant/activate", null);
+        Assert.Equal(HttpStatusCode.OK, activated.StatusCode);
+
         var duplicate = await client.PostAsJsonAsync("/api/auth/signup-tenant", new
         {
             organizationName,
@@ -64,10 +82,12 @@ public sealed class TenantSignupRegressionTests(PostgresRegressionFactory factor
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
-        Assert.True(await db.Organizations.AnyAsync(x => x.Id == created.OrganizationId && x.Name == organizationName && x.Status == "Setup"));
-        Assert.True(await db.Branches.AnyAsync(x => x.Id == created.BranchId && x.OrganizationId == created.OrganizationId && x.Status == "Setup"));
+        Assert.True(await db.Organizations.AnyAsync(x => x.Id == created.OrganizationId && x.Name == organizationName && x.Status == "Active"));
+        Assert.True(await db.Branches.AnyAsync(x => x.Id == created.BranchId && x.OrganizationId == created.OrganizationId && x.Status == "Active"));
         Assert.True(await db.AppUsers.AnyAsync(x => x.Id == created.AdminUserId && x.OrganizationId == created.OrganizationId && x.BranchId == created.BranchId && x.Role == AiCare.Domain.UserRole.Administrator));
         Assert.True(await db.AuditEvents.AnyAsync(x => x.Action == "tenant.signup_created" && x.OrganizationId == created.OrganizationId));
+        Assert.True(await db.AuditEvents.AnyAsync(x => x.Action == "tenant.activated" && x.OrganizationId == created.OrganizationId));
+        Assert.True(await db.Organizations.AnyAsync(x => x.Id == created.OrganizationId && x.Status == "Active"));
     }
 
     private sealed record TenantSignupCreated(Guid OrganizationId, Guid BranchId, Guid AdminUserId, string Status, string Plan);
