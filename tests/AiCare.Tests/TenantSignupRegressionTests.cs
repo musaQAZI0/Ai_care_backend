@@ -46,6 +46,7 @@ public sealed class TenantSignupRegressionTests(PostgresRegressionFactory factor
         Assert.Equal(created.OrganizationId, me!.OrganizationId);
         Assert.Equal(created.BranchId, me.BranchId);
         Assert.Equal("Administrator", me.Role);
+        Assert.Equal("Setup", me.OrganizationStatus);
 
         var onboarding = await client.GetFromJsonAsync<TenantOnboardingStatus>("/api/phase1/tenant/onboarding");
         Assert.Equal(created.OrganizationId, onboarding!.Organization.Id);
@@ -68,6 +69,8 @@ public sealed class TenantSignupRegressionTests(PostgresRegressionFactory factor
 
         var activated = await client.PostAsync("/api/phase1/tenant/activate", null);
         Assert.Equal(HttpStatusCode.OK, activated.StatusCode);
+        var activeMe = await client.GetFromJsonAsync<AuthMeResponse>("/api/auth/me");
+        Assert.Equal("Active", activeMe!.OrganizationStatus);
 
         var duplicate = await client.PostAsJsonAsync("/api/auth/signup-tenant", new
         {
@@ -92,7 +95,7 @@ public sealed class TenantSignupRegressionTests(PostgresRegressionFactory factor
 
     private sealed record TenantSignupCreated(Guid OrganizationId, Guid BranchId, Guid AdminUserId, string Status, string Plan);
     private sealed record LoginResponse(string Token);
-    private sealed record AuthMeResponse(Guid OrganizationId, Guid? BranchId, string Role);
+    private sealed record AuthMeResponse(Guid OrganizationId, Guid? BranchId, string Role, string OrganizationStatus);
     private sealed record TenantOnboardingStatus(TenantOrganization Organization, List<TenantOnboardingStep> Steps);
     private sealed record TenantOrganization(Guid Id, string Name, string Plan, string Status);
     private sealed record TenantOnboardingStep(string Key, string Title, bool Complete, string ActionPath);
