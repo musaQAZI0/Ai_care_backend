@@ -2005,6 +2005,31 @@ phase1.MapPost("/organizations", (CreateOrganizationRequest request, CareDbConte
     return Results.Created($"/api/phase1/organizations/{organization.Id}", new { organization, branch });
 });
 
+phase1.MapGet("/tenant/onboarding", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var organization = context.Organizations.AsNoTracking().FirstOrDefault(item => item.Id == tenant.OrganizationId);
+    if (organization is null) return Results.NotFound();
+    var branches = context.Branches.AsNoTracking().Where(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || tenant.BranchId == null || item.Id == tenant.BranchId)).ToList();
+    var branchIds = branches.Select(item => item.Id).ToHashSet();
+    var users = context.AppUsers.AsNoTracking().Count(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == null || branchIds.Contains(item.BranchId.Value)));
+    var staff = context.AppUsers.AsNoTracking().Count(item => item.OrganizationId == tenant.OrganizationId && item.Role != UserRole.Administrator && item.Role != UserRole.FamilyMember && item.Role != UserRole.ServiceUser && (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == null || branchIds.Contains(item.BranchId.Value)));
+    var serviceUsers = context.ServiceUsers.AsNoTracking().Count(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == tenant.BranchId));
+    var careWorkers = context.CareWorkers.AsNoTracking().Count(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == tenant.BranchId));
+    var carePlans = context.CarePlans.AsNoTracking().Count(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == tenant.BranchId));
+    var familyMembers = context.FamilyMembers.AsNoTracking().Count(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == tenant.BranchId));
+    var steps = new[]
+    {
+        new { key = "organization", title = "Confirm organization", complete = organization.Status == "Active" || !string.IsNullOrWhiteSpace(organization.Name), actionPath = "/admin" },
+        new { key = "branches", title = "Create branch/team", complete = branches.Count > 0, actionPath = "/admin" },
+        new { key = "staff", title = "Invite staff", complete = staff > 0 || careWorkers > 0, actionPath = "/admin" },
+        new { key = "people", title = "Add service users", complete = serviceUsers > 0, actionPath = "/people" },
+        new { key = "care", title = "Create care records", complete = carePlans > 0, actionPath = "/operations/care" },
+        new { key = "family", title = "Configure family access", complete = familyMembers > 0, actionPath = "/family" }
+    };
+    AddAudit(context, tenant, currentUser, "tenant.onboarding_viewed", nameof(Organization), tenant.OrganizationId, tenant.OrganizationId, tenant.BranchId ?? branches.FirstOrDefault()?.Id);
+    context.SaveChanges();
+    return Results.Ok(new { organization, branches, counts = new { users, staff, serviceUsers, careWorkers, carePlans, familyMembers }, steps, complete = steps.All(step => step.complete), canActivate = serviceUsers > 0 && (staff > 0 || careWorkers > 0) && carePlans > 0 });
+});
 phase1.MapGet("/storage/status", (IConfiguration configuration) => Results.Ok(new
 {
     provider = configuration["Storage:Provider"] ?? "Local",

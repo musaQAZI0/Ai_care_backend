@@ -21,12 +21,14 @@ public class AuthController : ControllerBase
     private readonly CareDbContext _context;
     private readonly JwtOptions _jwtOptions;
     private readonly IWebHostEnvironment _environment;
+    private readonly IConfiguration _configuration;
 
-    public AuthController(CareDbContext context, IOptions<JwtOptions> jwtOptions, IWebHostEnvironment environment)
+    public AuthController(CareDbContext context, IOptions<JwtOptions> jwtOptions, IWebHostEnvironment environment, IConfiguration configuration)
     {
         _context = context;
         _jwtOptions = jwtOptions.Value;
         _environment = environment;
+        _configuration = configuration;
     }
 
     [HttpPost("login")]
@@ -86,6 +88,39 @@ public class AuthController : ControllerBase
         return new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(_jwtOptions.Issuer, _jwtOptions.Audience, claims, expires: DateTime.UtcNow.AddMinutes(_jwtOptions.TokenLifetimeMinutes), signingCredentials: credentials));
     }
 
+    [HttpPost("signup-tenant")]
+    public async Task<IActionResult> SignupTenant(TenantSignupRequest request, CancellationToken cancellationToken)
+    {
+        if (_environment.IsProduction() && !string.Equals(_configuration["TenantSignup:Enabled"], "true", StringComparison.OrdinalIgnoreCase))
+            return NotFound();
+        if (string.IsNullOrWhiteSpace(request.OrganizationName) || string.IsNullOrWhiteSpace(request.BranchName) || string.IsNullOrWhiteSpace(request.AdminName) || string.IsNullOrWhiteSpace(request.AdminEmail) || string.IsNullOrWhiteSpace(request.Password))
+            return BadRequest(new { message = "Organization, branch, admin name, email, and password are required." });
+        if (!request.AdminEmail.Contains('@', StringComparison.Ordinal) || request.AdminEmail.Length > 254)
+            return BadRequest(new { message = "A valid admin email is required." });
+        if (!StrongPassword(request.Password))
+            return BadRequest(new { message = "Password must be at least 12 characters and contain upper, lower, number and symbol characters." });
+
+        var email = request.AdminEmail.Trim().ToLowerInvariant();
+        var userName = string.IsNullOrWhiteSpace(request.AdminUserName) ? email : request.AdminUserName.Trim();
+        if (await _context.AppUsers.AnyAsync(user => user.UserName == userName || user.Email == email, cancellationToken))
+            return Conflict(new { message = "An account already exists for this username or email." });
+        if (await _context.Organizations.AnyAsync(organization => organization.Name == request.OrganizationName.Trim(), cancellationToken))
+            return Conflict(new { message = "An organization with this name already exists." });
+
+        var organizationId = Guid.NewGuid();
+        var branchId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var organization = new Organization(organizationId, request.OrganizationName.Trim(), "Trial", "Setup");
+        var branch = new Branch(branchId, organizationId, request.BranchName.Trim(), string.IsNullOrWhiteSpace(request.Region) ? "Primary" : request.Region.Trim(), "Setup");
+        var admin = new AppUser(userId, userName, email, PasswordHasher.HashPassword(request.Password), UserRole.Administrator, true, organizationId, branchId);
+
+        _context.Organizations.Add(organization);
+        _context.Branches.Add(branch);
+        _context.AppUsers.Add(admin);
+        _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "tenant.signup_created", userName, nameof(Organization), organizationId, DateTimeOffset.UtcNow, organizationId, branchId));
+        await _context.SaveChangesAsync(cancellationToken);
+        return Created($"/api/auth/tenants/{organizationId}", new TenantSignupResponse(organizationId, branchId, userId, organization.Status, organization.Plan));
+    }
     [HttpPost("change-password")]
     public async Task<IActionResult> ChangePassword(ChangePasswordRequest request, CancellationToken cancellationToken)
     {
@@ -234,6 +269,8 @@ public class AuthController : ControllerBase
 }
 
 public sealed record LoginRequest(string UserName,string Password,string? MfaCode=null,string? DeviceName=null);
+public sealed record TenantSignupRequest(string OrganizationName,string BranchName,string AdminName,string AdminEmail,string Password,string? AdminUserName=null,string? Region=null);
+public sealed record TenantSignupResponse(Guid OrganizationId,Guid BranchId,Guid AdminUserId,string Status,string Plan);
 public sealed record ChangePasswordRequest(string UserName,string CurrentPassword,string NewPassword);
 public sealed record RefreshTokenRequest(string RefreshToken);
 public sealed record LogoutRequest(string? RefreshToken);
