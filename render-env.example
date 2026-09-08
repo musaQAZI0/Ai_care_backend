@@ -29,3 +29,10 @@ Supabase__PublicFileBaseUrl=
 # Optional. Enables guarded demo seed/reset endpoints.
 Demo__Enabled=false
 Demo__SeedKey=
+# Optional. Enables one-time controlled pilot dataset seeding through POST /api/pilot/seed.
+# Keep disabled except while seeding, then set back to false after the endpoint succeeds.
+PilotSeed__Enabled=false
+PilotSeed__Key=CHANGE_ME_LONG_RANDOM_SEED_KEY
+PilotSeed__ProviderName=AiCare Controlled Pilot Provider
+PilotSeed__AdminEmail=pilot.admin@aicare.local
+PilotSeed__AdminPassword=CHANGE_ME_STRONG_PILOT_ADMIN_PASSWORD

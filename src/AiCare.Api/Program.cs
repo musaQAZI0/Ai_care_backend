@@ -2136,6 +2136,144 @@ demo.MapDelete("/reset", (HttpContext httpContext, IConfiguration configuration,
     return Results.Ok(new { removedChanges = removed, serviceUsers = demoServiceUserIds.Count, careWorkers = demoWorkerIds.Count });
 });
 
+var pilot = app.MapGroup("/api/pilot");
+pilot.MapPost("/seed", async (HttpContext httpContext, IConfiguration configuration, IWebHostEnvironment environment, CareDbContext context, CancellationToken cancellationToken) =>
+{
+    if (!PilotSeedAccessAllowed(httpContext, configuration))
+    {
+        return Results.NotFound();
+    }
+
+    var providerName = configuration["PilotSeed:ProviderName"] ?? "AiCare Controlled Pilot Provider";
+    var adminEmail = (configuration["PilotSeed:AdminEmail"] ?? "pilot.admin@aicare.local").Trim().ToLowerInvariant();
+    var adminPassword = configuration["PilotSeed:AdminPassword"] ?? "PilotAdmin123!";
+    var now = DateTimeOffset.UtcNow;
+
+    if (adminPassword.Length < 12 || !adminPassword.Any(char.IsUpper) || !adminPassword.Any(char.IsLower) || !adminPassword.Any(char.IsDigit) || !adminPassword.Any(ch => !char.IsLetterOrDigit(ch)))
+    {
+        return Error("PilotSeed:AdminPassword must be at least 12 characters and include upper, lower, number, and symbol characters.");
+    }
+
+    var organization = await context.Organizations.FirstOrDefaultAsync(item => item.Name == providerName, cancellationToken);
+    if (organization is null)
+    {
+        organization = new Organization(Guid.NewGuid(), providerName, "Trial", "Setup");
+        context.Organizations.Add(organization);
+    }
+
+    var branchNames = new[] { "North Branch", "South Branch" };
+    var branches = await context.Branches.Where(item => item.OrganizationId == organization.Id).ToListAsync(cancellationToken);
+    foreach (var branchName in branchNames)
+    {
+        if (branches.All(item => item.Name != branchName))
+        {
+            var branch = new Branch(Guid.NewGuid(), organization.Id, branchName, branchName.StartsWith("North", StringComparison.OrdinalIgnoreCase) ? "North" : "South", "Setup");
+            context.Branches.Add(branch);
+            branches.Add(branch);
+        }
+    }
+    var primaryBranch = branches.First(item => item.Name == "North Branch");
+
+    if (!await context.AppUsers.AnyAsync(item => item.OrganizationId == organization.Id && item.Email == adminEmail, cancellationToken))
+    {
+        context.AppUsers.Add(new AppUser(Guid.NewGuid(), adminEmail, adminEmail, PasswordHasher.HashPassword(adminPassword), UserRole.Administrator, true, organization.Id, primaryBranch.Id));
+    }
+
+    var existingPilotPeople = await context.ServiceUsers.CountAsync(item => item.OrganizationId == organization.Id && item.FullName.StartsWith("Pilot Service User "), cancellationToken);
+    if (existingPilotPeople >= 20)
+    {
+        return Results.Ok(new { organizationId = organization.Id, status = organization.Status, message = "Pilot dataset already exists.", serviceUsers = existingPilotPeople });
+    }
+
+    var workers = await context.CareWorkers.Where(item => item.OrganizationId == organization.Id && item.FullName.StartsWith("Pilot Care Worker ")).ToListAsync(cancellationToken);
+    var specializations = new[] { "Personal care", "Medication support", "Dementia care", "Mobility support", "Nutrition support", "Reablement", "End of life care", "Learning disability support" };
+    for (var i = workers.Count + 1; i <= 8; i++)
+    {
+        var branch = branches[(i - 1) % branches.Count];
+        var worker = new CareWorker(Guid.NewGuid(), $"Pilot Care Worker {i:00}", specializations[(i - 1) % specializations.Length], "Weekdays 07:00-15:00; alternate weekends", 0, 0, "Clear", "Compliant", "10 miles", organization.Id, branch.Id);
+        context.CareWorkers.Add(worker);
+        context.AppUsers.Add(new AppUser(Guid.NewGuid(), $"pilot.worker.{i:00}@aicare.local", $"pilot.worker.{i:00}@aicare.local", PasswordHasher.HashPassword("PilotWorker123!"), UserRole.CareWorker, true, organization.Id, branch.Id, worker.Id));
+        workers.Add(worker);
+    }
+
+    var firstNames = new[] { "Aisha", "Bilal", "Carol", "David", "Elaine", "Farah", "George", "Hannah", "Imran", "Julia", "Khalid", "Linda", "Martin", "Nadia", "Owen", "Priya", "Qasim", "Ruth", "Samina", "Thomas" };
+    var lastNames = new[] { "Ahmed", "Brown", "Clark", "Davies", "Evans", "Farooq", "Green", "Hussain", "Iqbal", "Jones", "Khan", "Lewis", "Morgan", "Nadeem", "ONeill", "Patel", "Qureshi", "Roberts", "Shah", "Taylor" };
+    var needs = new[] { "Morning personal care and breakfast support", "Medication prompts and welfare checks", "Mobility support and meal preparation", "Dementia reassurance visits", "Nutrition monitoring and hydration prompts" };
+    var people = new List<ServiceUser>();
+
+    for (var i = existingPilotPeople + 1; i <= 20; i++)
+    {
+        var worker = workers[(i - 1) % workers.Count];
+        var branch = branches[(i - 1) % branches.Count];
+        var person = new ServiceUser(Guid.NewGuid(), $"Pilot Service User {i:00} - {firstNames[i - 1]} {lastNames[i - 1]}", new DateOnly(1938 + i % 45, 1 + i % 12, 1 + i % 24), $"+44770090{i:000}", needs[(i - 1) % needs.Length], $"Emergency Contact {i:00} +44771100{i:000}", worker.FullName, i % 5 == 0 ? RiskLevel.High : i % 3 == 0 ? RiskLevel.Medium : RiskLevel.Low, "Onboarded", $"{10 + i} Pilot Street, Caretown", i % 5 == 0 ? "Penicillin" : "None known", i % 4 == 0 ? "Diabetes; reduced mobility" : "Long-term care support needs", i % 3 == 0 ? "Local authority" : i % 3 == 1 ? "Private" : "NHS continuing healthcare", i % 2 == 0 ? "Male" : "Female", "", "Independent with support", i % 4 == 0 ? "Mild cognitive impairment" : "No known impairment", "Plain English communication", "Respect daily routine and personal preferences", "Encourage fluids and balanced meals", organization.Id, branch.Id);
+        context.ServiceUsers.Add(person);
+        people.Add(person);
+
+        var plan = new CarePlan(Guid.NewGuid(), person.Id, "v1", "Draft", "Support with washing, dressing, grooming, and daily comfort checks.", "Prompt prescribed medication and record exceptions through eMAR.", "Use agreed moving and handling plan; encourage safe independence.", "Prepare light meals, encourage fluids, and record appetite concerns.", now.AddDays(60 + i), organization.Id, branch.Id);
+        context.CarePlans.Add(plan);
+        context.RiskAssessments.Add(new RiskAssessment(Guid.NewGuid(), person.Id, i % 5 == 0 ? "Falls" : "General wellbeing", person.Risk, "Follow care plan, escalate changes, and review after incidents.", now.AddDays(30 + i), organization.Id, branch.Id));
+
+        if (i <= 10)
+        {
+            var family = new FamilyMember(Guid.NewGuid(), person.Id, $"Pilot Family Contact {i:00}", $"pilot.family.{i:00}@aicare.local", i % 2 == 0 ? "Son" : "Daughter", "Portal updates", "Invited", organization.Id, branch.Id);
+            context.FamilyMembers.Add(family);
+            context.AppUsers.Add(new AppUser(Guid.NewGuid(), family.Email, family.Email, PasswordHasher.HashPassword("PilotFamily123!"), UserRole.FamilyMember, true, organization.Id, branch.Id, null, family.Id));
+        }
+
+        if (i <= 14)
+        {
+            context.Medications.Add(new Medication(Guid.NewGuid(), person.Id, i % 2 == 0 ? "Paracetamol" : "Ramipril", i % 2 == 0 ? "500mg" : "2.5mg", "Oral", i % 2 == 0 ? "08:00, 20:00" : "08:00", false, "Pilot Community Pharmacy", "Check MAR and allergy record before administration", organization.Id, branch.Id));
+        }
+    }
+
+    await context.SaveChangesAsync(cancellationToken);
+
+    people = await context.ServiceUsers.Where(item => item.OrganizationId == organization.Id && item.FullName.StartsWith("Pilot Service User ")).OrderBy(item => item.FullName).ToListAsync(cancellationToken);
+    var medications = await context.Medications.Where(item => item.OrganizationId == organization.Id && people.Select(person => person.Id).Contains(item.ServiceUserId)).ToListAsync(cancellationToken);
+    var start = now.Date.AddDays(1).AddHours(7);
+    var visitCount = 0;
+    var marCount = 0;
+    for (var day = 0; day < 7; day++)
+    {
+        for (var i = 0; i < people.Count; i++)
+        {
+            var person = people[i];
+            var worker = workers[i % workers.Count];
+            var visitExists = await context.Visits.AnyAsync(item => item.OrganizationId == organization.Id && item.ServiceUserId == person.Id && item.StartsAt.Date == start.AddDays(day).Date, cancellationToken);
+            if (visitExists) continue;
+            var branch = person.BranchId ?? primaryBranch.Id;
+            var startsAt = start.AddDays(day).AddMinutes(i * 35);
+            var visit = new Visit(Guid.NewGuid(), person.Id, worker.Id, startsAt, startsAt.Hour < 12 ? "Morning care" : startsAt.Hour < 16 ? "Lunchtime support" : "Tea visit", 30, worker.Specialization, VisitStatus.Scheduled, null, null, null, null, null, null, organization.Id, branch);
+            context.Visits.Add(visit);
+            visitCount++;
+            var medication = medications.FirstOrDefault(item => item.ServiceUserId == person.Id);
+            if (medication is not null && day < 5)
+            {
+                context.MedicationAdministrationRecords.Add(new MedicationAdministrationRecord(Guid.NewGuid(), medication.Id, visit.Id, worker.Id, startsAt.AddMinutes(10), null, "Scheduled", "Pilot scheduled medication prompt", organization.Id, branch));
+                marCount++;
+            }
+        }
+    }
+
+    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "pilot.seeded", "pilot-seed", nameof(Organization), organization.Id, now, organization.Id, primaryBranch.Id));
+    await context.SaveChangesAsync(cancellationToken);
+
+    return Results.Created("/api/pilot/seed", new
+    {
+        organizationId = organization.Id,
+        provider = organization.Name,
+        adminEmail,
+        branches = await context.Branches.CountAsync(item => item.OrganizationId == organization.Id, cancellationToken),
+        staff = await context.CareWorkers.CountAsync(item => item.OrganizationId == organization.Id && item.FullName.StartsWith("Pilot Care Worker "), cancellationToken),
+        serviceUsers = await context.ServiceUsers.CountAsync(item => item.OrganizationId == organization.Id && item.FullName.StartsWith("Pilot Service User "), cancellationToken),
+        carePlans = await context.CarePlans.CountAsync(item => item.OrganizationId == organization.Id, cancellationToken),
+        visitsCreated = visitCount,
+        medications = await context.Medications.CountAsync(item => item.OrganizationId == organization.Id, cancellationToken),
+        marRecordsCreated = marCount,
+        familyMembers = await context.FamilyMembers.CountAsync(item => item.OrganizationId == organization.Id, cancellationToken),
+        status = organization.Status
+    });
+});
 app.Run();
 
 static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSpace);
@@ -2695,6 +2833,9 @@ static IResult CompleteMedicationAdministration(Guid id, string outcome, Complet
     var denied = RequireAssignedVisitForCareWorker(record.VisitId, context, tenant, currentUser);
     if (denied is not null) return denied;
 
+    if (outcome is "Refused" or "Missed" or "Held" && string.IsNullOrWhiteSpace(request.Notes)) return Results.BadRequest(new { message = "A reason/note is required for refused, missed, or held medication outcomes." });
+    if (record.Outcome != "Scheduled") return Results.Conflict(new { message = "Medication administration record already has a final outcome." });
+
     var completed = record with
     {
         AdministeredAt = request.AdministeredAt ?? DateTimeOffset.UtcNow,
@@ -2707,6 +2848,18 @@ static IResult CompleteMedicationAdministration(Guid id, string outcome, Complet
     return Results.Ok(completed);
 }
 
+static bool PilotSeedAccessAllowed(HttpContext httpContext, IConfiguration configuration)
+{
+    if (!string.Equals(configuration["PilotSeed:Enabled"], "true", StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    var expectedKey = configuration["PilotSeed:Key"];
+    return !string.IsNullOrWhiteSpace(expectedKey) &&
+        httpContext.Request.Headers.TryGetValue("X-Pilot-Seed-Key", out var providedKey) &&
+        string.Equals(providedKey.ToString(), expectedKey, StringComparison.Ordinal);
+}
 static bool DemoAccessAllowed(HttpContext httpContext, IConfiguration configuration, IWebHostEnvironment environment)
 {
     if (environment.IsProduction())
