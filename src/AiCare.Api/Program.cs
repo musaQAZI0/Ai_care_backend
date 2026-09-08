@@ -2180,10 +2180,6 @@ pilot.MapPost("/seed", async (HttpContext httpContext, IConfiguration configurat
     }
 
     var existingPilotPeople = await context.ServiceUsers.CountAsync(item => item.OrganizationId == organization.Id && item.FullName.StartsWith("Pilot Service User "), cancellationToken);
-    if (existingPilotPeople >= 20)
-    {
-        return Results.Ok(new { organizationId = organization.Id, status = organization.Status, message = "Pilot dataset already exists.", serviceUsers = existingPilotPeople });
-    }
 
     var workers = await context.CareWorkers.Where(item => item.OrganizationId == organization.Id && item.FullName.StartsWith("Pilot Care Worker ")).ToListAsync(cancellationToken);
     var specializations = new[] { "Personal care", "Medication support", "Dementia care", "Mobility support", "Nutrition support", "Reablement", "End of life care", "Learning disability support" };
@@ -2230,7 +2226,7 @@ pilot.MapPost("/seed", async (HttpContext httpContext, IConfiguration configurat
 
     people = await context.ServiceUsers.Where(item => item.OrganizationId == organization.Id && item.FullName.StartsWith("Pilot Service User ")).OrderBy(item => item.FullName).ToListAsync(cancellationToken);
     var medications = await context.Medications.Where(item => item.OrganizationId == organization.Id && people.Select(person => person.Id).Contains(item.ServiceUserId)).ToListAsync(cancellationToken);
-    var start = now.Date.AddDays(1).AddHours(7);
+    var start = new DateTimeOffset(now.UtcDateTime.Date.AddDays(1).AddHours(7), TimeSpan.Zero);
     var visitCount = 0;
     var marCount = 0;
     for (var day = 0; day < 7; day++)
