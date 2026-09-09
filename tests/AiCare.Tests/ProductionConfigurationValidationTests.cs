@@ -131,6 +131,45 @@ public sealed class ProductionConfigurationValidationTests
         Assert.Contains("Demo:Enabled must be false", exception.Message);
     }
 
+    [Fact]
+    public void ProductionRequiresMonitoringAndRestoreEvidence()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Monitoring:Enabled"] = "false",
+            ["Monitoring:Provider"] = "",
+            ["Monitoring:AlertContact"] = "",
+            ["Backup:RestoreTested"] = "false",
+            ["Backup:Provider"] = "",
+            ["Backup:Schedule"] = "",
+            ["Backup:RestoreRunbookUrl"] = "",
+            ["Backup:Rpo"] = "",
+            ["Backup:Rto"] = ""
+        });
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
+        Assert.Contains("Monitoring:Enabled must be true", exception.Message);
+        Assert.Contains("Monitoring:Provider is required", exception.Message);
+        Assert.Contains("Backup:RestoreTested must be true", exception.Message);
+        Assert.Contains("Backup:RestoreRunbookUrl is required", exception.Message);
+    }
+
+    [Fact]
+    public void EnabledProductionEmarRequiresClinicalSafetyApprovalEvidence()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["MedicationSafety:EmarProductionEnabled"] = "true",
+            ["MedicationSafety:ClinicalSafetyOfficer"] = "",
+            ["MedicationSafety:MedicationSafetyLead"] = "",
+            ["MedicationSafety:ClinicalSafetyCaseReference"] = "",
+            ["MedicationSafety:MedicationUatEvidenceReference"] = ""
+        });
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
+        Assert.Contains("MedicationSafety:ClinicalSafetyOfficer is required", exception.Message);
+        Assert.Contains("MedicationSafety:MedicationSafetyLead is required", exception.Message);
+        Assert.Contains("MedicationSafety:ClinicalSafetyCaseReference is required", exception.Message);
+        Assert.Contains("MedicationSafety:MedicationUatEvidenceReference is required", exception.Message);
+    }
     private const string ValidSigningKey = "prod-test-signing-key-2026-very-long-and-random-value";
     private const string ValidEmailPassword = "smtp-test-only-secret-value";
 
@@ -158,7 +197,21 @@ public sealed class ProductionConfigurationValidationTests
             ["Email:FromAddress"] = "no-reply@care.example.com",
             ["Email:FromName"] = "AiCare",
             ["Email:EnableSsl"] = "true",
-            ["Demo:Enabled"] = "false"
+            ["Demo:Enabled"] = "false",
+            ["Monitoring:Enabled"] = "true",
+            ["Monitoring:Provider"] = "Render logs + uptime monitor",
+            ["Monitoring:AlertContact"] = "ops@care.example.com",
+            ["Backup:Provider"] = "Managed PostgreSQL PITR",
+            ["Backup:Schedule"] = "Daily full backup plus PITR",
+            ["Backup:RestoreRunbookUrl"] = "https://care.example.com/runbooks/restore",
+            ["Backup:Rpo"] = "24h",
+            ["Backup:Rto"] = "4h",
+            ["Backup:RestoreTested"] = "true",
+            ["MedicationSafety:EmarProductionEnabled"] = "false",
+            ["MedicationSafety:ClinicalSafetyOfficer"] = "",
+            ["MedicationSafety:MedicationSafetyLead"] = "",
+            ["MedicationSafety:ClinicalSafetyCaseReference"] = "",
+            ["MedicationSafety:MedicationUatEvidenceReference"] = ""
         };
         if (overrides is not null)
         {

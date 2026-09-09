@@ -1096,12 +1096,16 @@ phase1.MapPost("/mar", (CreateMedicationAdministrationRecordRequest request, Car
     context.SaveChanges();
     return Results.Created($"/api/phase1/mar/{record.Id}", record);
 });
-phase1.MapPost("/mar/{id:guid}/administer", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-    CompleteMedicationAdministration(id, "Administered", request, context, tenant, currentUser));
-phase1.MapPost("/mar/{id:guid}/skip", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-    CompleteMedicationAdministration(id, "Skipped", request, context, tenant, currentUser));
-phase1.MapPost("/mar/{id:guid}/refuse", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-    CompleteMedicationAdministration(id, "Refused", request, context, tenant, currentUser));
+phase1.MapPost("/mar/{id:guid}/administer", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) =>
+    CompleteMedicationAdministration(id, "Administered", request, context, tenant, currentUser, configuration));
+phase1.MapPost("/mar/{id:guid}/skip", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) =>
+    CompleteMedicationAdministration(id, "Missed", request, context, tenant, currentUser, configuration));
+phase1.MapPost("/mar/{id:guid}/refuse", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) =>
+    CompleteMedicationAdministration(id, "Refused", request, context, tenant, currentUser, configuration));
+phase1.MapPost("/mar/{id:guid}/missed", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) =>
+    CompleteMedicationAdministration(id, "Missed", request, context, tenant, currentUser, configuration));
+phase1.MapPost("/mar/{id:guid}/held", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) =>
+    CompleteMedicationAdministration(id, "Held", request, context, tenant, currentUser, configuration));
 phase1.MapGet("/care-notes", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (!currentUser.IsCareWorker)
@@ -2818,11 +2822,18 @@ static IResult? ValidateMedicationAdministrationReferences(Guid medicationId, Gu
         return Error("Medication and visit must belong to the same service user.");
     }
 
+    var profile = context.Database.SqlQueryRaw<int>("select 1 as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and reconciliation_status='Verified' and last_reconciled_at is not null and reconciled_by<>'' limit 1", medicationId, tenant.OrganizationId).Any();
+    if (!profile)
+    {
+        return Error("Medication must have a verified reconciliation profile before MAR scheduling.");
+    }
+
     return ValidateCareWorkerReference(careWorkerId, context, tenant);
 }
 
-static IResult CompleteMedicationAdministration(Guid id, string outcome, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+static IResult CompleteMedicationAdministration(Guid id, string outcome, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration)
 {
+    if (!configuration.GetValue<bool>("MedicationSafety:EmarProductionEnabled")) return Results.Json(new { message = "eMAR administration is disabled until the medication clinical-safety gate is approved." }, statusCode: StatusCodes.Status423Locked);
     var record = context.MedicationAdministrationRecords.Find(id);
     if (record is null || !tenant.CanAccess(record.OrganizationId, record.BranchId)) return Results.NotFound();
 
@@ -2836,7 +2847,7 @@ static IResult CompleteMedicationAdministration(Guid id, string outcome, Complet
     {
         AdministeredAt = request.AdministeredAt ?? DateTimeOffset.UtcNow,
         Outcome = outcome,
-        Notes = request.Notes
+        Notes = request.Notes?.Trim() ?? ""
     };
     context.Entry(record).CurrentValues.SetValues(completed);
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"emar.{outcome.ToLowerInvariant()}", currentUser.UserName, nameof(MedicationAdministrationRecord), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));

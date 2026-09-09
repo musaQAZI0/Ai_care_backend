@@ -114,6 +114,30 @@ public static class ProductionConfigurationValidator
             errors.Add("Demo:Enabled must be false in Production.");
         }
 
+        if (!configuration.GetValue<bool>("Monitoring:Enabled"))
+        {
+            errors.Add("Monitoring:Enabled must be true in Production.");
+        }
+        Require(configuration["Monitoring:Provider"], "Monitoring:Provider", errors);
+        Require(configuration["Monitoring:AlertContact"], "Monitoring:AlertContact", errors);
+
+        if (configuration.GetValue<bool>("MedicationSafety:EmarProductionEnabled"))
+        {
+            Require(configuration["MedicationSafety:ClinicalSafetyOfficer"], "MedicationSafety:ClinicalSafetyOfficer", errors);
+            Require(configuration["MedicationSafety:MedicationSafetyLead"], "MedicationSafety:MedicationSafetyLead", errors);
+            Require(configuration["MedicationSafety:ClinicalSafetyCaseReference"], "MedicationSafety:ClinicalSafetyCaseReference", errors);
+            Require(configuration["MedicationSafety:MedicationUatEvidenceReference"], "MedicationSafety:MedicationUatEvidenceReference", errors);
+        }
+
+        if (!configuration.GetValue<bool>("Backup:RestoreTested"))
+        {
+            errors.Add("Backup:RestoreTested must be true before Production pilot use.");
+        }
+        Require(configuration["Backup:Provider"], "Backup:Provider", errors);
+        Require(configuration["Backup:Schedule"], "Backup:Schedule", errors);
+        Require(configuration["Backup:RestoreRunbookUrl"], "Backup:RestoreRunbookUrl", errors);
+        Require(configuration["Backup:Rpo"], "Backup:Rpo", errors);
+        Require(configuration["Backup:Rto"], "Backup:Rto", errors);
         if (errors.Count > 0)
         {
             throw new InvalidOperationException(

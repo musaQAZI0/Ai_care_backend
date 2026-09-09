@@ -79,7 +79,11 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
             reorderLevel = 5m,
             requiresWitness = false,
             lastReconciledAt = DateTimeOffset.UtcNow,
-            reconciledBy = "Regression Admin"
+            reconciledBy = "Regression Admin",
+            reconciliationStatus = "Verified",
+            sourceType = "Prescription",
+            sourceReference = "RX-REG-2",
+            changeReason = "Initial verified reconciliation"
         });
         Assert.Equal(HttpStatusCode.OK, profile.StatusCode);
         Assert.Contains("Dr Regression", await profile.Content.ReadAsStringAsync());
@@ -169,6 +173,42 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
         return (await response.Content.ReadFromJsonAsync<LoginResponse>())!;
     }
 
+
+    [Fact]
+    public async Task MedicationReconciliationSourceEvidenceIsRequiredBeforeVerifiedProfile()
+    {
+        await _factory.EnsureClinicalSeedAsync();
+        var client = _factory.CreateClient();
+        var login = await Login(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.Token);
+        await StepUpTestGrants.GrantAsync(_factory, client, "medication");
+
+        var profile = await client.PutAsJsonAsync($"/api/phase1/medication-safety/medications/{RegressionIds.MedicationId}/profile", new
+        {
+            indication = "Pain management",
+            prescriber = "Dr Regression",
+            form = "Tablet",
+            strength = "500 mg",
+            startDate = DateTimeOffset.UtcNow.AddDays(-1),
+            endDate = (DateTimeOffset?)null,
+            doseWindowMinutes = 60,
+            maxPrnDoses24h = 4,
+            minPrnIntervalMinutes = 240,
+            prnIndication = "Pain score 4 or above",
+            prnEffectReviewMinutes = 60,
+            stockOnHand = 20m,
+            reorderLevel = 5m,
+            requiresWitness = false,
+            lastReconciledAt = DateTimeOffset.UtcNow,
+            reconciledBy = "Regression Admin",
+            reconciliationStatus = "Verified",
+            sourceType = "",
+            sourceReference = "",
+            changeReason = ""
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, profile.StatusCode);
+        Assert.Contains("source", await profile.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+    }
     private sealed record LoginResponse(string Token, string RefreshToken, int ExpiresInMinutes);
     private sealed record CreatedId(Guid Id);
     private sealed record SafeguardingCaseResponse(Guid Id, string Status);
@@ -189,7 +229,12 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>
             ["JwtOptions:Audience"] = "AiCareClient",
             ["JwtOptions:SigningKey"] = "regression-signing-key-with-enough-length-for-hmac-2026",
             ["JwtOptions:TokenLifetimeMinutes"] = "30",
-            ["Storage:Provider"] = "Local"
+            ["Storage:Provider"] = "Local",
+            ["MedicationSafety:EmarProductionEnabled"] = "true",
+            ["MedicationSafety:ClinicalSafetyOfficer"] = "Regression CSO",
+            ["MedicationSafety:MedicationSafetyLead"] = "Regression medication lead",
+            ["MedicationSafety:ClinicalSafetyCaseReference"] = "REG-EMAR-SAFETY",
+            ["MedicationSafety:MedicationUatEvidenceReference"] = "REG-EMAR-UAT"
         }));
         builder.ConfigureServices(services =>
         {
