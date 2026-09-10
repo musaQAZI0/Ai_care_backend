@@ -585,7 +585,12 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
                 ["JwtOptions:Audience"] = "AiCareClient",
                 ["JwtOptions:SigningKey"] = "test-signing-key-with-enough-length-for-hmac",
                 ["JwtOptions:TokenLifetimeMinutes"] = "120",
-                ["RateLimiting:AuthPermitLimit"] = "1000"
+                ["RateLimiting:AuthPermitLimit"] = "1000",
+                ["MedicationSafety:EmarProductionEnabled"] = "true",
+                ["MedicationSafety:ClinicalSafetyOfficer"] = "Permission regression CSO",
+                ["MedicationSafety:MedicationSafetyLead"] = "Permission regression medication lead",
+                ["MedicationSafety:ClinicalSafetyCaseReference"] = "PERMISSION-REG-EMAR-SAFETY",
+                ["MedicationSafety:MedicationUatEvidenceReference"] = "PERMISSION-REG-EMAR-UAT"
             });
         });
         builder.ConfigureServices(services =>
