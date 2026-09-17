@@ -22,21 +22,31 @@ public class AuthController : ControllerBase
     private readonly JwtOptions _jwtOptions;
     private readonly IWebHostEnvironment _environment;
     private readonly IConfiguration _configuration;
+    private readonly ILogger<AuthController> _logger;
 
-    public AuthController(CareDbContext context, IOptions<JwtOptions> jwtOptions, IWebHostEnvironment environment, IConfiguration configuration)
+    public AuthController(CareDbContext context, IOptions<JwtOptions> jwtOptions, IWebHostEnvironment environment, IConfiguration configuration, ILogger<AuthController> logger)
     {
         _context = context;
         _jwtOptions = jwtOptions.Value;
         _environment = environment;
         _configuration = configuration;
+        _logger = logger;
     }
 
     [HttpPost("login")]
     public async Task<IActionResult> Login(LoginRequest request, CancellationToken cancellationToken)
     {
         var user = await _context.AppUsers.SingleOrDefaultAsync(u => u.UserName == request.UserName && u.IsActive, cancellationToken);
-        if (user is not null && await IsLockedOut(user.Id, cancellationToken))
-            return StatusCode(423, new { message = "Account temporarily locked after repeated failed sign-in attempts." });
+        try
+        {
+            if (user is not null && await IsLockedOut(user.Id, cancellationToken))
+                return StatusCode(423, new { message = "Account temporarily locked after repeated failed sign-in attempts." });
+        }
+        catch (AuthenticationStateUnavailableException exception)
+        {
+            _logger.LogError(exception, "Authentication lockout state could not be verified for user {UserName}", request.UserName);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { message = "Authentication security state is temporarily unavailable." });
+        }
 
         if (user is null || !PasswordHasher.VerifyPassword(request.Password, user.PasswordHash))
         {
@@ -44,8 +54,19 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Invalid credentials." });
         }
 
-        var mfa = await GetMfaState(user.Id, cancellationToken);
-        if (!mfa.Enabled && await IsMfaRequired(user, cancellationToken))
+        (bool Enabled, string Secret, DateTimeOffset? LockedUntil) mfa;
+        bool mfaRequired;
+        try
+        {
+            mfa = await GetMfaState(user.Id, cancellationToken);
+            mfaRequired = !mfa.Enabled && await IsMfaRequired(user, cancellationToken);
+        }
+        catch (AuthenticationStateUnavailableException exception)
+        {
+            _logger.LogError(exception, "Authentication MFA state could not be verified for user {UserName}", request.UserName);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { message = "Authentication security state is temporarily unavailable." });
+        }
+        if (mfaRequired)
         {
             await ClearFailedLogins(user.Id, cancellationToken);
             return Ok(new { token = CreateJwtToken(user, true), refreshToken = "", expiresInMinutes = 10, mfaEnrollmentRequired = true });
@@ -234,15 +255,15 @@ public class AuthController : ControllerBase
     private static string CreateOpaqueToken() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(48)).Replace("+","-").Replace("/","_").TrimEnd('=');
     private static string HashToken(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
 
-    private async Task<bool> IsLockedOut(Guid userId,CancellationToken ct){try{var row=await QuerySecurity(userId,ct);return row.LockoutUntil>DateTimeOffset.UtcNow;}catch{return false;}}
+    private async Task<bool> IsLockedOut(Guid userId,CancellationToken ct){try{var row=await QuerySecurity(userId,ct);return row.LockoutUntil>DateTimeOffset.UtcNow;}catch(Exception ex){throw new AuthenticationStateUnavailableException("Lockout state unavailable.",ex);}}
     private async Task RecordFailedLogin(Guid userId,CancellationToken ct){try{await Execute("insert into auth_user_security(user_id,failed_attempts,updated_at) values(@id,1,now()) on conflict(user_id) do update set failed_attempts=auth_user_security.failed_attempts+1,lockout_until=case when auth_user_security.failed_attempts+1>=5 then now()+interval '15 minutes' else auth_user_security.lockout_until end,updated_at=now()",c=>Add(c,"id",userId),ct);}catch{}}
     private async Task ClearFailedLogins(Guid userId,CancellationToken ct){try{await Execute("insert into auth_user_security(user_id,failed_attempts,lockout_until,updated_at) values(@id,0,null,now()) on conflict(user_id) do update set failed_attempts=0,lockout_until=null,updated_at=now()",c=>Add(c,"id",userId),ct);}catch{}}
-    private async Task<(bool Enabled,string Secret,DateTimeOffset? LockedUntil)> GetMfaState(Guid userId,CancellationToken ct){try{var x=await QuerySecurity(userId,ct);return(x.MfaEnabled,string.IsNullOrWhiteSpace(x.MfaSecret)?"":MfaSecurity.Unprotect(x.MfaSecret,_jwtOptions.SigningKey),x.MfaLockedUntil);}catch{return(false,"",null);}}
-    private async Task<(int FailedAttempts,DateTimeOffset? LockoutUntil,string? MfaSecret,bool MfaEnabled,DateTimeOffset? MfaLockedUntil)> QuerySecurity(Guid id,CancellationToken ct){var connection=_context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(ct);try{await using var cmd=connection.CreateCommand();cmd.CommandText="select failed_attempts,lockout_until,mfa_secret,mfa_enabled,mfa_locked_until from auth_user_security where user_id=@id";Add(cmd,"id",id);await using var r=await cmd.ExecuteReaderAsync(ct);if(!await r.ReadAsync(ct))return(0,null,null,false,null);return(r.GetInt32(0),r.IsDBNull(1)?null:new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(1),DateTimeKind.Utc)),r.IsDBNull(2)?null:r.GetString(2),r.GetBoolean(3),r.IsDBNull(4)?null:new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(4),DateTimeKind.Utc)));}finally{if(opened)await connection.CloseAsync();}}
+    private async Task<(bool Enabled,string Secret,DateTimeOffset? LockedUntil)> GetMfaState(Guid userId,CancellationToken ct){try{var x=await QuerySecurity(userId,ct);return(x.MfaEnabled,string.IsNullOrWhiteSpace(x.MfaSecret)?"":MfaSecurity.Unprotect(x.MfaSecret,_jwtOptions.SigningKey),x.MfaLockedUntil);}catch(Exception ex){throw new AuthenticationStateUnavailableException("MFA state unavailable.",ex);}}
+    private async Task<(int FailedAttempts,DateTimeOffset? LockoutUntil,string? MfaSecret,bool MfaEnabled,DateTimeOffset? MfaLockedUntil)> QuerySecurity(Guid id,CancellationToken ct){if(!_context.Database.IsNpgsql() && _configuration.GetValue<bool>("Authentication:AllowLegacyProviderFallback"))return(0,null,null,false,null);var connection=_context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(ct);try{await using var cmd=connection.CreateCommand();cmd.CommandText="select failed_attempts,lockout_until,mfa_secret,mfa_enabled,mfa_locked_until from auth_user_security where user_id=@id";Add(cmd,"id",id);await using var r=await cmd.ExecuteReaderAsync(ct);if(!await r.ReadAsync(ct))return(0,null,null,false,null);return(r.GetInt32(0),r.IsDBNull(1)?null:new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(1),DateTimeKind.Utc)),r.IsDBNull(2)?null:r.GetString(2),r.GetBoolean(3),r.IsDBNull(4)?null:new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(4),DateTimeKind.Utc)));}finally{if(opened)await connection.CloseAsync();}}
     private async Task<bool> SaveMfaSecret(Guid id,string secret,bool enabled,CancellationToken ct){try{await Execute("insert into auth_user_security(user_id,mfa_secret,mfa_enabled,mfa_status,mfa_verified_at,updated_at) values(@id,@secret,@enabled,@status,case when @enabled then now() else null end,now()) on conflict(user_id) do update set mfa_secret=@secret,mfa_enabled=@enabled,mfa_status=@status,mfa_verified_at=case when @enabled then now() else auth_user_security.mfa_verified_at end,updated_at=now()",c=>{Add(c,"id",id);Add(c,"secret",secret);Add(c,"enabled",enabled);Add(c,"status",enabled?"Active":"Pending");},ct);return true;}catch{return false;}}
     private async Task RecordFailedMfa(AppUser user,CancellationToken ct){try{await Execute("update auth_user_security set mfa_failed_attempts=mfa_failed_attempts+1,mfa_locked_until=case when mfa_failed_attempts+1>=5 then now()+interval '15 minutes' else mfa_locked_until end,updated_at=now() where user_id=@id",c=>Add(c,"id",user.Id),ct);_context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"security.mfa_challenge_failed",user.UserName,nameof(AppUser),user.Id,DateTimeOffset.UtcNow,user.OrganizationId,user.BranchId));await _context.SaveChangesAsync(ct);}catch{}}
     private async Task<bool> ConsumeRecoveryCode(Guid userId,string? code,CancellationToken ct){if(string.IsNullOrWhiteSpace(code)||code.Length<10)return false;try{var hash=MfaSecurity.HashRecoveryCode(code,userId,_jwtOptions.SigningKey);var changed=await ExecuteCount("update auth_mfa_recovery_codes set used_at=now() where user_id=@user and code_hash=@hash and used_at is null and invalidated_at is null",c=>{Add(c,"user",userId);Add(c,"hash",hash);},ct);if(changed>0){var user=await _context.AppUsers.SingleAsync(x=>x.Id==userId,ct);_context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"security.mfa_recovery_used",user.UserName,nameof(AppUser),user.Id,DateTimeOffset.UtcNow,user.OrganizationId,user.BranchId));await _context.SaveChangesAsync(ct);return true;}return false;}catch{return false;}}
-    private async Task<bool> IsMfaRequired(AppUser user,CancellationToken ct){try{var connection=_context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(ct);try{await using var cmd=connection.CreateCommand();cmd.CommandText="select exists(select 1 from auth_mfa_policies where organization_id=@organization and enabled=true and effective_at+grace_period_days*interval '1 day'<=now() and @role=any(required_roles) and (branch_id is null or branch_id=@branch))";Add(cmd,"organization",user.OrganizationId??TenantDefaults.OrganizationId);Add(cmd,"branch",user.BranchId??TenantDefaults.BranchId);Add(cmd,"role",user.Role.ToString());return Convert.ToBoolean(await cmd.ExecuteScalarAsync(ct));}finally{if(opened)await connection.CloseAsync();}}catch{return false;}}
+    private async Task<bool> IsMfaRequired(AppUser user,CancellationToken ct){if(!_context.Database.IsNpgsql() && _configuration.GetValue<bool>("Authentication:AllowLegacyProviderFallback"))return false;try{var connection=_context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(ct);try{await using var cmd=connection.CreateCommand();cmd.CommandText="select exists(select 1 from auth_mfa_policies where organization_id=@organization and enabled=true and effective_at+grace_period_days*interval '1 day'<=now() and @role=any(required_roles) and (branch_id is null or branch_id=@branch))";Add(cmd,"organization",user.OrganizationId??TenantDefaults.OrganizationId);Add(cmd,"branch",user.BranchId??TenantDefaults.BranchId);Add(cmd,"role",user.Role.ToString());return Convert.ToBoolean(await cmd.ExecuteScalarAsync(ct));}finally{if(opened)await connection.CloseAsync();}}catch(Exception ex){throw new AuthenticationStateUnavailableException("MFA policy unavailable.",ex);}}
 
     private async Task CreateSession(AppUser user,Guid session,Guid family,string? device,CancellationToken ct){var agent=Request.Headers.UserAgent.ToString();var agentHash=HashToken(agent);var ip=HttpContext.Connection.RemoteIpAddress?.ToString()??"unknown";await Execute("insert into auth_sessions(id,user_id,organization_id,branch_id,token_family_id,device_name,user_agent_hash,ip_address,expires_at) values(@id,@user,@organization,@branch,@family,@device,@agent,@ip,now()+interval '7 days');insert into auth_session_events(id,session_id,user_id,organization_id,event_type,detail,actor) values(@event,@id,@user,@organization,'Created','Authenticated session created',@actor)",c=>{Add(c,"id",session);Add(c,"user",user.Id);Add(c,"organization",user.OrganizationId??TenantDefaults.OrganizationId);Add(c,"branch",user.BranchId);Add(c,"family",family);Add(c,"device",string.IsNullOrWhiteSpace(device)?"Web browser":device.Trim()[..Math.Min(device.Trim().Length,80)]);Add(c,"agent",agentHash);Add(c,"ip",ip);Add(c,"event",Guid.NewGuid());Add(c,"actor",user.UserName);},ct);}
     private async Task StoreRefreshToken(Guid userId,string token,string? ip,CancellationToken ct,Guid? sessionId=null,Guid? familyId=null,Guid? parentId=null){if(!_context.Database.IsNpgsql())return;await Execute("insert into auth_refresh_tokens(id,user_id,token_hash,expires_at,created_at,created_ip,session_id,token_family_id,parent_token_id) values(@id,@user,@hash,@expires,now(),@ip,@session,@family,@parent)",c=>{Add(c,"id",Guid.NewGuid());Add(c,"user",userId);Add(c,"hash",HashToken(token));Add(c,"expires",DateTime.UtcNow.AddDays(7));Add(c,"ip",ip??HttpContext.Connection.RemoteIpAddress?.ToString()??"");Add(c,"session",sessionId);Add(c,"family",familyId);Add(c,"parent",parentId);},ct);}
@@ -279,3 +300,8 @@ public sealed record LogoutRequest(string? RefreshToken);
 public sealed record ForgotPasswordRequest(string Email);
 public sealed record ResetPasswordRequest(string ResetToken,string NewPassword);
 public sealed record MfaVerifyRequest(string Code);
+
+public sealed class AuthenticationStateUnavailableException : Exception
+{
+    public AuthenticationStateUnavailableException(string message, Exception innerException) : base(message, innerException) { }
+}
