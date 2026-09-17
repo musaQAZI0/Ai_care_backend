@@ -12,7 +12,8 @@ The audit does **not** treat the existence of a controller or endpoint as proof 
 - 🟡 **Needs Improvement** — functionality exists but architecture, consistency, maintainability, validation, or workflow should be improved.
 - 🔴 **Potential Bug** — code evidence indicates behavior that may be incorrect and requires correction/verification.
 - ⚫ **Missing** — expected first-class functionality has not been found in the audited area.
-- 🟠 **Production Risk** — implementation may work normally but has a reliability, security, concurrency, safety, or governance risk that should be addressed before serious production rollout.
+- 🟠 **Production Risk** — reliability, security, concurrency, safety, data-integrity, or governance risk to address before serious production rollout.
+- ⏳ **Pending** — deep audit not yet completed.
 
 ---
 
@@ -20,7 +21,7 @@ The audit does **not** treat the existence of a controller or endpoint as proof 
 
 | Module | Status | Current audit conclusion |
 |---|---|---|
-| Authentication & Security | 🟢 🟡 | Strong security foundation; controller is oversized and mixes security persistence/business logic |
+| Authentication & Security | 🟢 🟡 | Strong security foundation; controller is oversized and mixes persistence/security/business logic |
 | Platform Middleware | 🟢 | JWT, rate limiting, session validation, MFA restrictions, security headers and privileged controls present |
 | Multi-Tenancy | 🟢 🟠 | Organisation/branch scoping is widespread; branch semantics need systematic verification |
 | Person / Service User Lifecycle | 🟢 🟡 | Substantial admission/transfer/discharge and governance workflows |
@@ -33,26 +34,28 @@ The audit does **not** treat the existence of a controller or endpoint as proof 
 | Care Documentation | 🟢 🟡 | Amendments, review, alerts and timeline present; stronger immutable version model preferred |
 | Incidents | 🟢 🟡 | Investigation, CAPA and controlled closure are implemented |
 | Capacity / Authority / Best Interest | 🟢 🟡 | Decision-specific capacity, best-interest evidence and authority versioning/revocation present |
-| Safeguarding | 🟡 | Functionality appears distributed rather than isolated; dedicated deep audit still pending |
+| Safeguarding | 🟡 | Dedicated controller is present; deep permission/workflow audit still pending |
 | Medication Safety | 🟢 🟡 | Reconciliation/version/history foundation is strong |
 | Native eMAR Administration | 🟢 🟠 | Strong safety gates; stock concurrency requires hardening |
 | PRN | 🟢 🟡 | Limits, intervals and effect review are implemented |
 | Medication Stock | 🟢 🟠 | Transaction/history/witness flows exist; lost-update concurrency risk identified |
 | eMAR Corrections / Ledger | 🟢 🟡 | Append-only correction events preserve original ledger event; architecture should be consolidated |
-| Workforce | ⏳ | Next audit batch |
-| Timesheets | ⏳ | Pending |
-| Finance | ⏳ | Pending |
-| Messaging | ⏳ | Pending |
-| Notifications | ⏳ | Pending |
-| Family Portal | ⏳ | Pending |
-| Documents | ⏳ | Pending |
-| Reporting / Compliance | ⏳ | Pending |
-| Complaints | ⏳ | Pending |
-| Integrations | ⏳ | Pending |
-| Audit / Privacy | ⏳ | Pending |
-| Monitoring / Deployment | ⏳ | Pending |
-| Database / API Architecture | ⏳ | Pending |
-| Test / CI Coverage | ⏳ | Pending |
+| Workforce Lifecycle | 🟢 🟡 | Employment, supervision/appraisal, absence cover, return-to-work and lifecycle events exist |
+| Workforce Compliance | 🟢 🟡 🟠 | Structured DBS/RTW/training/competency/availability exists; fallback behavior and scope consistency need hardening |
+| Workforce Development | 🟢 🟡 🟠 | Recruitment, references, training catalogue/bookings and probation exist; completion atomicity needs hardening |
+| Timesheets | ⚫ 🟡 | No clear first-class approved/locked timesheet workflow found in this batch; finance currently derives directly from completed visits |
+| Finance / Invoicing / Payroll | 🟢 🟡 🟠 | Useful batch/payment/reconciliation foundation; duplicate batch, atomicity, branch scope and calculation rules need hardening |
+| Messaging | ⏳ | Pending deep audit |
+| Notifications | ⏳ | Pending deep audit |
+| Family Portal | ⏳ | Pending deep audit |
+| Documents | ⏳ | Pending deep audit |
+| Reporting / Compliance | ⏳ | Pending deep audit |
+| Complaints | ⏳ | Pending deep audit |
+| Integrations | ⏳ | Pending deep audit |
+| Audit / Privacy | ⏳ | Pending deep audit |
+| Monitoring / Deployment | ⏳ | Pending deep audit |
+| Database / API Architecture | ⏳ | Pending deep audit |
+| Test / CI Coverage | ⏳ | Pending deep audit |
 
 ---
 
@@ -60,17 +63,14 @@ The audit does **not** treat the existence of a controller or endpoint as proof 
 
 **Status: 🟢 Working foundation / 🟡 Needs Improvement**
 
-Reviewed implementation includes JWT authentication, login lockout, MFA checks, TOTP/recovery-code verification, session creation, opaque refresh tokens, refresh-token rotation/compromise handling, password change/reset, tenant signup controls, strong-password validation, logout and audit events.
+JWT authentication, login lockout, MFA/TOTP/recovery codes, sessions, opaque refresh tokens, refresh rotation/compromise handling, password change/reset, strong-password validation, logout and audit events are implemented. Platform configuration also contains CORS allow-listing, rate limiting, request IDs, security headers, active-session validation, MFA restrictions, privileged access and sensitive-operation controls.
 
-Platform configuration also includes JWT issuer/audience/lifetime validation, CORS allow-listing, rate limiting, request IDs, security headers, active-session validation, MFA-enrolment restrictions, portal-role restrictions, privileged-access middleware and sensitive-operation controls.
+### Notes
 
-### Findings
-
-- Keep the current functionality.
-- `AuthController` is too large and contains persistence/security implementation details that belong in Application/Infrastructure services.
-- Refactor progressively toward `AuthController -> AuthenticationService/use cases -> token/session/security repositories`.
-- Some security persistence paths use silent/fail-open style exception handling and should be reviewed carefully before production.
-- Verify production password-reset/invite/email delivery end-to-end rather than assuming token creation means delivery is complete.
+- Keep the existing security functionality.
+- Refactor the very large `AuthController` toward `Controller -> Authentication Application Service -> token/session/security repositories`.
+- Review silent/fail-open persistence exception paths before production.
+- Verify production reset/invite/email delivery end-to-end.
 
 ---
 
@@ -78,17 +78,13 @@ Platform configuration also includes JWT issuer/audience/lifetime validation, CO
 
 **Status: 🟢 Foundation / 🟠 Production verification required**
 
-Organisation and branch identifiers are used widely and `ITenantContext` is present. Many sensitive records are tenant scoped.
+Organisation/branch identifiers and `ITenantContext` are widely used, but branch scope is not expressed consistently in every raw query.
 
-### Findings
+### Notes
 
-- Organisation isolation is consistently considered.
-- Branch filtering is not expressed consistently across every controller/query.
-- Some reads are organisation-wide while writes use organisation + branch.
-- This may be intentional for manager-level cross-branch workflows, so it is not automatically a bug.
-- Define a formal scope matrix by role and resource: organisation-wide vs branch-only vs assigned-person/assigned-worker.
+- Define a formal role/resource scope matrix: organisation-wide, branch-only, assigned-person, assigned-worker.
 - Add cross-tenant and cross-branch regression tests for every sensitive module.
-- Prefer reusable tenant-scoped repositories/query policies so developers cannot accidentally forget scope predicates.
+- Prefer reusable tenant-scoped repositories/query policies over manually repeated SQL predicates.
 
 ---
 
@@ -96,15 +92,7 @@ Organisation and branch identifiers are used widely and `ITenantContext` is pres
 
 **Status: 🟢 Working / 🟡 Needs Improvement**
 
-The backend has meaningful lifecycle behavior rather than simple person CRUD. Admission/transfer/discharge workflows include prerequisite checks, handover information, database transactions and audit/lifecycle records.
-
-### Findings
-
-- Admission validates important readiness conditions such as funding, initial plan and medication reconciliation confirmation.
-- Transfer validates destination organisation/branch and records handover information.
-- Discharge includes medication handover/property confirmation and active-admission checks.
-- Continue toward a coherent Person 360 read model rather than many frontend round trips.
-- Keep lifecycle history immutable/auditable.
+Admission/transfer/discharge have prerequisite checks, handover information, transactions and lifecycle/audit records. Continue toward a coherent Person 360 read model and preserve lifecycle history.
 
 ---
 
@@ -112,17 +100,11 @@ The backend has meaningful lifecycle behavior rather than simple person CRUD. Ad
 
 **Status: 🟢 Working / 🟡 Needs Improvement**
 
-Assessments implement governed states rather than plain CRUD. Reviewed behavior includes Draft/InReview/Current-style lifecycle, manager/admin approval, declarations/signatures, corrections, version increments, review dates and risk scoring.
+Governed states, manager/admin approval, declarations/signatures, corrections, version increments, review dates and risk scoring exist. Regression tests cover invalid JSON, roles, approval requirements, corrections, score validation and audit.
 
-Regression tests exercise invalid JSON, role restrictions, approval requirements, immutable corrections, risk-score validation and audit events.
+### Notes
 
-### Findings
-
-- Preserve existing lifecycle and tests.
-- Move raw SQL/business rules out of API controllers over time.
-- Build configurable/versioned assessment templates and typed answers.
-- Preserve every approved historical version.
-- Add stronger review dashboards and assessment-to-risk/care-plan linking.
+Move SQL/business rules out of controllers gradually; add configurable/versioned templates and typed answers while preserving approved history.
 
 ---
 
@@ -130,13 +112,7 @@ Regression tests exercise invalid JSON, role restrictions, approval requirements
 
 **Status: 🟢 Strong foundation**
 
-The lifecycle controller is one of the cleaner reviewed modules. It delegates to application services, validates lifecycle commands, uses expected revision values and separates submit/review/approve/sign/activate/revision/acknowledgement operations.
-
-### Findings
-
-- Use this module as a pattern for other controller refactors.
-- Continue immutable published versions and explicit revision creation.
-- Add richer goals/outcomes/interventions and change summaries as described in the product roadmap.
+Lifecycle operations delegate to application services, validate commands, use expected revision values and separate submit/review/approve/sign/activate/revision/acknowledgement. Use this as a pattern for other modules.
 
 ---
 
@@ -144,14 +120,7 @@ The lifecycle controller is one of the cleaner reviewed modules. It delegates to
 
 **Status: 🟢 Working / 🟡 Needs Improvement**
 
-Task editing is restricted to appropriate care-plan state. Plan tasks can be materialised into visit tasks. Task outcomes are validated, incomplete/refused outcomes require reasons, relevant failures can create visit exceptions, and audit events are generated.
-
-### Findings
-
-- Controller currently owns task materialisation, authorization, SQL, escalation and domain rules.
-- Extract application use cases/services.
-- Verify active-care-plan selection against the final lifecycle/version rules.
-- Maintain separate reusable care task definitions and visit task instances.
+Plan task editing/materialisation, visit outcomes, required failure reasons, exception generation and audit exist. Extract materialisation/authorization/SQL/escalation rules from the controller and verify active-plan selection against lifecycle/version rules.
 
 ---
 
@@ -159,14 +128,7 @@ Task editing is restricted to appropriate care-plan state. Plan tasks can be mat
 
 **Status: 🟢 Working / 🟡 Needs Improvement / 🟠 Scope verification**
 
-Advanced scheduling functionality includes worker absence and scheduling-policy concepts.
-
-### Findings
-
-- Too much scheduling persistence/business logic is directly in controllers/raw SQL.
-- Standardise branch-level visibility rules for worker absences and scheduling data.
-- Validate overlapping absence handling, recurring-series concurrency, DST/timezone boundaries and multi-coordinator edits.
-- Move rules into dedicated Application/domain scheduling policies.
+Advanced scheduling and absence/policy functionality exists. Standardise branch visibility, validate overlapping absence handling, recurring-series concurrency, DST/timezone boundaries and multi-coordinator edits, and move rules into application/domain scheduling policies.
 
 ---
 
@@ -174,14 +136,7 @@ Advanced scheduling functionality includes worker absence and scheduling-policy 
 
 **Status: 🟢 Working / 🟡 Needs Improvement / 🟠 Scope verification**
 
-Visit operations include Late/Missed/Shortened/Cancelled/NoAccess/RefusedCare exception handling, escalation deadlines, manager workflows, handovers and acknowledgements.
-
-### Findings
-
-- Some manager-level queries appear organisation scoped rather than explicitly branch scoped.
-- Verify this against the intended role/scope matrix before changing behavior.
-- Add systematic authorization tests for worker assignment, branch managers, cross-branch managers and administrators.
-- Keep exception and handover history auditable.
+Late/Missed/Shortened/Cancelled/NoAccess/RefusedCare exceptions, escalation deadlines, manager workflows, handovers and acknowledgements exist. Verify organisation-vs-branch manager semantics with authorization tests.
 
 ---
 
@@ -189,13 +144,7 @@ Visit operations include Late/Missed/Shortened/Cancelled/NoAccess/RefusedCare ex
 
 **Status: 🟢 Working / 🟡 Needs Improvement**
 
-Notes support amendments with reason and retain old/new values. Manager review is separate. Observation thresholds can create deterioration workflows, alerts can be acknowledged/resolved and a service-user timeline exists. PostgreSQL regression tests exercise key flows.
-
-### Findings
-
-- Current note record is updated while amendment history stores previous/current values.
-- This preserves history, but a stronger long-term design is immutable note versions/addenda.
-- Keep late-entry, amendment reason, author and review provenance explicit.
+Amendments preserve old/new values, manager review is separate, observations can create deterioration workflows, alerts can be acknowledged/resolved and a person timeline exists. Prefer immutable note versions/addenda long term rather than mutable current note + amendment history alone.
 
 ---
 
@@ -203,14 +152,7 @@ Notes support amendments with reason and retain old/new values. Manager review i
 
 **Status: 🟢 Working / 🟡 Needs Improvement**
 
-Incident governance includes investigation chronology, evidence reviewed, findings, root cause, lessons learned, corrective/preventive actions, completion evidence, event history and controlled closure.
-
-### Findings
-
-- Incident closure requires a completed investigation and completed CAPA actions.
-- Completing an investigation/final closure is manager/admin restricted.
-- Investigation uses a mutable current record/upsert plus event history; consider versioned investigation revisions for stronger provenance.
-- Extract investigation/CAPA rules and SQL from the controller.
+Investigation chronology, evidence/findings/root cause, lessons, CAPA, completion evidence and controlled closure exist. Closure requires completed investigation/CAPA. Consider versioned investigation revisions and extract controller SQL/rules.
 
 ---
 
@@ -218,14 +160,7 @@ Incident governance includes investigation chronology, evidence reviewed, findin
 
 **Status: 🟢 Working / 🟡 Needs Improvement**
 
-Capacity is decision-specific and records understand/retain/use-or-weigh/communicate factors, support provided and assessor information. New decisions version/supersede prior current decisions. Best-interest decisions require a current lacks-capacity decision and supporting evidence. Authority records require verification evidence, support versioning and explicit revocation reasons.
-
-### Findings
-
-- Strong governance foundation.
-- Standardise organisation/branch read/write scope.
-- Move SQL and lifecycle rules into application/domain services.
-- Preserve superseded/revoked history permanently.
+Decision-specific capacity, support/assessor evidence, superseding versions, best-interest evidence requirements and authority verification/versioning/revocation are implemented. Standardise branch scope and preserve superseded/revoked history.
 
 ---
 
@@ -233,108 +168,40 @@ Capacity is decision-specific and records understand/retain/use-or-weigh/communi
 
 **Status: 🟡 Deep audit pending**
 
-Safeguarding-related functionality appears distributed through the broader API/governance implementation rather than exposed as one obvious isolated controller in the reviewed API tree.
+A dedicated `SafeguardingController.cs` is confirmed in the API project. The earlier audit note that safeguarding only appeared distributed was incomplete and is corrected here.
 
-### Findings
+### Deep-audit next
 
-- Do not treat the absence of a controller named `SafeguardingController` as proof that safeguarding is missing.
-- Deep-audit exact safeguarding routes, persistence, permissions, restricted visibility, chronology and family/reporting exclusion before final classification.
-- Safeguarding must have stricter need-to-know authorization than ordinary incidents.
+- need-to-know authorization;
+- branch/person scope;
+- chronology;
+- referral/action/outcome lifecycle;
+- restricted documents/notes;
+- reopening/history;
+- family portal/report exclusion;
+- access auditing.
 
 ---
 
 # 13. Medication Safety & Native eMAR
 
-**Overall status: 🟢 Advanced foundation / 🟡 Architecture improvement / 🟠 Production concurrency risk**
+**Overall: 🟢 Advanced foundation / 🟡 Architecture improvement / 🟠 Production concurrency risk**
 
-The reviewed medication/eMAR implementation is substantially more than CRUD. It contains safety gates around medication verification, staff authorization/competency, MAR outcomes, PRN, witnesses, stock, corrections, escalations and audit history.
+Safety profiles/reconciliation, governed administration, idempotency, worker authorization/competency, medication restrictions, route competency, server-time checks, active dates, allergy/duplicate conflicts, dose windows, omission/refusal reasons, PRN limits, witnesses, stock, corrections, escalations and ledger history are present.
 
-## Medication safety profile / reconciliation — 🟢 🟡
+### Strong areas
 
-Medication safety profiles support reconciliation statuses including Draft, NeedsReview, Verified, Superseded and Discontinued. Verified reconciliation requires source information, reviewer and reviewed time. Profile changes increment a version and reconciliation history is recorded.
+- Governed administration requires an `Idempotency-Key`.
+- PRN minimum interval/24-hour maximum controls and effect-review escalation exist.
+- Self-witnessing is prevented and witnesses are validated.
+- Corrections append a new ledger event referencing the corrected event rather than deleting the original.
+- Reconciliation has statuses/version/history.
 
-### Improve
+### 🟠 Stock concurrency risk
 
-- Move reconciliation rules from controller/raw SQL into the Medication Application/domain module.
-- Continue richer `MedicationOrder` design and Pharmacy entity from the eMAR roadmap.
-- Treat verified reconciliation as a governed workflow, not simply editable profile metadata.
+Stock is read, a new balance is calculated in application code, and the balance is then updated. Concurrent requests can potentially calculate from the same starting balance. Harden with atomic PostgreSQL mutation, row locking, or optimistic concurrency, and keep stock ledger + MAR administration in one transaction.
 
-## Production administration — 🟢 🟠
-
-Before recording a governed administration, the implementation checks important conditions including:
-
-- production eMAR safety flag;
-- required `Idempotency-Key`;
-- role/assigned-worker access;
-- medication authorization;
-- active medication restriction;
-- route-specific competency;
-- existing terminal MAR outcome;
-- authoritative server time constraints;
-- complete verified medication reconciliation;
-- medication active dates;
-- allergy conflict;
-- duplicate medication conflict;
-- dose administration window and override;
-- omission/refusal reason codes;
-- administered dose quantity;
-- PRN limits/protocol;
-- witness rules;
-- reconciled stock availability.
-
-This is a strong safety foundation and should be **preserved during refactoring**.
-
-## Idempotency — 🟢
-
-Governed administration requires an idempotency key and supports replay of a previously recorded operation. This should remain mandatory for medication administration writes.
-
-## PRN — 🟢 🟡
-
-The implementation checks PRN maximum doses in a 24-hour window and minimum dose interval. Governed PRN administration creates an effect-review escalation. A PRN effect requires an existing governed Administration ledger event and duplicate effect recording is prevented.
-
-### Improve
-
-- Make `PrnProtocol` a first-class domain model.
-- Validate observation/effect timing against the configured review protocol.
-- Keep manager exception queues for overdue PRN effect reviews.
-
-## Witnessing — 🟢
-
-The reviewed flow prevents self-witnessing and requires an active same-organisation user where a witness is required.
-
-### Improve
-
-- Standardise which roles are eligible witnesses by tenant policy.
-- Consider branch/assignment/competency requirements for specialist medication workflows.
-
-## Corrections / immutable ledger — 🟢 🟡
-
-Corrections append a new `Correction` ledger event referencing `corrects_ledger_id`; the original ledger event is not deleted. This is the correct direction for eMAR provenance.
-
-### Improve
-
-- Validate allowed corrected outcomes centrally.
-- Define whether a correction changes the effective/current MAR read model while retaining all original events.
-- Add correction reason categories and manager review where required.
-
-## Escalations — 🟢
-
-The backend supports escalation progress actions and creates escalation records for cases including missed/late doses, PRN effect review and low stock.
-
-### Improve
-
-- Add a first-class medication exception dashboard/read model.
-- Add due/overdue escalation worker processing and notification routing.
-
-## Medication stock — 🟢 functionality / 🟠 Production Risk
-
-Stock transactions support receipt/return/waste/disposal/correction/adjustment, negative-balance prevention, witnesses, transaction history and low-stock escalation. Governed administration also reduces stock and writes a stock transaction.
-
-### Important production risk: lost-update concurrency
-
-Current flows read the stock balance, calculate the new balance in application code, and later update the stored balance inside a transaction. Two concurrent operations can potentially read the same starting balance and both calculate from it. A transaction alone does not necessarily prevent this lost-update pattern.
-
-**Required hardening before serious production rollout:** make the stock mutation atomic at PostgreSQL level, or use row locking/optimistic concurrency. Example design:
+Preferred pattern:
 
 ```sql
 UPDATE medication_safety_profiles
@@ -346,45 +213,190 @@ WHERE medication_id = @medication
 RETURNING stock_on_hand;
 ```
 
-The returned database balance should be used as the authoritative `stock_after`. Stock ledger insertion and MAR administration should remain in the same transaction.
+Add concurrent administration/stock regression tests.
 
-Also add concurrency regression tests with two simultaneous stock/administration operations.
+### Architecture
 
-## eMAR architecture — 🟡
-
-Medication functionality is currently spread across `MedicationSafetyController`, `ProductionEmarController`, `EmarOperationsController` and older MAR/API paths. The behavior is valuable, but the domain boundary is fragmented.
-
-Target incremental refactor:
-
-```text
-API Controllers
-      ↓
-Medication Application Module
-├── Orders
-├── Reconciliation
-├── Scheduling
-├── Administration
-├── PRN
-├── Stock
-├── Corrections
-└── Escalations
-      ↓
-Medication Domain
-      ↓
-Infrastructure / PostgreSQL
-```
-
-**Do not rebuild the eMAR.** Preserve its current safety checks and move them behind cleaner application/domain boundaries with regression tests.
+Medication behavior is spread across `MedicationSafetyController`, `ProductionEmarController`, `EmarOperationsController` and older MAR paths. Preserve all safety checks but refactor incrementally into a coherent Medication Application/domain module. Do not rebuild the eMAR.
 
 ---
 
-# Cross-Cutting Findings So Far
+# 14. Workforce Lifecycle
+
+**Status: 🟢 Working / 🟡 Needs Improvement**
+
+The reviewed lifecycle controller has a meaningful workforce workspace and supports employment lifecycle, supervision/appraisal scheduling and completion, absence cover, sickness return-to-work review and append-style lifecycle events/audit.
+
+### Good controls found
+
+- Employment status is constrained to known states.
+- Employed workers require start date/job title/contract type.
+- Suspended/leaver states require a reason; leavers require an end date.
+- Supervision/appraisal completion requires outcome and evidence.
+- An absent worker cannot cover their own absence.
+- Covering worker must be accessible.
+- Return-to-work review only applies to ended sickness absence.
+- Not-fit-for-unrestricted-return requires restrictions.
+- Duplicate return-to-work review is rejected.
+- Worker self-read is supported while management roles have wider access.
+- Worker existence uses organisation and branch/organisation-wide tenant context.
+
+### 🟡 Improvements
+
+- Raw SQL, lifecycle rules and persistence are controller-owned; extract use cases/services.
+- `on conflict(care_worker_id)` employment profile behavior assumes one profile per worker; keep history in lifecycle events but consider explicit employment-profile version/history for important contract changes.
+- Define how suspension/leaver status blocks scheduling and medication administration across modules; storing the status alone is not enough.
+- Add optimistic concurrency/versioning for employment changes.
+
+---
+
+# 15. Workforce Compliance
+
+**Status: 🟢 Working / 🟡 Needs Improvement / 🟠 Production hardening**
+
+Structured compliance records, training, competencies and availability rules exist. A readiness summary checks DBS, right-to-work, mandatory training and availability and reports records expiring within 30 days.
+
+### Good controls found
+
+- Compliance/training/competency/availability writes are management/coordinator restricted.
+- Worker access is checked through tenant scope.
+- Structured expiry dates and verification metadata exist.
+- Availability validates day/time ranges.
+- Readiness gives a useful assignment-oriented summary.
+
+### 🟠 Important finding: broad database-exception fallback
+
+The compliance summary catches a generic `DbException` and returns a legacy readiness result. This is useful during migration, but in production it can hide real database/query failures and make the system appear healthy using legacy fields.
+
+**Recommendation:** only use legacy fallback when an explicitly detected migration/schema condition requires it. Unexpected database errors should be logged/observed and fail safely rather than silently downgrade readiness evaluation.
+
+### 🟠 Scope consistency
+
+Structured compliance queries filter `organization_id` but do not consistently include `branch_id`, even though the worker itself is tenant-access checked. This may be acceptable if worker compliance is intentionally organisation-wide, but it must be explicit. Define whether a worker can move branches while retaining compliance records and encode that policy consistently.
+
+### Additional improvements
+
+- Validate status/category values centrally instead of accepting arbitrary strings for several compliance records.
+- Validate expiry >= issue/completion/assessment date.
+- Define competency requirements per visit/medication/task and enforce them at assignment time.
+
+---
+
+# 16. Workforce Development / Recruitment / Training
+
+**Status: 🟢 Working / 🟡 Needs Improvement / 🟠 Transaction hardening**
+
+Recruitment cases, references, training catalogue, training bookings/completion and probation reviews are implemented.
+
+### Good controls found
+
+- Recruitment uses controlled lifecycle states.
+- `Cleared` requires identity, right-to-work, DBS, health declaration and onboarding checks.
+- Rejected/withdrawn cases require a reason.
+- Received references require evidence.
+- Training catalogue supports mandatory courses and organisation-wide/branch courses.
+- Booking validates future schedule and course accessibility.
+- Completion requires evidence and calculates expiry from course validity.
+- Completion creates a structured worker training record.
+- Probation supports Passed/Extended/Failed and requires evidence; extension requires an extension date.
+
+### 🟠 Important finding: training completion atomicity
+
+Completing a training booking performs at least two important writes: update the booking to `Completed`, then insert the resulting `worker_training_records` row. These writes are not visibly wrapped in one explicit transaction in the reviewed controller.
+
+If the second write fails after the booking update succeeds, the booking may say Completed without the corresponding compliance/training record.
+
+**Recommendation:** wrap booking completion + training-record creation + audit in one database transaction and add a regression test proving rollback on failure.
+
+### 🟡 Other improvements
+
+- Recruitment case is updated in place; important lifecycle history should remain independently queryable/auditable.
+- Some recruitment-reference lookups are organisation scoped rather than explicitly branch scoped; align with the formal scope model.
+- Add unique/duplicate booking rules where needed.
+- Prevent expired/inactive/superseded training from satisfying assignment requirements.
+
+---
+
+# 17. Timesheets
+
+**Status: ⚫ First-class workflow not confirmed / 🟡 Product gap**
+
+The finance implementation currently derives invoice/payroll data directly from completed visits. In the reviewed workforce/finance batch, a clear first-class workflow such as the following was not found:
+
+```text
+Completed visit
+→ Timesheet entry
+→ adjustment/review
+→ manager approval
+→ locked pay period
+→ payroll export
+```
+
+This is not proof that no timesheet-related code exists elsewhere; it means a governed first-class timesheet workflow has not yet been confirmed in the audited code.
+
+### Add/verify
+
+- planned vs actual time;
+- travel/mileage;
+- manual adjustment with reason;
+- worker review if required;
+- manager approval;
+- locked periods;
+- audit history;
+- payroll export boundary.
+
+---
+
+# 18. Finance / Invoicing / Payroll
+
+**Status: 🟢 Useful foundation / 🟡 Needs Improvement / 🟠 Production hardening**
+
+Finance has a dashboard, invoice batch generation from completed visits, payroll batch generation, invoice/payroll lines, payment recording and funding reconciliation.
+
+### Good foundation
+
+- Finance endpoints are restricted to Administrator/BackOffice.
+- Invoice lines preserve visit/person/rate/quantity/funding source.
+- Payroll lines preserve visit/worker/hours/rate/mileage/gross pay.
+- Payments require positive amount/reference and update invoice status to Part paid/Paid.
+- Funding reconciliation compares delivered and authorised hours and records exceptions.
+- Finance audit events exist.
+
+### 🟠 Duplicate batch risk
+
+Invoice/payroll generation selects completed visits for a date range but the reviewed controller does not visibly prevent the same visit from being included in multiple generated invoice/payroll batches. Re-running a period can therefore create duplicate financial lines unless database constraints elsewhere prevent it.
+
+**Required:** add idempotent batch identity and/or uniqueness rules around billable/payable visit inclusion, plus explicit adjustment/credit workflows instead of regenerating history.
+
+### 🟠 Transaction atomicity
+
+Invoice generation saves an invoice and then inserts its visit lines iteratively. Payroll generation similarly creates a run and then lines. The reviewed methods are not visibly wrapped in a single explicit transaction. Partial failure could leave a header without all expected lines or an incomplete batch.
+
+**Required:** batch header + lines + audit should commit atomically, with rollback tests.
+
+### 🟠 Branch scope semantics
+
+Finance dashboard/batch visit selection is largely organisation scoped. That may be intentional for BackOffice/Administrator, but generated records use the current branch value. An organisation-wide user generating an organisation-wide batch while records receive a single default/current branch can create misleading branch attribution.
+
+**Required:** decide whether finance batches are organisation-level or branch-level. If organisation-level, model them that way. If branch-level, filter source visits by branch.
+
+### 🟡 Calculation/model improvements
+
+- Invoice generation currently uses completed visit duration and an active funding hourly rate/default rate; formalise rate cards/contracts/effective dates.
+- Payroll currently applies `MileageRate` as a flat amount per visit in the reviewed method, rather than multiplying by a recorded mileage quantity. Model mileage quantity and rate separately.
+- Add invoice approval/void/credit/adjustment lifecycle.
+- Add payroll approval/lock/export lifecycle.
+- Prevent payments from exceeding invoice amount unless overpayment is explicitly supported.
+- Funding reconciliation compares delivered hours in the requested period with `AuthorizedHoursPerWeek`; this needs a clearly defined period-normalisation rule before relying on the variance for production decisions.
+- Separate care-delivery facts from finance calculations so historical financial results remain reproducible when rates later change.
+
+---
+
+# Cross-Cutting Findings
 
 ## A. Controller-heavy architecture — 🟡
 
-The most repeated technical issue is large API controllers containing business rules, raw SQL, persistence helpers, authorization decisions and workflow transitions together.
-
-Recommended migration pattern:
+Repeated pattern: API controllers contain business rules, raw SQL, persistence helpers, authorization decisions and workflow transitions. Refactor module by module behind regression tests:
 
 ```text
 Controller
@@ -398,50 +410,47 @@ Repository / Unit of Work
 PostgreSQL
 ```
 
-Refactor one module at a time behind regression tests. Do not perform a large rewrite.
+No large rewrite.
 
-## B. Branch authorization semantics — 🟠 Verify and standardise
+## B. Branch authorization semantics — 🟠
 
-Several modules clearly enforce organisation scope, while branch scope varies between operations. This needs a formal access-scope design before modifying individual queries.
-
-Create tests for:
-
-- worker assigned to record;
-- worker not assigned;
-- coordinator same branch;
-- coordinator different branch;
-- manager same branch;
-- manager cross-branch if permitted;
-- administrator;
-- different organisation.
+Create a formal scope matrix and tests for worker assigned/not assigned, coordinator same/different branch, manager same/cross branch, administrator and different organisation.
 
 ## C. Historical record integrity — 🟡
 
-The codebase already has good examples of superseding/versioning and append-only ledger events. Extend the same pattern consistently to completed notes, investigations, care records and other governed data rather than destructive editing.
+Extend existing good superseding/versioning/ledger patterns consistently to completed notes, investigations, workforce lifecycle and finance adjustments.
 
-## D. Runtime correctness is not yet proven by static audit
+## D. Multi-write operations need explicit atomicity — 🟠
 
-A static review can establish that controls and workflows exist in code. Production readiness also requires passing regression/integration tests, migrations against PostgreSQL, concurrency testing, configuration verification, backup/restore checks, deployment health and real workflow validation.
+Several important workflows perform multiple dependent writes. Medication stock, training completion and finance batch generation should have clear transaction boundaries and rollback tests.
+
+## E. Runtime correctness is not proven by static audit
+
+Production readiness still requires regression/integration tests, PostgreSQL migrations, concurrency tests, configuration verification, backup/restore, deployment health and real workflow validation.
 
 ---
 
 # Current Priority Fix Queue
 
-1. **P0 / 🟠 — eMAR stock concurrency:** atomic database stock mutation + concurrency tests.
-2. **P0 / 🟠 — tenant/branch authorization matrix:** define intended scope and regression-test sensitive modules.
-3. **P0 / 🟡 — preserve immutable governed history:** standardise corrections/versioning/addenda.
-4. **P1 / 🟡 — controller refactor:** progressively extract application/domain use cases; no rewrite.
-5. **P1 — continue deep audit:** Workforce → Timesheets → Finance → Messaging → Notifications → Family Portal → Documents → Reporting → Complaints → Integrations → Audit/Privacy → Monitoring/Deployment → DB/API → Tests/CI.
+1. **P0 / 🟠 eMAR stock concurrency** — atomic database stock mutation + concurrency tests.
+2. **P0 / 🟠 Tenant/branch authorization matrix** — define intended scope and regression-test sensitive modules.
+3. **P0 / 🟠 Finance duplicate/partial batch protection** — idempotency/unique inclusion + explicit transaction.
+4. **P0 / 🟠 Workforce training completion atomicity** — booking + training record + audit in one transaction.
+5. **P0/P1 / 🟠 Workforce compliance fallback** — do not hide unexpected DB failures behind legacy readiness.
+6. **P1 / 🟡 First-class timesheets** — approved/locked source for payroll rather than direct raw completed-visit generation.
+7. **P1 / 🟡 Preserve immutable governed history** — standardise corrections/versioning/addenda.
+8. **P1 / 🟡 Controller refactor** — progressively extract application/domain use cases; no rewrite.
+9. **P1 Continue deep audit** — Safeguarding → Messaging → Notifications → Family Portal → Documents → Reporting → Complaints → Integrations → Audit/Privacy → Monitoring/Deployment → DB/API → Tests/CI.
 
 ---
 
 # Update Policy
 
-This file is intentionally a **living audit**. As additional modules are reviewed:
+This file is intentionally a **living audit**. For each audit batch:
 
-1. update the Audit Progress table;
-2. add the detailed module findings;
-3. add confirmed risks to the Priority Fix Queue;
-4. downgrade/remove a risk only when code/tests demonstrate it has been resolved;
+1. update the progress table;
+2. add detailed findings;
+3. add confirmed risks to the priority queue;
+4. downgrade/remove risks only when code/tests demonstrate resolution;
 5. keep roadmap ideas separate from confirmed implementation findings;
-6. do not mark runtime behavior as verified unless it has actually been executed/tested.
+6. never mark runtime behavior verified unless it was actually executed/tested.
