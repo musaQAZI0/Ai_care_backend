@@ -74,6 +74,49 @@ public sealed class ProductionEmarRegressionTests(PostgresRegressionFactory fact
   using(var scope=factory.Services.CreateScope()){var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();await db.Database.ExecuteSqlInterpolatedAsync($"""insert into worker_competency_records(id,care_worker_id,organization_id,branch_id,competency,level,status,assessed_by,assessed_at,expires_at,notes,created_at) values({Guid.NewGuid()},{workerId},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},'Medication administration','Competent','Valid','Regression',{DateTimeOffset.UtcNow.AddDays(-1)},{DateTimeOffset.UtcNow.AddYears(1)},'General route',{DateTimeOffset.UtcNow})""");await db.Database.ExecuteSqlRawAsync("update medication_safety_profiles set reconciliation_status='Superseded', change_reason='Duplicate resolved' where medication_id={0}",duplicate);}
   var idem=$"emar-replay-{Guid.NewGuid():N}";Key(idem);var firstSubmit=await worker.PostAsJsonAsync($"/api/phase1/emar-safety/mar/{replayRecord}/record",new{outcome="Administered",occurredAt=DateTimeOffset.UtcNow,doseQuantity=1m,reasonCode="",reasonDetail="",prnIndication="",witnessUserId=(Guid?)null,overrideReason=""});Assert.Equal(HttpStatusCode.Created,firstSubmit.StatusCode);Key(idem);var replay=await worker.PostAsJsonAsync($"/api/phase1/emar-safety/mar/{replayRecord}/record",new{outcome="Administered",occurredAt=DateTimeOffset.UtcNow,doseQuantity=1m,reasonCode="",reasonDetail="",prnIndication="",witnessUserId=(Guid?)null,overrideReason=""});Assert.Equal(HttpStatusCode.OK,replay.StatusCode);Assert.Contains("replayed",await replay.Content.ReadAsStringAsync(),StringComparison.OrdinalIgnoreCase);
  }
+ [Theory]
+ [InlineData(2, false, false, 2)]
+ [InlineData(1, false, false, 1)]
+ [InlineData(2, true, false, 1)]
+ [InlineData(2, false, true, 1)]
+ public async Task ConcurrentAdministrationsPreserveStockAndTerminalOutcome(int initialStock, bool sameMar, bool prn, int expectedSuccesses)
+ {
+  await factory.EnsureClinicalSeedAsync();
+  var medication=Guid.NewGuid(); var first=Guid.NewGuid(); var second=sameMar?first:Guid.NewGuid();
+  using(var scope=factory.Services.CreateScope())
+  {
+   var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();
+   db.Medications.Add(new Medication(medication,RegressionIds.ServiceUserId,$"Concurrency {medication}","1 mg","Oral",prn?"PRN":"Morning",prn,"Pharmacy","None",TenantDefaults.OrganizationId,TenantDefaults.BranchId));
+   db.MedicationAdministrationRecords.Add(Mar(first,medication,RegressionIds.WorkerId));
+   if(!sameMar)db.MedicationAdministrationRecords.Add(Mar(second,medication,RegressionIds.WorkerId));
+   await db.SaveChangesAsync();
+   await db.Database.ExecuteSqlInterpolatedAsync($"""insert into worker_competency_records(id,care_worker_id,organization_id,branch_id,competency,level,status,assessed_by,assessed_at,expires_at,notes,created_at) values({Guid.NewGuid()},{RegressionIds.WorkerId},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},'Medication administration','Competent','Valid','Regression',{DateTimeOffset.UtcNow.AddDays(-1)},{DateTimeOffset.UtcNow.AddYears(1)},'Concurrency',now())""");
+  }
+  var admin=await Client("admin","Admin123!");
+  await StepUpTestGrants.GrantAsync(factory,admin,"medication");
+  var profile=await admin.PutAsJsonAsync($"/api/phase1/medication-safety/medications/{medication}/profile",new { indication="Regression",prescriber="Dr Safety",form="Tablet",strength="1mg",startDate=DateTimeOffset.UtcNow.AddDays(-1),doseWindowMinutes=60,maxPrnDoses24h=4,minPrnIntervalMinutes=240,prnIndication="Pain",prnEffectReviewMinutes=30,stockOnHand=initialStock,reorderLevel=0,requiresWitness=false,lastReconciledAt=DateTimeOffset.UtcNow,reconciledBy="Lead",reconciliationStatus="Verified",sourceType="Prescription",sourceReference="RACE",changeReason="Regression" });
+  profile.EnsureSuccessStatusCode();
+  var occurred=DateTimeOffset.UtcNow;
+  async Task<HttpResponseMessage> Send(Guid mar)
+  {
+   var request=new HttpRequestMessage(HttpMethod.Post,$"/api/phase1/emar-safety/mar/{mar}/record");
+   request.Headers.Add("Idempotency-Key",Guid.NewGuid().ToString());
+   request.Content=JsonContent.Create(new { outcome="Administered",occurredAt=occurred,doseQuantity=1m,prnIndication="Pain",reasonCode="",reasonDetail="",overrideReason="" });
+   return await admin.SendAsync(request);
+  }
+  var responses=await Task.WhenAll(Send(first),Send(second));
+  Assert.Equal(expectedSuccesses,responses.Count(x=>x.StatusCode==HttpStatusCode.Created));
+  Assert.All(responses,x=>Assert.True(x.StatusCode is HttpStatusCode.Created or HttpStatusCode.Conflict,$"Unexpected response {x.StatusCode}"));
+  using var verify=factory.Services.CreateScope();var context=verify.ServiceProvider.GetRequiredService<CareDbContext>();
+  var connection=context.Database.GetDbConnection();await connection.OpenAsync();
+  await using var command=connection.CreateCommand();
+  command.CommandText="select stock_on_hand,(select count(*) from emar_ledger where medication_id=@id and event_type='Administration'),(select count(*) from medication_stock_transactions where medication_id=@id and transaction_type='Administration') from medication_safety_profiles where medication_id=@id";
+  command.Parameters.Add(new NpgsqlParameter("id",medication));
+  await using var reader=await command.ExecuteReaderAsync();Assert.True(await reader.ReadAsync());
+  Assert.Equal(initialStock-expectedSuccesses,reader.GetDecimal(0));
+  Assert.Equal(expectedSuccesses,reader.GetInt64(1));Assert.Equal(expectedSuccesses,reader.GetInt64(2));
+ }
+
  private static MedicationAdministrationRecord Mar(Guid id,Guid medication,Guid worker)=>new(id,medication,Guid.NewGuid(),worker,DateTimeOffset.UtcNow,null,"Scheduled","",TenantDefaults.OrganizationId,TenantDefaults.BranchId);
  private async Task<HttpClient> Client(string name,string password){var client=factory.CreateClient();var login=await client.PostAsJsonAsync("/api/auth/login",new{userName=name,password,mfaCode=(string?)null});login.EnsureSuccessStatusCode();client.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",(await login.Content.ReadFromJsonAsync<Login>())!.Token);return client;}
  private sealed record Login(string Token);private sealed record Created(Guid Id,string Outcome,decimal? StockAfter);

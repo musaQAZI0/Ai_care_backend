@@ -105,6 +105,40 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
         Assert.Contains("Person asleep", body);
     }
 
+    [Theory]
+    [InlineData("High")]
+    [InlineData("Critical")]
+    public async Task SafeguardingClosureValidatesRequestedFinalRisk(string risk)
+    {
+        await _factory.EnsureClinicalSeedAsync();
+        var client = _factory.CreateClient();
+        var login = await Login(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.Token);
+        var response = await client.PostAsJsonAsync("/api/phase1/safeguarding/cases", new
+        {
+            serviceUserId = RegressionIds.ServiceUserId, category = "Neglect",
+            concern = "Final state regression", riskLevel = "Low"
+        });
+        response.EnsureSuccessStatusCode();
+        var created = (await response.Content.ReadFromJsonAsync<SafeguardingCaseResponse>())!;
+        var close = await client.PutAsJsonAsync($"/api/phase1/safeguarding/cases/{created.Id}", new
+        {
+            status = "Closed", riskLevel = risk, closureSummary = "Reviewed"
+        });
+        Assert.Equal(HttpStatusCode.Conflict, close.StatusCode);
+        var invalid = await client.PutAsJsonAsync($"/api/phase1/safeguarding/cases/{created.Id}", new
+        {
+            status = "Closed", riskLevel = "Unknown", closureSummary = "Reviewed"
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        var valid = await client.PutAsJsonAsync($"/api/phase1/safeguarding/cases/{created.Id}", new
+        {
+            status = "Closed", riskLevel = risk, closureSummary = "Reviewed",
+            externalReferral = "Local authority", referralReference = "FINAL-RISK-1"
+        });
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+    }
+
     [Fact]
     public async Task SafeguardingCaseSupportsActionAndSafeClosure()
     {

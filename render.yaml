@@ -26,7 +26,7 @@ services:
       - key: Demo__Enabled
         value: false
       - key: TestingData__Enabled
-        value: true
+        value: false
       - key: Monitoring__SlowRequestThresholdMs
         value: 2000
       - key: Storage__Provider
