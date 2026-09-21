@@ -90,7 +90,8 @@ public sealed class InvoiceLifecycleController(CareDbContext db,ITenantContext t
 
     private async Task<InvoiceLock?> Lock(Guid id,CancellationToken token)
     {
-        await using var command=await Command("select \"Amount\",\"Status\" from \"Invoices\" where \"Id\"=@invoice and \"OrganizationId\"=@organization and (@organizationWide or \"BranchId\"=@branch) for update",token);Add(command,"invoice",id);Add(command,"organizationWide",tenant.IsOrganizationWide);
+        var lockClause = db.Database.IsNpgsql() ? " for update" : string.Empty;
+        await using var command=await Command("select \"Amount\",\"Status\" from \"Invoices\" where \"Id\"=@invoice and \"OrganizationId\"=@organization and (@organizationWide or \"BranchId\"=@branch)" + lockClause,token);Add(command,"invoice",id);Add(command,"organizationWide",tenant.IsOrganizationWide);
         await using var reader=await command.ExecuteReaderAsync(token);return await reader.ReadAsync(token)?new(reader.GetDecimal(0),reader.GetString(1)):null;
     }
     private async Task SetStatus(Guid id,string status,CancellationToken token){await using var command=await Command("update \"Invoices\" set \"Status\"=@status where \"Id\"=@invoice and \"OrganizationId\"=@organization",token);Add(command,"invoice",id);Add(command,"status",status);await command.ExecuteNonQueryAsync(token);}
