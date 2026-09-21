@@ -164,7 +164,11 @@ public sealed record Medication(
     string Pharmacy,
     string AllergyWarning,
     Guid? OrganizationId = null,
-    Guid? BranchId = null);
+    Guid? BranchId = null,
+    string? DmdCode = null,
+    string? DmdDisplay = null,
+    string? DmdSystem = null);
+
 
 public sealed record MedicationAdministrationRecord(
     Guid Id,
