@@ -195,6 +195,10 @@ public sealed class CareDbContext : DbContext
             builder.Property(medication => medication.Name).IsRequired();
             builder.Property(medication => medication.Dosage).IsRequired();
             builder.Property(medication => medication.Schedule).IsRequired();
+            builder.Property(medication => medication.DmdCode).IsRequired(false).HasMaxLength(64);
+            builder.Property(medication => medication.DmdDisplay).IsRequired(false).HasMaxLength(500);
+            builder.Property(medication => medication.DmdSystem).IsRequired(false).HasMaxLength(200);
+            builder.HasIndex(medication => new { medication.OrganizationId, medication.BranchId, medication.DmdCode });
         });
 
         modelBuilder.Entity<MedicationAdministrationRecord>(builder =>
