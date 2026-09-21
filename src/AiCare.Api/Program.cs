@@ -1036,7 +1036,7 @@ phase1.MapPost("/medications", (CreateMedicationRequest request, CareDbContext c
     var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
     if (validation is not null) return validation;
 
-    var medication = new Medication(Guid.NewGuid(), request.ServiceUserId, request.Name, request.Dosage, request.Route, request.Schedule, request.IsPrn, request.Pharmacy, request.AllergyWarning, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var medication = new Medication(Guid.NewGuid(), request.ServiceUserId, request.Name, request.Dosage, request.Route, request.Schedule, request.IsPrn, request.Pharmacy, request.AllergyWarning, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId, request.DmdCode?.Trim(), request.DmdDisplay?.Trim(), request.DmdSystem?.Trim());
     context.Medications.Add(medication);
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.created", currentUser.UserName, nameof(Medication), medication.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
@@ -1067,7 +1067,10 @@ phase1.MapPut("/medications/{id:guid}", (Guid id, CreateMedicationRequest reques
         Schedule = request.Schedule,
         IsPrn = request.IsPrn,
         Pharmacy = request.Pharmacy,
-        AllergyWarning = request.AllergyWarning
+        AllergyWarning = request.AllergyWarning,
+        DmdCode = request.DmdCode?.Trim(),
+        DmdDisplay = request.DmdDisplay?.Trim(),
+        DmdSystem = request.DmdSystem?.Trim()
     };
     context.Medications.Update(updated);
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.updated", currentUser.UserName, nameof(Medication), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
@@ -2944,7 +2947,7 @@ public sealed record SendNotificationRequest(string Channel, string Title, strin
 public sealed record InvestigateIncidentRequest(string Outcome, string ActionPlan, bool CloseIncident);
 public sealed record AiSummaryRequest(Guid? ServiceUserId);
 public sealed record CreateRecurringVisitRequest(Guid ServiceUserId, Guid CareWorkerId, DateTimeOffset StartsAt, string VisitType, int DurationMinutes, string RequiredSkills, string Frequency, int Occurrences, IReadOnlyCollection<Guid>? AdditionalCareWorkerIds = null);
-public sealed record CreateMedicationRequest(Guid ServiceUserId, string Name, string Dosage, string Route, string Schedule, bool IsPrn, string Pharmacy, string AllergyWarning);
+public sealed record CreateMedicationRequest(Guid ServiceUserId, string Name, string Dosage, string Route, string Schedule, bool IsPrn, string Pharmacy, string AllergyWarning, string? DmdCode = null, string? DmdDisplay = null, string? DmdSystem = null);
 public sealed record CreateMedicationAdministrationRecordRequest(Guid MedicationId, Guid VisitId, Guid CareWorkerId, DateTimeOffset ScheduledAt, string Notes);
 public sealed record CompleteMedicationAdministrationRequest(DateTimeOffset? AdministeredAt, string Notes);
 public sealed record CreateOrganizationRequest(string Name, string Plan);
