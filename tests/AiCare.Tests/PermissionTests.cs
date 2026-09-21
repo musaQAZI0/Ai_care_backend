@@ -297,7 +297,7 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
             reference = "TEST-PAY-001"
         });
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
     }
 
     [Fact]
@@ -363,16 +363,13 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
-    public async Task ConfigStatusDoesNotExposeSecrets()
+    public async Task ConfigStatusIsNotPubliclyExposed()
     {
         var client = _factory.CreateClient();
 
         var response = await client.GetAsync("/status/config");
-        var body = await response.Content.ReadAsStringAsync();
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Contains("jwtConfigured", body);
-        Assert.DoesNotContain("test-signing-key", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
@@ -734,7 +731,7 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             TenantDefaults.OrganizationId,
             TenantDefaults.BranchId));
         context.Invoices.AddRange(
-            new Invoice(TestIds.InvoiceId, TestIds.ServiceUserId, "Private", 120m, "Approved", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId),
+            new Invoice(TestIds.InvoiceId, TestIds.ServiceUserId, "Private", 120m, "Issued", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId),
             new Invoice(TestIds.VoidInvoiceId, TestIds.ServiceUserId, "Private", 90m, "Generated", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         context.AppUsers.AddRange(
             new AppUser(Guid.NewGuid(), "admin", "admin@test.local", PasswordHasher.HashPassword("AdminPassword123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId),

@@ -250,9 +250,9 @@ app.MapGet("/health/db", (CareDbContext context) =>
             ? Results.Ok(new { status = "healthy", provider = "PostgreSQL", checkedAt = DateTimeOffset.UtcNow })
             : Results.Problem("Database connection failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
-    catch (Exception ex)
+    catch (Exception)
     {
-        return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+        return Results.Problem("Database health check failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 });
 
@@ -265,19 +265,26 @@ app.MapGet("/health/storage", (IConfiguration configuration) =>
         !string.IsNullOrWhiteSpace(configuration["Supabase:Bucket"]));
 
     return ready
-        ? Results.Ok(new { status = "healthy", provider, bucket = configuration["Supabase:Bucket"], checkedAt = DateTimeOffset.UtcNow })
-        : Results.Problem("Supabase storage is selected but Supabase:Url, Supabase:ServiceRoleKey, or Supabase:Bucket is missing.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        ? Results.Ok(new { status = "healthy", provider, checkedAt = DateTimeOffset.UtcNow })
+        : Results.Problem("Storage health check failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
 });
 
-app.MapGet("/status/config", (IConfiguration configuration, IWebHostEnvironment environment) => Results.Ok(new
+app.MapGet("/health/ready", (CareDbContext context, IConfiguration configuration) =>
 {
-    environment = environment.EnvironmentName,
-    storageProvider = configuration["Storage:Provider"] ?? "Local",
-    supabaseConfigured = HasConfig(configuration, "Supabase:Url") && HasConfig(configuration, "Supabase:ServiceRoleKey") && HasConfig(configuration, "Supabase:Bucket"),
-    jwtConfigured = HasConfig(configuration, "JwtOptions:Issuer") && HasConfig(configuration, "JwtOptions:Audience") && HasConfig(configuration, "JwtOptions:SigningKey"),
-    demoSeedEnabled = string.Equals(configuration["Demo:Enabled"], "true", StringComparison.OrdinalIgnoreCase),
-    checkedAt = DateTimeOffset.UtcNow
-}));
+    try
+    {
+        var provider = configuration["Storage:Provider"] ?? "Local";
+        var storageReady = !string.Equals(provider, "Supabase", StringComparison.OrdinalIgnoreCase) ||
+            (HasConfig(configuration, "Supabase:Url") && HasConfig(configuration, "Supabase:ServiceRoleKey") && HasConfig(configuration, "Supabase:Bucket"));
+        return context.Database.CanConnect() && storageReady
+            ? Results.Ok(new { status = "ready", checkedAt = DateTimeOffset.UtcNow })
+            : Results.Problem("Service readiness check failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+    catch (Exception)
+    {
+        return Results.Problem("Service readiness check failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
 
 // Keep authorization behavior consistent in every environment. Local development
 // must use a real seeded account instead of silently exposing all care endpoints.
@@ -1283,28 +1290,10 @@ phase1.MapGet("/payroll-runs/{id:guid}", (Guid id, CareDbContext context, ITenan
     var payroll = context.PayrollRuns.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return payroll is null || !tenant.CanAccess(payroll.OrganizationId, payroll.BranchId) ? Results.NotFound() : Results.Ok(payroll);
 });
-phase1.MapPost("/payroll-runs/generate", (ICareRepository repository, ICurrentUserContext currentUser) =>
+phase1.MapPost("/payroll-runs/generate", (ICurrentUserContext currentUser) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
-    if (denied is not null) return denied;
-
-    var payroll = repository.GeneratePayrollRun();
-    return Results.Created($"/api/phase1/payroll-runs/{payroll.Id}", payroll);
-});
-phase1.MapGet("/payroll-runs/{id:guid}/export", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-{
-    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
-    if (denied is not null) return denied;
-
-    var payroll = context.PayrollRuns.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    if (payroll is null || !tenant.CanAccess(payroll.OrganizationId, payroll.BranchId)) return Results.NotFound();
-
-    var rows = new[]
-    {
-        "period,worker_count,gross_pay,status,created_at",
-        $"{payroll.Period},{payroll.WorkerCount},{payroll.GrossPay},{payroll.Status},{payroll.CreatedAt:O}"
-    };
-    return Results.Text(string.Join(Environment.NewLine, rows), "text/csv");
+    return denied ?? Results.Conflict(new { message = "Generate payroll from an approved, locked timesheet period." });
 });
 phase1.MapGet("/invoices", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string? status = null) =>
 {
@@ -1770,30 +1759,6 @@ phase1.MapPost("/payroll-runs/{id:guid}/reject", (Guid id, RejectFinancialReques
     return Results.Ok(updated);
 });
 
-phase1.MapGet("/timesheets", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-{
-    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
-    if (denied is not null) return denied;
-
-    var items = context.Visits.AsNoTracking()
-        .AsEnumerable()
-        .Where(visit => TenantVisible(tenant, visit.OrganizationId, visit.BranchId))
-        .GroupBy(visit => visit.CareWorkerId)
-        .Select(group => new
-        {
-            careWorkerId = group.Key,
-            visits = group.Count(),
-            completedVisits = group.Count(visit => visit.Status == VisitStatus.Completed),
-            scheduledMinutes = group.Sum(visit => visit.DurationMinutes),
-            payableHours = Math.Round(group.Where(visit => visit.Status == VisitStatus.Completed).Sum(visit => visit.DurationMinutes) / 60m, 2),
-            mileage = group.Count() * 3.5m,
-            overtimeHours = Math.Max(0, group.Where(visit => visit.Status == VisitStatus.Completed).Sum(visit => visit.DurationMinutes) / 60m - 40m),
-            status = "Ready for approval"
-        })
-        .ToList();
-    return Results.Ok(items);
-});
-
 phase1.MapGet("/invoices/{id:guid}/lines", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
@@ -1821,82 +1786,6 @@ phase1.MapGet("/invoices/{id:guid}/lines", (Guid id, CareDbContext context, ITen
         })
         .ToList();
     return Results.Ok(visits);
-});
-
-phase1.MapPost("/invoices/{id:guid}/record-payment", (Guid id, RecordPaymentRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-{
-    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
-    if (denied is not null) return denied;
-
-    var invoice = context.Invoices.Find(id);
-    if (invoice is null || !tenant.CanAccess(invoice.OrganizationId, invoice.BranchId))
-    {
-        return Results.NotFound();
-    }
-
-    if (request.Amount <= 0 || Missing(request.Reference))
-    {
-        return Error("Payment amount and reference are required.");
-    }
-
-    if (string.Equals(invoice.Status, "Void", StringComparison.OrdinalIgnoreCase))
-    {
-        return Error("Void invoices cannot receive payments.");
-    }
-
-    var updated = invoice with { Status = request.Amount >= invoice.Amount ? "Paid" : "Part paid" };
-    context.Entry(invoice).CurrentValues.SetValues(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"invoice.payment_recorded: {request.Reference}", currentUser.UserName, nameof(Invoice), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
-    context.SaveChanges();
-    return Results.Ok(new { invoice = updated, request.Amount, request.Reference, paidAt = DateTimeOffset.UtcNow });
-});
-
-phase1.MapPost("/invoices/{id:guid}/approve", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-{
-    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
-    if (denied is not null) return denied;
-
-    var invoice = context.Invoices.Find(id);
-    if (invoice is null || !tenant.CanAccess(invoice.OrganizationId, invoice.BranchId))
-    {
-        return Results.NotFound();
-    }
-
-    if (string.Equals(invoice.Status, "Paid", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(invoice.Status, "Void", StringComparison.OrdinalIgnoreCase))
-    {
-        return Error("Paid or void invoices cannot be approved.");
-    }
-
-    var updated = invoice with { Status = "Approved" };
-    context.Entry(invoice).CurrentValues.SetValues(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "invoice.approved", currentUser.UserName, nameof(Invoice), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
-    context.SaveChanges();
-    return Results.Ok(updated);
-});
-phase1.MapPost("/invoices/{id:guid}/void", (Guid id, RejectFinancialRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-{
-    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.BackOffice);
-    if (denied is not null) return denied;
-
-    if (Missing(request.Reason))
-    {
-        return Error("A void reason is required.");
-    }
-
-    var invoice = context.Invoices.Find(id);
-    if (invoice is null || !tenant.CanAccess(invoice.OrganizationId, invoice.BranchId)) return Results.NotFound();
-
-    if (string.Equals(invoice.Status, "Paid", StringComparison.OrdinalIgnoreCase))
-    {
-        return Error("Paid invoices cannot be voided.");
-    }
-
-    var updated = invoice with { Status = "Void" };
-    context.Entry(invoice).CurrentValues.SetValues(updated);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"invoice.voided: {request.Reason}", currentUser.UserName, nameof(Invoice), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
-    context.SaveChanges();
-    return Results.Ok(updated);
 });
 
 phase1.MapPost("/ai/summarize-notes", (AiSummaryRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>

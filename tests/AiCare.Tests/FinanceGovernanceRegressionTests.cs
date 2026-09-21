@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using AiCare.Domain;
@@ -44,30 +44,34 @@ public sealed class FinanceGovernanceRegressionTests(PostgresRegressionFactory f
         Assert.Equal(2,lines!.Count);
         Assert.Equal(45m,lines.Sum(x=>x.Amount));
 
-        var payment=await finance.PostAsJsonAsync($"/api/phase1/finance/invoices/{invoiceId}/payments",new{amount=45m,reference="PAY-FIN-1",receivedAt=(DateTimeOffset?)null});
-        Assert.Equal(HttpStatusCode.Created,payment.StatusCode);
-        Assert.Contains("Paid",await payment.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Conflict,(await finance.PostAsJsonAsync($"/api/phase1/finance/invoices/{invoiceId}/payments",new{amount=45m,reference="PREMATURE",receivedAt=(DateTimeOffset?)null})).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,(await finance.PostAsync($"/api/phase1/finance/invoices/{invoiceId}/approve",null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await finance.PostAsync($"/api/phase1/finance/invoices/{invoiceId}/approve",null)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,(await finance.PostAsync($"/api/phase1/finance/invoices/{invoiceId}/issue",null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await finance.PostAsync($"/api/phase1/finance/invoices/{invoiceId}/issue",null)).StatusCode);
+        var partial=await finance.PostAsJsonAsync($"/api/phase1/finance/invoices/{invoiceId}/payments",new{amount=20m,reference="PAY-FIN-1",receivedAt=(DateTimeOffset?)null});
+        Assert.Equal(HttpStatusCode.Created,partial.StatusCode);Assert.Contains("Part paid",await partial.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Conflict,(await finance.PostAsJsonAsync($"/api/phase1/finance/invoices/{invoiceId}/payments",new{amount=1m,reference="PAY-FIN-1",receivedAt=(DateTimeOffset?)null})).StatusCode);
+        var payment=await finance.PostAsJsonAsync($"/api/phase1/finance/invoices/{invoiceId}/payments",new{amount=25m,reference="PAY-FIN-2",receivedAt=(DateTimeOffset?)null});
+        Assert.Equal(HttpStatusCode.Created,payment.StatusCode);Assert.Contains("Paid",await payment.Content.ReadAsStringAsync());
 
-        var payroll=await finance.PostAsJsonAsync("/api/phase1/finance/payroll-batches",new{periodStart=start,periodEnd=end,defaultHourlyRate=18m,mileageRate=2m});
-        Assert.Equal(HttpStatusCode.Created,payroll.StatusCode);
-        var payrollRun=(await payroll.Content.ReadFromJsonAsync<PayrollRunRow>())!;
-        Assert.True(payrollRun.GrossPay >= 31m);
-        var payrollLines=await finance.GetFromJsonAsync<List<PayrollLine>>($"/api/phase1/finance/payroll-runs/{payrollRun.Id}/lines");
-        var seededPayrollLines=payrollLines!.Where(x=>x.CareWorkerId==workerId).ToList();
-        Assert.Equal(2,seededPayrollLines.Count);
-        Assert.Equal(31m,seededPayrollLines.Sum(x=>x.GrossPay));
+
+        // Repeating a period must not claim the same visits or produce another batch.
+        Assert.Equal(HttpStatusCode.Conflict, (await finance.PostAsJsonAsync(
+            "/api/phase1/finance/invoice-batches", new { periodStart=start, periodEnd=end, defaultHourlyRate=25m, mileageRate=0m })).StatusCode);
+        Assert.Equal(2, (await finance.GetFromJsonAsync<List<InvoiceLine>>($"/api/phase1/finance/invoices/{invoiceId}/lines"))!.Count);
 
         var reconciliation=await finance.PostAsJsonAsync("/api/phase1/finance/funding-reconciliations",new{serviceUserId=personId,periodStart=start,periodEnd=end,allowedVarianceHours=0.1m,notes="Regression reconciliation"});
         Assert.Equal(HttpStatusCode.Created,reconciliation.StatusCode);
         Assert.Contains("varianceHours",await reconciliation.Content.ReadAsStringAsync());
         var dashboard=await finance.GetStringAsync("/api/phase1/finance/dashboard");
-        Assert.Contains("paymentsReceived",dashboard);Assert.Contains("payrollTotal",dashboard);
+        Assert.Contains("paymentsReceived",dashboard);Assert.DoesNotContain("payrollTotal",dashboard);
 
         using var verify=factory.Services.CreateScope();var verifyDb=verify.ServiceProvider.GetRequiredService<CareDbContext>();
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="finance.invoice_batch_generated"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="finance.payment_recorded"));
-        Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="finance.payroll_batch_generated"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="finance.funding_reconciled"));
+        await Assert.ThrowsAnyAsync<Exception>(()=>verifyDb.Database.ExecuteSqlRawAsync("update finance_invoice_lines set amount=amount+1 where invoice_id={0}",invoiceId));
     }
 
     private static AppUser User(string name,UserRole role,Guid? worker)=>new(Guid.NewGuid(),name,$"{name}@aicare.local",PasswordHasher.HashPassword("Admin123!"),role,true,TenantDefaults.OrganizationId,TenantDefaults.BranchId,worker,null);

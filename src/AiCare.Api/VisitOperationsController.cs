@@ -11,16 +11,16 @@ namespace AiCare.Api;
 [ApiController]
 [Authorize(Policy="Phase1User")]
 [Route("api/phase1/visit-operations")]
-public sealed class VisitOperationsController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user):ControllerBase
+public sealed class VisitOperationsController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user,IContextualAuthorization authorization):ControllerBase
 {
     private static readonly string[] ExceptionTypes=["Late","Missed","Shortened","Cancelled","NoAccess","RefusedCare"];
     [HttpGet("visits/{visitId:guid}")]
-    public async Task<IActionResult> Workspace(Guid visitId,CancellationToken token){var visit=await Visit(visitId,token);if(visit is null||!await CanAccess(visit,token))return NotFound();return Ok(new{exceptions=await Exceptions(visitId,token),handovers=await Handovers(visitId,token),scheduleHistory=await History(visitId,token)});}
+    public async Task<IActionResult> Workspace(Guid visitId,CancellationToken token){var visit=await Visit(visitId,token);if(visit is null||!await authorization.CanOperateVisitAsync(visit.Id,token))return NotFound();return Ok(new{exceptions=await Exceptions(visitId,token),handovers=await Handovers(visitId,token),scheduleHistory=await History(visitId,token)});}
 
     [HttpPost("visits/{visitId:guid}/exceptions")]
     public async Task<IActionResult> AddException(Guid visitId,CreateVisitExceptionRequest request,CancellationToken token)
     {
-        var visit=await Visit(visitId,token);if(visit is null||!await CanAccess(visit,token))return NotFound();
+        var visit=await Visit(visitId,token);if(visit is null||!await authorization.CanOperateVisitAsync(visit.Id,token))return NotFound();
         if(!ExceptionTypes.Contains(request.ExceptionType)||string.IsNullOrWhiteSpace(request.Reason)||string.IsNullOrWhiteSpace(request.ImmediateAction)||string.IsNullOrWhiteSpace(request.FollowUpOwner))return BadRequest(new{message="Exception type, reason, immediate action, and follow-up owner are required."});
         var id=Guid.NewGuid();var due=request.EscalationDueAt??DateTimeOffset.UtcNow.Add(request.Severity is "Critical"?TimeSpan.FromMinutes(15):request.Severity is "High"?TimeSpan.FromHours(1):TimeSpan.FromHours(4));
         await Execute("insert into visit_exceptions(id,visit_id,service_user_id,organization_id,branch_id,exception_type,severity,reason,immediate_action,notify_manager,follow_up_owner,escalation_due_at,status,created_by) values(@id,@visit,@person,@organization,@branch,@type,@severity,@reason,@action,@notify,@owner,@due,'Open',@actor)",c=>{Add(c,"id",id);Add(c,"visit",visit.Id);Add(c,"person",visit.ServiceUserId);Add(c,"type",request.ExceptionType);Add(c,"severity",request.Severity);Add(c,"reason",request.Reason.Trim());Add(c,"action",request.ImmediateAction.Trim());Add(c,"notify",request.NotifyManager);Add(c,"owner",request.FollowUpOwner.Trim());Add(c,"due",due);},token);
@@ -40,12 +40,12 @@ public sealed class VisitOperationsController(CareDbContext db,ITenantContext te
     [HttpPost("visits/{visitId:guid}/handovers")]
     public async Task<IActionResult> AddHandover(Guid visitId,CreateHandoverRequest request,CancellationToken token)
     {
-        var visit=await Visit(visitId,token);if(visit is null||!await CanAccess(visit,token))return NotFound();if(string.IsNullOrWhiteSpace(request.Summary)||string.IsNullOrWhiteSpace(request.OutstandingActions))return BadRequest(new{message="Summary and outstanding actions are required."});
+        var visit=await Visit(visitId,token);if(visit is null||!await authorization.CanOperateVisitAsync(visit.Id,token))return NotFound();if(string.IsNullOrWhiteSpace(request.Summary)||string.IsNullOrWhiteSpace(request.OutstandingActions))return BadRequest(new{message="Summary and outstanding actions are required."});
         var id=Guid.NewGuid();await Execute("insert into visit_handovers(id,visit_id,service_user_id,organization_id,branch_id,summary,outstanding_actions,urgent,attachment_reference,created_by) values(@id,@visit,@person,@organization,@branch,@summary,@actions,@urgent,@attachment,@actor)",c=>{Add(c,"id",id);Add(c,"visit",visit.Id);Add(c,"person",visit.ServiceUserId);Add(c,"summary",request.Summary.Trim());Add(c,"actions",request.OutstandingActions.Trim());Add(c,"urgent",request.Urgent);Add(c,"attachment",request.AttachmentReference??"");},token);Audit("visit_handover.created",id);await db.SaveChangesAsync(token);return Created($"/api/phase1/visit-operations/handovers/{id}",new{id});
     }
 
     [HttpPost("handovers/{id:guid}/acknowledge")]
-    public async Task<IActionResult> Acknowledge(Guid id,CancellationToken token){var changed=await Execute("insert into handover_acknowledgements(handover_id,user_id,organization_id) select id,@userId,@organization from visit_handovers where id=@id and organization_id=@organization on conflict do nothing",c=>{Add(c,"id",id);Add(c,"userId",user.UserId);},token);if(changed==0)return NoContent();Audit("visit_handover.acknowledged",id);await db.SaveChangesAsync(token);return NoContent();}
+    public async Task<IActionResult> Acknowledge(Guid id,CancellationToken token){var visitId=await db.Database.SqlQueryRaw<Guid>("select visit_id as \"Value\" from visit_handovers where id={0} and organization_id={1}",id,tenant.OrganizationId).SingleOrDefaultAsync(token);var visit=visitId==Guid.Empty?null:await Visit(visitId,token);if(visit is null||!await authorization.CanOperateVisitAsync(visit.Id,token))return NotFound();var changed=await Execute("insert into handover_acknowledgements(handover_id,user_id,organization_id) select id,@userId,@organization from visit_handovers where id=@id and organization_id=@organization on conflict do nothing",c=>{Add(c,"id",id);Add(c,"userId",user.UserId);},token);if(changed==0)return NoContent();Audit("visit_handover.acknowledged",id);await db.SaveChangesAsync(token);return NoContent();}
 
     [HttpGet("dashboard")]
     [Authorize(Roles="CareCoordinator,CareManager,Administrator")]
@@ -55,7 +55,6 @@ public sealed class VisitOperationsController(CareDbContext db,ITenantContext te
     }
 
     private async Task<Visit?> Visit(Guid id,CancellationToken t)=>await db.Visits.SingleOrDefaultAsync(v=>v.Id==id&&v.OrganizationId==tenant.OrganizationId,t);
-    private async Task<bool> CanAccess(Visit visit,CancellationToken t){if(user.IsAdministrator||user.IsCareManager||user.IsCareCoordinator)return true;if(!user.IsCareWorker||user.CareWorkerId is null)return false;if(visit.CareWorkerId==user.CareWorkerId)return true;await using var c=await Command("select exists(select 1 from visit_care_worker_assignments where visit_id=@visit and care_worker_id=@worker and organization_id=@organization)",t);Add(c,"visit",visit.Id);Add(c,"worker",user.CareWorkerId.Value);return Convert.ToBoolean(await c.ExecuteScalarAsync(t));}
     private async Task<List<VisitExceptionResponse>> Exceptions(Guid visit,CancellationToken t)=>await Query<VisitExceptionResponse>("select id,exception_type,severity,reason,immediate_action,notify_manager,follow_up_owner,escalation_due_at,status,created_by,created_at from visit_exceptions where visit_id=@visit and organization_id=@organization order by created_at desc",visit,r=>new(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetBoolean(5),r.GetString(6),r.GetFieldValue<DateTimeOffset>(7),r.GetString(8),r.GetString(9),r.GetFieldValue<DateTimeOffset>(10)),t);
     private async Task<List<HandoverResponse>> Handovers(Guid visit,CancellationToken t)=>await Query<HandoverResponse>("select h.id,h.summary,h.outstanding_actions,h.urgent,h.attachment_reference,h.created_by,h.created_at,exists(select 1 from handover_acknowledgements a where a.handover_id=h.id and a.user_id=@userId) from visit_handovers h where h.visit_id=@visit and h.organization_id=@organization order by h.created_at desc",visit,r=>new(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetBoolean(3),r.GetString(4),r.GetString(5),r.GetFieldValue<DateTimeOffset>(6),r.GetBoolean(7)),t,true);
     private async Task<List<ScheduleChangeResponse>> History(Guid visit,CancellationToken t)=>await Query<ScheduleChangeResponse>("select id,change_type,old_values_json,new_values_json,reason,changed_by,changed_at from schedule_change_history where visit_id=@visit and organization_id=@organization order by changed_at desc",visit,r=>new(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetString(5),r.GetFieldValue<DateTimeOffset>(6)),t);

@@ -1,3 +1,4 @@
+using Npgsql;
 using System.Data;
 using System.Data.Common;
 using AiCare.Application;
@@ -67,11 +68,9 @@ public sealed class WorkforceComplianceController : ControllerBase
                 training.Count(item => item.ExpiresAt is not null && item.ExpiresAt <= now.AddDays(30) && item.ExpiresAt > now),
                 now));
         }
-        catch (DbException)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            var legacyReady = (worker.DbsStatus.Contains("valid", StringComparison.OrdinalIgnoreCase) || worker.DbsStatus.Contains("clear", StringComparison.OrdinalIgnoreCase))
-                && !string.IsNullOrWhiteSpace(worker.TrainingCompliance)
-                && !string.IsNullOrWhiteSpace(worker.Availability);
+            var legacyReady = false; // Missing structured evidence must never authorize assignment.
             return Ok(new WorkerComplianceSummary(
                 worker.Id,
                 legacyReady,

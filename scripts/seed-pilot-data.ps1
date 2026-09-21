@@ -9,7 +9,12 @@ param(
     [string]$AdminName = "Pilot Administrator",
     [string]$AdminEmail = "pilot.admin@aicare.local",
     [string]$AdminPassword = "PilotAdmin123!",
-    [switch]$ActivateTenant
+    [switch]$ActivateTenant,
+    [switch]$Resume,
+    [string]$ExpectedOrganizationId = "",
+    [switch]$UseCurl,
+    [string[]]$ExistingWorkerIds = @(),
+    [switch]$SkipMar
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,10 +29,47 @@ function Invoke-Api {
     )
 
     $uri = "$($ApiBaseUrl.TrimEnd('/'))$Path"
+    if ($Resume -and $Method -eq 'Post' -and $Path -eq '/api/auth/signup-tenant') { return $null }
+    if ($Resume -and $Method -eq 'Post' -and $Path -match '^/api/phase1/(care-workers|service-users|care-plans|family-members|medications|visits|mar)$') {
+        $existing = @(Invoke-Api -Method Get -Path $Path -Token $Token)
+        $match = @($existing | Where-Object {
+            $record = $_
+            switch ($Path.Split('/')[-1]) {
+                'care-workers' { $record.fullName -eq $Body.fullName }
+                'service-users' { $record.fullName -eq $Body.fullName }
+                'care-plans' { $record.serviceUserId -eq $Body.serviceUserId }
+                'family-members' { $record.serviceUserId -eq $Body.serviceUserId -and $record.email -eq $Body.email }
+                'medications' { $record.serviceUserId -eq $Body.serviceUserId -and $record.name -eq $Body.name }
+                'visits' { $record.serviceUserId -eq $Body.serviceUserId -and ([datetimeoffset]$record.startsAt) -eq ([datetimeoffset]$Body.startsAt) }
+                'mar' { $record.medicationId -eq $Body.medicationId -and $record.visitId -eq $Body.visitId }
+            }
+        })
+        if ($Path -eq '/api/phase1/care-workers' -and $ExistingWorkerIds.Count -gt 0) {
+            $match = @($match | Where-Object { $_.id -in $ExistingWorkerIds })
+            if ($match.Count -ne 1) { throw 'Expected exactly one selected existing worker.' }
+        }
+        if ($match.Count -gt 1) { throw "Multiple matching records at $Path; review before resuming." }
+        if ($match.Count -eq 1) { return $match[0] }
+    }
     $requestHeaders = @{}
     foreach ($key in $Headers.Keys) { $requestHeaders[$key] = $Headers[$key] }
     if ($Token) { $requestHeaders["Authorization"] = "Bearer $Token" }
 
+    if ($UseCurl) {
+        $curlArgs = @('--connect-timeout', '15', '--max-time', '60', '-sS', '-X', $Method.ToUpperInvariant(), '-H', 'Content-Type: application/json', '-w', "`n%{http_code}", $uri)
+        foreach ($key in $requestHeaders.Keys) { $curlArgs += @('-H', "$($key): $($requestHeaders[$key])") }
+        if ($null -ne $Body) {
+            $raw = ($Body | ConvertTo-Json -Depth 12 -Compress) | & curl.exe @curlArgs --data-binary '@-'
+        } else { $raw = & curl.exe @curlArgs }
+        if ($LASTEXITCODE -ne 0) { throw "Transport failed for $Method $Path. Check existing records before retrying." }
+        $lines = @($raw)
+        $status = [int]$lines[-1]
+        $responseBody = ($lines | Select-Object -SkipLast 1) -join "`n"
+        if ($status -eq 409 -and $Path -eq '/api/auth/signup-tenant') { return $null }
+        if ($status -ge 400) { throw "HTTP $status at $Method $Path : $responseBody" }
+        if ($responseBody) { return ($responseBody | ConvertFrom-Json) }
+        return $null
+    }
     $params = @{
         Method = $Method
         Uri = $uri
@@ -92,6 +134,7 @@ if ($login.mfaEnrollmentRequired) {
 
 $token = $login.token
 $me = Invoke-Api -Method Get -Path "/api/auth/me" -Token $token
+if ($ExpectedOrganizationId -and $me.organizationId -ne $ExpectedOrganizationId) { throw 'Organization mismatch; no seed records have been written.' }
 Write-Host "Using organization $($me.organizationId) as $($me.role)."
 
 $branches = @()
@@ -149,10 +192,15 @@ for ($i = 1; $i -le $ServiceUserCount; $i++) {
         fundingSource = $(if ($i % 3 -eq 0) { "Local authority" } elseif ($i % 3 -eq 1) { "Private" } else { "NHS continuing healthcare" })
         gender = $(if ($i % 2 -eq 0) { "Male" } else { "Female" })
         photoUrl = ""
+        mobilityStatus = "Independent with support as needed"
+        cognitiveStatus = "See individual assessment"
+        communicationNeeds = "Verbal communication"
+        culturalPreferences = "Discuss preferences with person"
+        dietaryRequirements = "Standard diet"
     }
     $people += $person
 
-    $reviewDue = (Get-Date).AddDays(60 + $i).ToString("o")
+    $reviewDue = (Get-Date).AddDays(60 + $i).ToUniversalTime().ToString("o")
     Invoke-Api -Method Post -Path "/api/phase1/care-plans" -Token $token -Body @{
         serviceUserId = $person.id
         personalCare = "Support with washing, dressing, grooming, and daily comfort checks."
@@ -186,7 +234,7 @@ for ($i = 1; $i -le $ServiceUserCount; $i++) {
     }
 }
 
-Write-Host "Creating one week of visits and MAR records..."
+Write-Host "Preparing one week of visits (skip MAR: $SkipMar)..."
 $visitCount = 0
 $marCount = 0
 $startDate = (Get-Date).Date.AddDays(1).AddHours(8)
@@ -199,7 +247,7 @@ for ($day = 0; $day -lt 7; $day++) {
         $visit = Invoke-Api -Method Post -Path "/api/phase1/visits" -Token $token -Headers @{ "Idempotency-Key" = "pilot-$($people[$i].id)-$day" } -Body @{
             serviceUserId = $people[$i].id
             careWorkerId = $worker.id
-            startsAt = $startsAt.ToString("o")
+            startsAt = $startsAt.ToUniversalTime().ToString("o")
             visitType = $(if ($hour -lt 12) { "Morning care" } elseif ($hour -lt 16) { "Lunchtime support" } else { "Tea visit" })
             durationMinutes = 45
             requiredSkills = $worker.specialization
@@ -209,12 +257,12 @@ for ($day = 0; $day -lt 7; $day++) {
         $visitCount++
 
         $personMed = @($allMeds | Where-Object { $_.serviceUserId -eq $people[$i].id } | Select-Object -First 1)
-        if ($personMed.Count -gt 0 -and $day -lt 5) {
+        if (!$SkipMar -and $personMed.Count -gt 0 -and $day -lt 5) {
             Invoke-Api -Method Post -Path "/api/phase1/mar" -Token $token -Body @{
                 medicationId = $personMed[0].id
                 visitId = $visit.id
                 careWorkerId = $worker.id
-                scheduledAt = $startsAt.AddMinutes(10).ToString("o")
+                scheduledAt = $startsAt.AddMinutes(10).ToUniversalTime().ToString("o")
                 notes = "Pilot scheduled medication prompt"
             } | Out-Null
             $marCount++
@@ -238,9 +286,10 @@ $result = [pscustomobject]@{
     serviceUsers = $people.Count
     carePlans = $onboarding.counts.carePlans
     familyMembers = $onboarding.counts.familyMembers
-    visitsCreated = $visitCount
+    visitsEnsured = $visitCount
     medications = @($allMeds).Count
-    marRecordsCreated = $marCount
+    marRecordsEnsured = $marCount
+    marSkipped = [bool]$SkipMar
     status = $onboarding.organization.status
     canActivate = $onboarding.canActivate
 }

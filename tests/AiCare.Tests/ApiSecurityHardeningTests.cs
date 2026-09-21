@@ -85,6 +85,23 @@ public sealed class ApiSecurityHardeningTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
+    public async Task StorageAndReadinessHealthResponsesDoNotExposeConfigurationDetails()
+    {
+        var client = _factory.CreateClient();
+
+        var storage = await client.GetAsync("/health/storage");
+        var readiness = await client.GetAsync("/health/ready");
+        var storageBody = await storage.Content.ReadAsStringAsync();
+        var readinessBody = await readiness.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, storage.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, readiness.StatusCode);
+        Assert.DoesNotContain("bucket", storageBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Supabase:ServiceRoleKey", storageBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("jwtConfigured", readinessBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task CrossTenantAdministratorCannotReadServiceUserById()
     {
         var client = CrossTenantAdminClient();

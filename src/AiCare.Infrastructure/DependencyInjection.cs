@@ -22,6 +22,7 @@ public static class DependencyInjection
         services.AddHostedService<ProductionConfigurationValidationService>();
         services.AddHostedService<RenderTestPatientSeeder>();
         services.AddHostedService<IntegrationJobWorker>();
+        services.AddHostedService<InvoiceOverdueWorker>();
         services.AddSingleton<IDocumentMalwareScanner, BasicDocumentMalwareScanner>();
         services.AddSingleton<IProductionAlertSink, WebhookProductionAlertSink>();
         services.AddSingleton<IStartupFilter, ApiSecurityHardeningStartupFilter>();

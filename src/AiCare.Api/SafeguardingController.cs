@@ -69,6 +69,7 @@ public sealed class SafeguardingController : ControllerBase
         if (!await LockCase(caseId, cancellationToken)) return NotFound();
         var existing = (await QueryCases(null, null, cancellationToken)).SingleOrDefault(x => x.Id == caseId);
         if (existing is null) return NotFound();
+        if (existing.Status == "Closed") return Conflict(new { message = "Closed cases are immutable. Use the explicit reopen endpoint." });
         var allowed = new[] { "Open", "Investigating", "Referred", "Monitoring", "Closed" };
         var effectiveRisk = NormalizeRisk(request.RiskLevel ?? existing.RiskLevel);
         if (effectiveRisk is null) return BadRequest(new { message = "Invalid safeguarding risk level." });
@@ -92,6 +93,35 @@ public sealed class SafeguardingController : ControllerBase
         await _context.SaveChangesAsync(cancellationToken);
         return Ok((await QueryCases(null, null, cancellationToken)).Single(x => x.Id == caseId));
     }
+
+    [HttpPost("cases/{caseId:guid}/reopen")]
+    [Authorize(Roles = "CareManager,Administrator")]
+    public Task<IActionResult> ReopenCase(Guid caseId, ReopenSafeguardingCaseRequest request, CancellationToken token)
+        => InTransaction(async () =>
+        {
+            if (!await LockCase(caseId, token)) return (IActionResult)NotFound();
+            var existing = (await QueryCases(null, null, token)).Single(x => x.Id == caseId);
+            if (existing.Status != "Closed") return Conflict(new { message = "Only closed safeguarding cases can be reopened." });
+            if (string.IsNullOrWhiteSpace(request.Reason)) return BadRequest(new { message = "A reopening reason is required." });
+
+            // Snapshot the previous closure before clearing current-state fields. Events are immutable.
+            var detail = System.Text.Json.JsonSerializer.Serialize(new {
+                reason = request.Reason.Trim(), previousStatus = existing.Status,
+                previousClosedAt = existing.ClosedAt, previousClosureSummary = existing.ClosureSummary,
+                previousRiskLevel = existing.RiskLevel
+            });
+            await Event(caseId, "Reopened", detail, token);
+            await Execute("""
+                update safeguarding_cases set status='Open',closed_at=null,closure_summary='',updated_at=now()
+                where id=@id and organization_id=@organization and status='Closed'
+                """, c => { Add(c,"id",caseId); Add(c,"organization",_tenant.OrganizationId); }, token);
+            await Execute("""
+                insert into "AuditEvents" ("Id","Action","Actor","EntityType","EntityId","CreatedAt","OrganizationId","BranchId")
+                select @audit,'safeguarding.case_reopened',@actor,'SafeguardingCase',id,now(),organization_id,branch_id
+                from safeguarding_cases where id=@id and organization_id=@organization
+                """, c => { Add(c,"audit",Guid.NewGuid()); Add(c,"actor",_currentUser.UserName); Add(c,"id",caseId); Add(c,"organization",_tenant.OrganizationId); }, token);
+            return NoContent();
+        }, token);
 
     [HttpGet("cases/{caseId:guid}/actions")]
     [Authorize(Roles = "CareCoordinator,CareManager,Administrator")]
@@ -170,7 +200,7 @@ public sealed class SafeguardingController : ControllerBase
         try{await using var command=connection.CreateCommand();command.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction();command.CommandText="select id,action_type,detail,owner,due_at,completed_at,status,created_at,completion_evidence,completed_by from safeguarding_case_actions where case_id=@case order by created_at desc";Add(command,"case",caseId);await using var reader=await command.ExecuteReaderAsync(cancellationToken);while(await reader.ReadAsync(cancellationToken))result.Add(new SafeguardingActionResponse(reader.GetGuid(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),ReadDate(reader,4),ReadDate(reader,5),reader.GetString(6),reader.GetDateTime(7),reader.GetString(8),reader.GetString(9)));return result;}finally{if(opened)await connection.CloseAsync();}
     }
 
-    private Task Event(Guid caseId,string type,string detail,CancellationToken token)=>Execute("insert into safeguarding_case_events(id,case_id,organization_id,branch_id,event_type,detail,actor) values(@id,@case,@organization,@branch,@type,@detail,@actor)",c=>{Add(c,"id",Guid.NewGuid());Add(c,"case",caseId);Add(c,"organization",_tenant.OrganizationId);Add(c,"branch",_tenant.BranchId??TenantDefaults.BranchId);Add(c,"type",type);Add(c,"detail",detail);Add(c,"actor",_currentUser.UserName);},token);
+    private Task Event(Guid caseId,string type,string detail,CancellationToken token)=>Execute("insert into safeguarding_case_events(id,case_id,organization_id,branch_id,event_type,detail,actor) select @id,id,organization_id,branch_id,@type,@detail,@actor from safeguarding_cases where id=@case and organization_id=@organization",c=>{Add(c,"id",Guid.NewGuid());Add(c,"case",caseId);Add(c,"organization",_tenant.OrganizationId);Add(c,"branch",_tenant.BranchId??TenantDefaults.BranchId);Add(c,"type",type);Add(c,"detail",detail);Add(c,"actor",_currentUser.UserName);},token);
     private async Task<long> Scalar(string sql,Guid caseId,CancellationToken token){var connection=_context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(token);try{await using var command=connection.CreateCommand();command.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction();command.CommandText=sql;Add(command,"case",caseId);return Convert.ToInt64(await command.ExecuteScalarAsync(token));}finally{if(opened)await connection.CloseAsync();}}
     private async Task<int> Execute(string sql,Action<DbCommand> bind,CancellationToken cancellationToken){var connection=_context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(cancellationToken);try{await using var command=connection.CreateCommand();command.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction();command.CommandText=sql;bind(command);return await command.ExecuteNonQueryAsync(cancellationToken);}finally{if(opened)await connection.CloseAsync();}}
     private static DateTimeOffset? ReadDate(DbDataReader reader,int ordinal)=>reader.IsDBNull(ordinal)?null:new DateTimeOffset(DateTime.SpecifyKind(reader.GetDateTime(ordinal),DateTimeKind.Utc));
@@ -183,3 +213,5 @@ public sealed record SafeguardingActionRequest(string ActionType,string Detail,s
 public sealed record CompleteSafeguardingActionRequest(string CompletionEvidence);
 public sealed record SafeguardingCaseResponse(Guid Id,Guid ServiceUserId,Guid? IncidentId,string Category,string Concern,string ImmediateActions,string RiskLevel,string Status,string ExternalReferral,string ReferralReference,string Owner,DateTimeOffset OpenedAt,DateTimeOffset? ReviewDueAt,DateTimeOffset? ClosedAt,string ClosureSummary,string CreatedBy,DateTimeOffset UpdatedAt);
 public sealed record SafeguardingActionResponse(Guid Id,string ActionType,string Detail,string Owner,DateTimeOffset? DueAt,DateTimeOffset? CompletedAt,string Status,DateTimeOffset CreatedAt,string CompletionEvidence,string CompletedBy);
+
+public sealed record ReopenSafeguardingCaseRequest(string? Reason);

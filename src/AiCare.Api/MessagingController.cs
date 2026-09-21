@@ -79,7 +79,10 @@ public sealed class MessagingController : ControllerBase
                 reader.GetString(6),
                 reader.GetInt64(7)));
         }
-        return Ok(rows);
+        await reader.DisposeAsync();
+        var visible = new List<ConversationSummaryDto>();
+        foreach(var row in rows) if(await CanAccessConversationAsync(row.Id,cancellationToken)) visible.Add(row);
+        return Ok(visible);
     }
 
     [HttpPost("conversations")]
@@ -89,23 +92,20 @@ public sealed class MessagingController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Subject)) return BadRequest(new { message = "Subject is required." });
         if (request.Subject.Trim().Length > 200) return BadRequest(new { message = "Subject is too long." });
 
-        if (request.ServiceUserId is not null)
-        {
-            var serviceUserExists = await _db.ServiceUsers.AsNoTracking().AnyAsync(x =>
-                x.Id == request.ServiceUserId && x.OrganizationId == _tenant.OrganizationId, cancellationToken);
-            if (!serviceUserExists) return NotFound();
-            if (_user.IsFamilyMember && !await FamilyCanMessageAsync(request.ServiceUserId.Value, cancellationToken)) return Forbid();
-        }
-        else if (_user.IsFamilyMember)
-        {
-            return BadRequest(new { message = "Family conversations must be linked to a service user." });
-        }
-
-        var participants = request.ParticipantUserIds.Append(userId).Distinct().ToArray();
-        if (participants.Length > 50) return BadRequest(new { message = "Too many participants." });
-        var validParticipantCount = await _db.AppUsers.AsNoTracking().CountAsync(x =>
-            x.OrganizationId == _tenant.OrganizationId && x.IsActive && participants.Contains(x.Id), cancellationToken);
-        if (validParticipantCount != participants.Length) return BadRequest(new { message = "All participants must be active users in this organization." });
+        var access=new MessagingAccess(_db,_tenant,_user);
+        var actor=await access.Actor(cancellationToken);
+        if(actor is null)return Unauthorized();
+        if(request.ServiceUserId is Guid person && !await access.Person(actor,person,cancellationToken))return NotFound();
+        if(request.ServiceUserId is null && actor.Role is UserRole.FamilyMember or UserRole.ServiceUser)
+            return BadRequest(new {message="A service user is required."});
+        var participants=(request.ParticipantUserIds??[]).Append(userId).Distinct().ToArray();
+        if(participants.Length>50)return BadRequest(new {message="Too many participants."});
+        var allowed=await access.Directory(request.ServiceUserId,cancellationToken);
+        if(participants.Any(id=>id!=userId&&!allowed.Any(x=>x.Id==id)))
+            return BadRequest(new {message="Participants must belong to the authorized branch or care team."});
+        var conversationBranch=request.ServiceUserId is Guid servicePerson
+            ? await _db.ServiceUsers.Where(x=>x.Id==servicePerson).Select(x=>x.BranchId).SingleAsync(cancellationToken)
+            : actor.BranchId;
 
         var id = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
@@ -124,7 +124,7 @@ public sealed class MessagingController : ControllerBase
             Add(command, "userId", userId);
             Add(command, "now", now);
             Add(command, "organizationId", _tenant.OrganizationId);
-            Add(command, "branchId", _tenant.BranchId);
+            Add(command, "branchId", conversationBranch);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         foreach (var participantId in participants)
@@ -150,13 +150,14 @@ public sealed class MessagingController : ControllerBase
         await using var command = connection.CreateCommand();
         command.CommandText = """
             select m.id,m.sender_user_id,m.body,m.reply_to_message_id,m.sent_at,m.edited_at,
-                   coalesce((select count(*) from conversation_message_reads r where r.message_id=m.id),0),
-                   m.classification,m.delivery_status,m.failure_reason,m.retry_count,m.retention_until,m.legal_hold
+                   coalesce((select count(*) from conversation_message_reads r where r.message_id=m.id and r.user_id<>m.sender_user_id),0),
+                   m.classification,case when m.delivery_status='Read' then 'Delivered' else m.delivery_status end,m.failure_reason,m.retry_count,m.retention_until,m.legal_hold,exists(select 1 from conversation_message_reads r where r.message_id=m.id and r.user_id=@readerId)
             from conversation_messages m
             where m.conversation_id=@conversationId and m.deleted_at is null
             order by m.sent_at
             """;
         Add(command, "conversationId", conversationId);
+        Add(command, "readerId", RequireUserId());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -164,7 +165,7 @@ public sealed class MessagingController : ControllerBase
                 reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetGuid(3), reader.GetFieldValue<DateTimeOffset>(4),
                 reader.IsDBNull(5) ? null : reader.GetFieldValue<DateTimeOffset>(5), reader.GetInt64(6),
-                reader.GetString(7),reader.GetString(8),reader.GetString(9),reader.GetInt32(10),reader.IsDBNull(11)?null:reader.GetFieldValue<DateTimeOffset>(11),reader.GetBoolean(12)));
+                reader.GetString(7),reader.GetString(8),reader.GetString(9),reader.GetInt32(10),reader.IsDBNull(11)?null:reader.GetFieldValue<DateTimeOffset>(11),reader.GetBoolean(12),reader.GetBoolean(13)));
         }
         return Ok(new { id = conversationId, messages });
     }
@@ -185,13 +186,24 @@ public sealed class MessagingController : ControllerBase
         if (attachmentIds.Length > 10) return BadRequest(new { message = "A message can contain at most 10 attachments." });
         if (attachmentIds.Length > 0)
         {
-            var serviceUserId = await GetConversationServiceUserIdAsync(conversationId, cancellationToken);
-            if (_user.IsFamilyMember && (serviceUserId is null || !await FamilyCanViewDocumentsAsync(serviceUserId.Value, cancellationToken)))
-                return Forbid();
-            var validDocuments = await _db.Documents.AsNoTracking().CountAsync(x =>
-                x.OrganizationId == _tenant.OrganizationId && attachmentIds.Contains(x.Id) &&
-                (serviceUserId == null || x.ServiceUserId == serviceUserId), cancellationToken);
-            if (validDocuments != attachmentIds.Length) return BadRequest(new { message = "One or more attachments are not available to this conversation." });
+            var access=new MessagingAccess(_db,_tenant,_user);
+            var actor=await access.Actor(cancellationToken);
+            var person=await GetConversationServiceUserIdAsync(conversationId,cancellationToken);
+            if(actor is null)return Unauthorized();
+            foreach(var documentId in attachmentIds)
+                if(!await access.Document(actor,documentId,person,cancellationToken))return BadRequest(new {message="An attachment is not authorized for this conversation."});
+            // Sending an attachment must not disclose an internal document to a family recipient.
+            await using var recipientsConnection=await OpenAsync(cancellationToken);
+            await using var recipientsCommand=recipientsConnection.CreateCommand();
+            recipientsCommand.CommandText="select user_id from conversation_participants where conversation_id=@conversation and left_at is null";
+            Add(recipientsCommand,"conversation",conversationId);
+            var recipientIds=new List<Guid>();
+            await using(var reader=await recipientsCommand.ExecuteReaderAsync(cancellationToken))
+                while(await reader.ReadAsync(cancellationToken))recipientIds.Add(reader.GetGuid(0));
+            var recipients=await _db.AppUsers.AsNoTracking().Where(x=>recipientIds.Contains(x.Id)&&x.IsActive).ToListAsync(cancellationToken);
+            foreach(var recipient in recipients)
+                foreach(var documentId in attachmentIds)
+                    if(!await access.Document(recipient,documentId,person,cancellationToken))return BadRequest(new {message="An attachment is not shared with every recipient."});
         }
 
         var messageId = Guid.NewGuid();
@@ -226,10 +238,20 @@ public sealed class MessagingController : ControllerBase
             Add(command, "messageId", messageId); Add(command, "userId", userId); Add(command, "now", now); Add(command, "conversationId", conversationId);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
+        await using(var command=connection.CreateCommand())
+        {
+            command.Transaction=transaction;
+            command.CommandText="""
+                insert into "Notifications"("Id","Title","Detail","CreatedAt","IsRead","OrganizationId","BranchId")
+                select @notification,'New secure message','Open your authorized messaging inbox to view messages.',@now,false,organization_id,branch_id from conversations where id=@conversation;
+                insert into "AuditEvents"("Id","Action","Actor","EntityType","EntityId","CreatedAt","OrganizationId","BranchId")
+                select @audit,'messaging.message_delivered',@actor,'ConversationMessage',@message,@now,organization_id,branch_id from conversations where id=@conversation;
+                """;
+            Add(command,"notification",Guid.NewGuid());Add(command,"audit",Guid.NewGuid());Add(command,"actor",_user.UserName);
+            Add(command,"message",messageId);Add(command,"now",now);Add(command,"conversation",conversationId);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
         await transaction.CommitAsync(cancellationToken);
-        _db.Notifications.Add(new NotificationItem(Guid.NewGuid(),classification=="Urgent"?"Urgent secure message":"New secure message",$"In-app: {request.SubjectOrFallback(body)}",now,false,_tenant.OrganizationId,_tenant.BranchId??TenantDefaults.BranchId));
-        _db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"messaging.message_delivered",_user.UserName,"ConversationMessage",messageId,now,_tenant.OrganizationId,_tenant.BranchId??TenantDefaults.BranchId));
-        await _db.SaveChangesAsync(cancellationToken);
         return Ok(new { id = messageId, sentAt = now });
     }
 
@@ -240,63 +262,25 @@ public sealed class MessagingController : ControllerBase
         if (!await CanAccessConversationAsync(conversationId, cancellationToken)) return NotFound();
         var now = DateTimeOffset.UtcNow;
         await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction=await connection.BeginTransactionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+        command.Transaction=transaction;
         command.CommandText = """
             insert into conversation_message_reads(message_id,user_id,read_at)
             select m.id,@userId,@now from conversation_messages m where m.conversation_id=@conversationId and m.deleted_at is null
-            on conflict(message_id,user_id) do update set read_at=excluded.read_at;
+            on conflict(message_id,user_id) do nothing;
             update conversation_participants set last_read_at=@now where conversation_id=@conversationId and user_id=@userId;
-            update conversation_messages set delivery_status='Read' where conversation_id=@conversationId and sender_user_id<>@userId and delivery_status='Delivered';
             """;
         Add(command, "userId", userId); Add(command, "now", now); Add(command, "conversationId", conversationId);
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return NoContent();
     }
 
     private Guid RequireUserId() => _user.UserId ?? throw new UnauthorizedAccessException("Authenticated user id is required.");
 
-    private async Task<bool> CanAccessConversationAsync(Guid conversationId, CancellationToken cancellationToken)
-    {
-        var userId = RequireUserId();
-        await using var connection = await OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            select exists(
-                select 1
-                from conversations c
-                join conversation_participants p on p.conversation_id=c.id
-                where c.id=@conversationId
-                  and c.organization_id=@organizationId
-                  and p.user_id=@userId
-                  and p.left_at is null
-                  and (
-                        not @isFamilyMember
-                        or (
-                            c.service_user_id is not null
-                            and exists(
-                                select 1
-                                from family_access_grants g
-                                join family_access_permissions fp on fp.access_grant_id=g.id
-                                where g.organization_id=@organizationId
-                                  and g.family_member_id=@familyMemberId
-                                  and g.service_user_id=c.service_user_id
-                                  and g.verification_status='Verified'
-                                  and g.access_status='Active'
-                                  and (g.valid_from is null or g.valid_from<=now())
-                                  and (g.valid_until is null or g.valid_until>now())
-                                  and fp.permission='MessageCareTeam'
-                            )
-                        )
-                      )
-            )
-            """;
-        Add(command, "conversationId", conversationId);
-        Add(command, "organizationId", _tenant.OrganizationId);
-        Add(command, "userId", userId);
-        Add(command, "isFamilyMember", _user.IsFamilyMember);
-        Add(command, "familyMemberId", _user.FamilyMemberId ?? Guid.Empty);
-        return Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken));
-    }
+    private Task<bool> CanAccessConversationAsync(Guid conversationId,CancellationToken token)
+        => new MessagingAccess(_db,_tenant,_user).Conversation(conversationId,token);
 
     private async Task<bool> MessageBelongsToConversationAsync(Guid messageId, Guid conversationId, CancellationToken cancellationToken)
     {
@@ -367,4 +351,4 @@ public sealed record CreateConversationRequest(Guid? ServiceUserId, string Subje
 public sealed record SendMessageRequest(string Body, Guid? ReplyToMessageId, IReadOnlyCollection<Guid> DocumentIds,string? Classification=null,DateTimeOffset? RetentionUntil=null);
 public static class SendMessageRequestExtensions{public static string SubjectOrFallback(this SendMessageRequest request,string body)=>body.Length<=120?body:body[..120];}
 public sealed record ConversationSummaryDto(Guid Id, Guid? ServiceUserId, string Subject, string Status, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string LastMessage, long UnreadCount);
-public sealed record MessageDto(Guid Id, Guid SenderUserId, string Body, Guid? ReplyToMessageId, DateTimeOffset SentAt, DateTimeOffset? EditedAt, long ReadCount,string Classification,string DeliveryStatus,string FailureReason,int RetryCount,DateTimeOffset? RetentionUntil,bool LegalHold);
+public sealed record MessageDto(Guid Id, Guid SenderUserId, string Body, Guid? ReplyToMessageId, DateTimeOffset SentAt, DateTimeOffset? EditedAt, long ReadCount,string Classification,string DeliveryStatus,string FailureReason,int RetryCount,DateTimeOffset? RetentionUntil,bool LegalHold,bool IsReadByCurrentUser);

@@ -18,6 +18,7 @@ public sealed class AccessReviewRegressionTests(PostgresRegressionFactory factor
     {
         await factory.EnsureClinicalSeedAsync();
         var targetName = $"access.review.target.{Guid.NewGuid():N}";
+        var pendingName = $"access.review.pending.{Guid.NewGuid():N}";
         Guid targetUserId;
         using (var scope = factory.Services.CreateScope())
         {
@@ -35,6 +36,10 @@ public sealed class AccessReviewRegressionTests(PostgresRegressionFactory factor
                 null);
             targetUserId = target.Id;
             db.AppUsers.Add(target);
+            // Do not depend on accounts left behind by earlier runs to block closure.
+            db.AppUsers.Add(new AppUser(Guid.NewGuid(), pendingName, $"{pendingName}@aicare.local",
+                PasswordHasher.HashPassword("Admin123!"), UserRole.CareCoordinator, true,
+                TenantDefaults.OrganizationId, TenantDefaults.BranchId, null, null));
             await db.SaveChangesAsync();
         }
 
@@ -59,6 +64,8 @@ public sealed class AccessReviewRegressionTests(PostgresRegressionFactory factor
         Assert.Equal(HttpStatusCode.OK, run.StatusCode);
         var detail = JsonDocument.Parse(await run.Content.ReadAsStringAsync()).RootElement;
         var item = detail.GetProperty("items").EnumerateArray().Single(row => row.GetProperty("user_name").GetString() == targetName);
+        Assert.Contains(detail.GetProperty("items").EnumerateArray(),
+            row => row.GetProperty("user_name").GetString() == pendingName && row.GetProperty("status").GetString() == "Pending");
         var itemId = item.GetProperty("id").GetGuid();
         Assert.Equal("Critical", item.GetProperty("severity").GetString());
         Assert.Contains("Dormant", item.GetProperty("finding_codes").ToString());

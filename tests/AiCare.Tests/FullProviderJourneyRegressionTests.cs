@@ -121,8 +121,6 @@ public sealed class FullProviderJourneyRegressionTests(PostgresRegressionFactory
         var invoicePayload = (await invoiceBatch.Content.ReadFromJsonAsync<InvoiceBatchDto>())!;
         Assert.Contains(invoicePayload.Invoices, x => x.ServiceUserId == serviceUserId && x.Amount == 30m);
 
-        var payroll = await finance.PostAsJsonAsync("/api/phase1/finance/payroll-batches", new { periodStart = starts.AddHours(-1), periodEnd = starts.AddDays(1), defaultHourlyRate = 18m, mileageRate = 0m });
-        Assert.Equal(HttpStatusCode.Created, payroll.StatusCode);
 
         using var verify = factory.Services.CreateScope();
         var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
@@ -132,7 +130,6 @@ public sealed class FullProviderJourneyRegressionTests(PostgresRegressionFactory
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "care_note.reviewed"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "visit_handover.created"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "finance.invoice_batch_generated"));
-        Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "finance.payroll_batch_generated"));
     }
 
     private async Task<LifecycleDto> PostLifecycle(HttpClient client, Guid planId, string action, long expectedRevision, string comment)

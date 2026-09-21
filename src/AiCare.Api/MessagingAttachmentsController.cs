@@ -30,6 +30,10 @@ public sealed class MessagingAttachmentsController : ControllerBase
         var userId = _user.UserId;
         if (userId is null) return Unauthorized();
 
+        var policy=new MessagingAccess(_db,_tenant,_user);
+        if(!await policy.Conversation(conversationId,cancellationToken))return NotFound();
+        var actor=await policy.Actor(cancellationToken);
+        if(actor is null)return Unauthorized();
         var connectionString = _db.Database.GetConnectionString();
         if (string.IsNullOrWhiteSpace(connectionString)) return StatusCode(503);
         await using var connection = new NpgsqlConnection(connectionString);
@@ -63,7 +67,11 @@ public sealed class MessagingAttachmentsController : ControllerBase
         while (await reader.ReadAsync(cancellationToken))
             rows.Add(new MessageAttachmentDto(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2), reader.GetString(3)));
 
-        return Ok(rows);
+        await reader.DisposeAsync();
+        var visible=new List<MessageAttachmentDto>();
+        foreach(var row in rows)
+            if(await policy.Document(actor,row.DocumentId,access.ServiceUserId,cancellationToken))visible.Add(row);
+        return Ok(visible);
     }
 
     private async Task<ConversationAccessResult> GetAccessibleServiceUserIdAsync(DbConnection connection, Guid conversationId, Guid userId, CancellationToken cancellationToken)

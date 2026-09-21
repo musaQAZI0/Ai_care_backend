@@ -1,6 +1,7 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -16,13 +17,16 @@ public sealed class ReportingComplianceRegressionTests(PostgresRegressionFactory
     public async Task GovernedReportsEvidencePacksActionsAndDashboardAreAudited()
     {
         await factory.EnsureClinicalSeedAsync();
-        var adminName=$"report.admin.{Guid.NewGuid():N}";var workerName=$"report.worker.{Guid.NewGuid():N}";var personId=Guid.NewGuid();var workerId=Guid.NewGuid();var visitId=Guid.NewGuid();
+        var adminName=$"report.admin.{Guid.NewGuid():N}";var workerName=$"report.worker.{Guid.NewGuid():N}";var personId=Guid.NewGuid();var workerId=Guid.NewGuid();var visitId=Guid.NewGuid();var oldVisitId=Guid.NewGuid();var foreignDefinitionId=Guid.NewGuid();
         using(var scope=factory.Services.CreateScope())
         {
             var seedDb=scope.ServiceProvider.GetRequiredService<CareDbContext>();
             seedDb.CareWorkers.Add(new CareWorker(workerId,"Reporting Worker","Personal care","Flexible",0,0,"Valid","Compliant","10 miles",TenantDefaults.OrganizationId,TenantDefaults.BranchId));
             seedDb.ServiceUsers.Add(new ServiceUser(personId,"Reporting Person",new DateOnly(1948,7,7),"+10000000007","Care","Contact","",RiskLevel.Low,"Active","Address","None","None","Private","","","Independent","Independent","Verbal","Routine","Standard",TenantDefaults.OrganizationId,TenantDefaults.BranchId));
-            seedDb.Visits.Add(new Visit(visitId,personId,workerId,DateTimeOffset.UtcNow.AddDays(-1),"Reporting visit",30,"Personal care",VisitStatus.Completed,null,null,null,null,null,null,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
+            seedDb.Visits.AddRange(
+                new Visit(visitId,personId,workerId,DateTimeOffset.UtcNow.AddDays(-1),"Reporting visit",30,"Personal care",VisitStatus.Completed,null,null,null,null,null,null,TenantDefaults.OrganizationId,TenantDefaults.BranchId),
+                new Visit(oldVisitId,personId,workerId,DateTimeOffset.UtcNow.AddDays(-60),"Historic reporting visit",30,"Personal care",VisitStatus.Completed,null,null,null,null,null,null,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
+            seedDb.Reports.Add(new ReportDefinition(foreignDefinitionId,"Foreign definition","Operational","CSV","Manual",Guid.NewGuid(),Guid.NewGuid()));
             seedDb.Invoices.Add(new Invoice(Guid.NewGuid(),personId,"Private",55m,"Approved",DateTimeOffset.UtcNow,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
             seedDb.AppUsers.AddRange(User(adminName,UserRole.CareManager,null),User(workerName,UserRole.CareWorker,workerId));
             await seedDb.SaveChangesAsync();
@@ -30,14 +34,25 @@ public sealed class ReportingComplianceRegressionTests(PostgresRegressionFactory
 
         var admin=await Client(adminName);var worker=await Client(workerName);await StepUpTestGrants.GrantAsync(factory,admin,"export");
         Assert.Equal(HttpStatusCode.Forbidden,(await worker.GetAsync("/api/phase1/reporting-compliance/dashboard")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,(await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="Unknown metric",category="Operational",format="CSV",metrics=new[]{"Invented total"},filters=new Dictionary<string,string>()})).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,(await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="Unknown filter",category="Operational",format="CSV",metrics=new[]{"Completed visits"},filters=new Dictionary<string,string>{{"arbitrary","ignored before remediation"}}})).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,(await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{reportDefinitionId=foreignDefinitionId,name="Foreign definition",category="Operational",format="CSV",metrics=new[]{"Completed visits"},filters=new Dictionary<string,string>()})).StatusCode);
 
         var report=await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="Governed operations report",category="Operational",format="CSV",metrics=new[]{"Service users","Completed visits","Open incidents","Invoice total","Audit events"},filters=new Dictionary<string,string>{{"period","Last 7 days"}}});
         Assert.Equal(HttpStatusCode.Created,report.StatusCode);
-        var reportId=(await report.Content.ReadFromJsonAsync<Created>())!.Id;
+        var reportPayload=(await report.Content.ReadFromJsonAsync<JsonElement>());
+        var reportId=reportPayload.GetProperty("id").GetGuid();
+        var filteredCompleted=reportPayload.GetProperty("metrics").GetProperty("Completed visits").GetDecimal();
+        var allTime=await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="All-time comparison",category="Operational",format="CSV",metrics=new[]{"Completed visits"},filters=new Dictionary<string,string>{{"period","All time"}}});
+        Assert.Equal(HttpStatusCode.Created,allTime.StatusCode);
+        var allTimeCompleted=(await allTime.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("metrics").GetProperty("Completed visits").GetDecimal();
+        Assert.True(allTimeCompleted>filteredCompleted);
         var csv=await admin.GetAsync($"/api/phase1/reporting-compliance/report-runs/{reportId}/csv");
         Assert.Equal(HttpStatusCode.OK,csv.StatusCode);
         Assert.Contains("completed visits",await csv.Content.ReadAsStringAsync(),StringComparison.OrdinalIgnoreCase);
 
+        Assert.Equal(HttpStatusCode.BadRequest,(await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/evidence",new{domain="Safe",requirement="Invalid evidence",evidenceType="Executable",evidenceReference="BAD-1",status="Ready",owner="Quality lead",reviewDueAt=DateTimeOffset.UtcNow.AddDays(1),notes=""})).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,(await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/actions",new{evidenceId=(Guid?)null,actionType="Arbitrary",detail="Invalid action type",owner="Quality lead",dueAt=DateTimeOffset.UtcNow.AddDays(1)})).StatusCode);
         var evidence=await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/evidence",new{domain="Safe",requirement="Medication governance evidence",evidenceType="Report",evidenceReference="MAR-EXPORT-1",status="Ready",owner="Quality lead",reviewDueAt=DateTimeOffset.UtcNow.AddDays(-1),notes="Regression evidence"});
         Assert.Equal(HttpStatusCode.Created,evidence.StatusCode);
         var evidenceId=(await evidence.Content.ReadFromJsonAsync<Created>())!.Id;

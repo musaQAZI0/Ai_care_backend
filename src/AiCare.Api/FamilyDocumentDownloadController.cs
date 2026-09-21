@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using AiCare.Application;
 using AiCare.Application.FamilyPortal;
+using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -52,6 +53,10 @@ public sealed class FamilyDocumentDownloadController(
                 return Conflict(new { message = "This document is not stored in cloud storage and cannot be opened through the Family Portal." });
 
             var signedUrl = await CreateSupabaseSignedUrl(document.StoragePath, cancellationToken);
+            db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "family.document_download_url_issued",
+                currentUser.UserName, "Document", documentId, DateTimeOffset.UtcNow,
+                document.OrganizationId, document.BranchId));
+            await db.SaveChangesAsync(cancellationToken);
             return Ok(new { provider = "Supabase", url = signedUrl, expiresInSeconds = 900 });
         }
         catch (UnauthorizedAccessException)

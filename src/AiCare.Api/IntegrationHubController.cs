@@ -34,7 +34,8 @@ public sealed class IntegrationHubController(CareDbContext db, ITenantContext te
     [HttpPost("connectors")]
     public async Task<IActionResult> CreateConnector(CreateIntegrationConnectorRequest request, CancellationToken token)
     {
-        if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.ConnectorType)) return BadRequest(new { message = "Name and connector type are required." });
+        var validationError=IntegrationConnectorPolicy.ValidateCreate(request);
+        if(validationError is not null)return BadRequest(new{message=validationError});
         var id = Guid.NewGuid();
         var webhookSecret=request.EnableWebhook?Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).ToLowerInvariant():null;
         var protectedSecret=webhookSecret is null?null:protection.CreateProtector("AiCare.Integration.Webhook.v1").Protect(webhookSecret);
@@ -48,6 +49,7 @@ public sealed class IntegrationHubController(CareDbContext db, ITenantContext te
     public async Task<IActionResult> UpdateConnector(Guid id,UpdateIntegrationConnectorRequest request,CancellationToken token)
     {
         if(request.ScheduleMinutes is < 1 or > 10080)return BadRequest(new{message="Schedule must be between 1 minute and 7 days."});
+        var endpointError=IntegrationConnectorPolicy.ValidateEndpoint(request.EndpointUrl);if(endpointError is not null)return BadRequest(new{message=endpointError});
         var changed=await Exec("update integration_connectors set name=coalesce(nullif(trim(@name),''),name),endpoint_url=coalesce(@endpoint,endpoint_url),status=coalesce(@status,status),schedule_minutes=coalesce(@schedule,schedule_minutes),updated_at=now() where id=@id and organization_id=@organization",c=>{Add(c,"id",id);Add(c,"name",request.Name);Add(c,"endpoint",request.EndpointUrl);Add(c,"status",request.Status is "Active" or "Disabled"?request.Status:null);Add(c,"schedule",request.ScheduleMinutes);},token);
         if(changed==0)return NotFound();await Audit("connector.updated","IntegrationConnector",id,request,token);return NoContent();
     }

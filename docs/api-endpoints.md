@@ -144,6 +144,23 @@ POST   /api/phase1/payroll-runs/generate
 POST   /api/phase1/payroll-runs/{id}/approve
 POST   /api/phase1/payroll-runs/{id}/reject
 
+# Invoicing-only finance surface (Administrator or BackOffice)
+GET    /api/phase1/finance/invoice-profile
+PUT    /api/phase1/finance/invoice-profile
+POST   /api/phase1/finance/invoice-batches
+GET    /api/phase1/finance/invoices
+GET    /api/phase1/finance/invoices/{id}
+GET    /api/phase1/finance/invoices/{id}/lines
+POST   /api/phase1/finance/invoices/{id}/approve
+POST   /api/phase1/finance/invoices/{id}/issue
+POST   /api/phase1/finance/invoices/{id}/payments
+POST   /api/phase1/finance/invoices/{id}/credit-notes
+POST   /api/phase1/finance/invoices/{id}/refunds
+POST   /api/phase1/finance/invoices/{id}/void
+GET    /api/phase1/finance/invoices/{id}/pdf
+POST   /api/phase1/finance/invoices/{id}/deliver
+GET    /api/phase1/finance/aged-receivables
+
 GET    /api/phase1/invoices
 GET    /api/phase1/invoices?status=Generated
 GET    /api/phase1/invoices/{id}

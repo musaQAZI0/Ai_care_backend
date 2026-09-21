@@ -28,7 +28,7 @@ public sealed class PersonJourneyController(CareDbContext db,ITenantContext tena
     public async Task<IActionResult> Admit(Guid personId,CreateAdmissionRequest request,CancellationToken token)
     {
         var person=await Person(personId,token);if(person is null)return NotFound();
-        if(person.Status is not("Assessment" or "Onboarding"))return Conflict(new{message="Only a person in Assessment or Onboarding can be admitted."});
+        if(person.Status is not("Prospect" or "Assessment" or "Onboarding"))return Conflict(new{message="Only a person in Prospect, Assessment, or Onboarding can be admitted."});
         if(Missing(request.AdmissionType)||!request.FundingConfirmed||!request.InitialPlanConfirmed||!request.MedicationReconciled)return BadRequest(new{message="Admission type, funding, initial plan, and medication reconciliation are required."});
         if(request.ReferralId is not null&&await Scalar("select count(*) from person_referrals where id=@id and service_user_id=@person and organization_id=@organization and branch_id=@branch and status='Accepted'",personId,request.ReferralId,token)==0)return BadRequest(new{message="Admission referral must be accepted for this person and branch."});
         return await Transactional(async transaction=>{var id=Guid.NewGuid();var at=request.AdmittedAt??DateTimeOffset.UtcNow;

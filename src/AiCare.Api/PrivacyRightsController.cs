@@ -7,10 +7,12 @@ using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AiCare.Api;
 
 [ApiController]
+[TransactionalAction]
 [Authorize(Roles = "Administrator,CareManager")]
 [Route("api/phase1/privacy-rights")]
 public sealed class PrivacyRightsController(CareDbContext db, ITenantContext tenant, ICurrentUserContext user) : ControllerBase
@@ -86,18 +88,31 @@ public sealed class PrivacyRightsController(CareDbContext db, ITenantContext ten
     [HttpPost("requests/{id:guid}/discover")]
     public async Task<IActionResult> Discover(Guid id, CancellationToken ct)
     {
-        if (!await Exists("select exists(select 1 from privacy_requests where id=@id and organization_id=@organization and branch_id=@branch and identity_status='Verified' and owner<>'')", c => Add(c, "id", id), ct))
-            return Conflict(new { message = "Verified identity and an owner are required before discovery." });
-        var person = await ScalarGuid("select service_user_id from privacy_requests where id=@id", c => Add(c, "id", id), ct);
-        var sources = new[] { ("ServiceUser", "ServiceUsers", "Id"), ("PersonRecord", "PersonRecords", "ServiceUserId"), ("Assessment", "CareAssessments", "ServiceUserId"), ("Risk", "RiskAssessments", "ServiceUserId"), ("CarePlan", "CarePlans", "ServiceUserId"), ("Visit", "Visits", "ServiceUserId"), ("Medication", "Medications", "ServiceUserId"), ("CareNote", "CareNotes", "ServiceUserId"), ("Observation", "HealthObservations", "ServiceUserId"), ("Incident", "Incidents", "ServiceUserId"), ("Document", "Documents", "ServiceUserId"), ("Invoice", "Invoices", "ServiceUserId") };
+        var people = await Query(
+            "select service_user_id from privacy_requests where id=@id and organization_id=@organization and branch_id=@branch and identity_status='Verified' and owner<>'' and status in ('InProgress','Reopened') for update",
+            c => Add(c, "id", id), r => r.GetGuid(0), ct);
+        if (people.Count == 0)
+            return Conflict(new { message = "Verified identity, an owner, and an active request are required before discovery." });
+
+        var person = people[0];
         var created = 0;
-        foreach (var (type, table, personColumn) in sources)
+        foreach (var source in PrivacyDiscoverySources.All)
         {
-            var ids = await Query($"select \"Id\" from \"{table}\" where \"OrganizationId\"=@organization and \"{personColumn}\"=@person", c => Add(c, "person", person), r => r.GetGuid(0), ct);
+            var ids = await Query(source.Sql, c =>
+            {
+                Add(c, "person", person);
+                Add(c, "personPattern", $"%{person:D}%");
+            }, r => r.GetGuid(0), ct);
             foreach (var recordId in ids)
-                created += await Exec("insert into privacy_request_records(id,request_id,record_type,record_id,discovery_reference) select @row,@id,@type,@record,@reference where not exists(select 1 from privacy_request_records where request_id=@id and record_type=@type and record_id=@record)", c =>
-                { Add(c, "row", Guid.NewGuid()); Add(c, "id", id); Add(c, "type", type); Add(c, "record", recordId); Add(c, "reference", $"{type}:{recordId}"); }, ct);
+                created += await InsertDiscoveryRecord(id, source.Type, recordId, ct);
         }
+
+        var auditIds = await Query(
+            """select distinct a."Id" from "AuditEvents" a where a."OrganizationId"=@organization and (a."EntityId"=@person or exists(select 1 from privacy_request_records r where r.request_id=@id and r.record_id=a."EntityId"))""",
+            c => { Add(c, "id", id); Add(c, "person", person); }, r => r.GetGuid(0), ct);
+        foreach (var auditId in auditIds)
+            created += await InsertDiscoveryRecord(id, "AuditEvent", auditId, ct);
+
         await Event(id, "DiscoveryCompleted", $"{created} records added to the review manifest", ct);
         Audit("privacy.discovery_completed", "PrivacyRequest", id);
         await db.SaveChangesAsync(ct);
@@ -109,9 +124,9 @@ public sealed class PrivacyRightsController(CareDbContext db, ITenantContext ten
     {
         if (request.Action is not ("Disclose" or "Redact" or "Exempt") || string.IsNullOrWhiteSpace(request.Reason))
             return BadRequest(new { message = "Disclosure action and review reason are required." });
-        var changed = await Exec("update privacy_request_records set review_action=@action,review_reason=@reason,reviewed_by=@actor,reviewed_at=now() where id=@record and request_id=@id and exists(select 1 from privacy_requests where id=@id and organization_id=@organization and branch_id=@branch)", c =>
+        var changed = await Exec("update privacy_request_records set review_action=@action,review_reason=@reason,reviewed_by=@actor,reviewed_at=now() where id=@record and request_id=@id and review_action='Pending' and exists(select 1 from privacy_requests where id=@id and organization_id=@organization and branch_id=@branch and status in ('InProgress','Reopened'))", c =>
         { Add(c, "id", id); Add(c, "record", recordId); Add(c, "action", request.Action); Add(c, "reason", request.Reason); }, ct);
-        if (changed == 0) return NotFound();
+        if (changed == 0) return Conflict(new { message = "Only a pending record on an active request can be reviewed." });
         await Event(id, "RecordReviewed", $"Record {recordId} marked {request.Action}", ct);
         return Ok();
     }
@@ -119,7 +134,9 @@ public sealed class PrivacyRightsController(CareDbContext db, ITenantContext ten
     [HttpPost("requests/{id:guid}/pack")]
     public async Task<IActionResult> GeneratePack(Guid id, CancellationToken ct)
     {
-        if (!await RequestExists(id, ct)) return NotFound();
+        var statuses = await Query("select status from privacy_requests where id=@id and organization_id=@organization and branch_id=@branch for update", c => Add(c, "id", id), r => r.GetString(0), ct);
+        if (statuses.Count == 0) return NotFound();
+        if (statuses[0] is not ("InProgress" or "Reopened")) return Conflict(new { message = "Only an active request can generate a disclosure pack." });
         if (await Exists("select exists(select 1 from privacy_request_records where request_id=@id and review_action='Pending')", c => Add(c, "id", id), ct))
             return Conflict(new { message = "Every discovered record must be reviewed before pack generation." });
         var count = await Scalar("select count(*) from privacy_request_records where request_id=@id", c => Add(c, "id", id), ct);
@@ -138,7 +155,10 @@ public sealed class PrivacyRightsController(CareDbContext db, ITenantContext ten
     [HttpPost("requests/{id:guid}/release")]
     public async Task<IActionResult> Release(Guid id, ReleasePrivacyPack request, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(request.ReleaseEvidence)) return BadRequest(new { message = "Release evidence is required." });
+        if (string.IsNullOrWhiteSpace(request.ReleaseEvidence) || string.IsNullOrWhiteSpace(request.Decision)) return BadRequest(new { message = "Release evidence and a decision are required." });
+        var statuses = await Query("select status from privacy_requests where id=@id and organization_id=@organization and branch_id=@branch for update", c => Add(c, "id", id), r => r.GetString(0), ct);
+        if (statuses.Count == 0) return NotFound();
+        if (statuses[0] != "PackReady") return Conflict(new { message = "A generated unreleased pack is required." });
         var changed = await Exec("update privacy_disclosures set released_by=@actor,released_at=now(),release_evidence=@evidence where id=(select id from privacy_disclosures where request_id=@id and released_at is null order by version desc limit 1);update privacy_requests set status='Released',completed_at=now(),decision=@decision where id=@id and organization_id=@organization and branch_id=@branch and status='PackReady'", c =>
         { Add(c, "id", id); Add(c, "evidence", request.ReleaseEvidence); Add(c, "decision", request.Decision); }, ct);
         if (changed < 2) return Conflict(new { message = "A generated unreleased pack is required." });
@@ -224,6 +244,13 @@ public sealed class PrivacyRightsController(CareDbContext db, ITenantContext ten
         return Ok();
     }
 
+    private Task<int> InsertDiscoveryRecord(Guid requestId, string type, Guid recordId, CancellationToken ct) =>
+        Exec("insert into privacy_request_records(id,request_id,record_type,record_id,discovery_reference) values(@row,@id,@type,@record,@reference) on conflict do nothing", c =>
+        {
+            Add(c, "row", Guid.NewGuid()); Add(c, "id", requestId); Add(c, "type", type);
+            Add(c, "record", recordId); Add(c, "reference", $"{type}:{recordId}");
+        }, ct);
+
     private Task Event(Guid id, string type, string detail, CancellationToken ct) => Exec("insert into privacy_case_events(id,request_id,organization_id,event_type,detail,actor) values(@event,@id,@organization,@type,@detail,@actor)", c => { Add(c, "event", Guid.NewGuid()); Add(c, "id", id); Add(c, "type", type); Add(c, "detail", detail); }, ct);
     private Task<bool> RequestExists(Guid id, CancellationToken ct) => Exists("select exists(select 1 from privacy_requests where id=@id and organization_id=@organization and branch_id=@branch)", c => Add(c, "id", id), ct);
     private Task<bool> PersonExists(Guid id, CancellationToken ct) => Exists("select exists(select 1 from \"ServiceUsers\" where \"Id\"=@id and \"OrganizationId\"=@organization and \"BranchId\"=@branch)", c => Add(c, "id", id), ct);
@@ -234,7 +261,7 @@ public sealed class PrivacyRightsController(CareDbContext db, ITenantContext ten
     private Task<List<Dictionary<string, object?>>> Rows(string sql, CancellationToken ct) => Rows(sql, _ => { }, ct);
     private Task<List<Dictionary<string, object?>>> Rows(string sql, Action<DbCommand> bind, CancellationToken ct) => Query(sql, bind, reader => { var row = new Dictionary<string, object?>(); for (var i = 0; i < reader.FieldCount; i++) row[Camel(reader.GetName(i))] = reader.IsDBNull(i) ? null : reader.GetValue(i); return row; }, ct);
     private async Task<List<T>> Query<T>(string sql, Action<DbCommand> bind, Func<DbDataReader, T> map, CancellationToken ct) { await using var command = await Command(sql, ct); bind(command); await using var reader = await command.ExecuteReaderAsync(ct); var rows = new List<T>(); while (await reader.ReadAsync(ct)) rows.Add(map(reader)); return rows; }
-    private async Task<DbCommand> Command(string sql, CancellationToken ct) { var connection = db.Database.GetDbConnection(); if (connection.State != ConnectionState.Open) await connection.OpenAsync(ct); var command = connection.CreateCommand(); command.CommandText = sql; Add(command, "organization", tenant.OrganizationId); Add(command, "branch", tenant.BranchId ?? TenantDefaults.BranchId); Add(command, "actor", user.UserName); return command; }
+    private async Task<DbCommand> Command(string sql, CancellationToken ct) { var connection = db.Database.GetDbConnection(); if (connection.State != ConnectionState.Open) await connection.OpenAsync(ct); var command = connection.CreateCommand(); command.CommandText = sql; command.Transaction = db.Database.CurrentTransaction?.GetDbTransaction(); Add(command, "organization", tenant.OrganizationId); Add(command, "branch", tenant.BranchId ?? TenantDefaults.BranchId); Add(command, "actor", user.UserName); return command; }
     private void Audit(string action, string entityType, Guid id) => db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), action, user.UserName, entityType, id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     private static void Add(DbCommand command, string name, object? value) { if (command.Parameters.Contains(name)) return; var parameter = command.CreateParameter(); parameter.ParameterName = name; parameter.Value = value ?? DBNull.Value; command.Parameters.Add(parameter); }
     private static string Camel(string value) { var parts = value.Split('_'); return parts[0] + string.Concat(parts.Skip(1).Select(part => char.ToUpperInvariant(part[0]) + part[1..])); }

@@ -54,7 +54,7 @@ public sealed class AdvancedSchedulingController(CareDbContext context, ITenantC
         return Ok(request);
     }
 
-    private async Task<bool> WorkerExists(Guid id,CancellationToken token) => await context.CareWorkers.AnyAsync(x=>x.Id==id&&x.OrganizationId==tenant.OrganizationId,token);
+    private async Task<bool> WorkerExists(Guid id,CancellationToken token) => await context.CareWorkers.AnyAsync(x=>x.Id==id&&x.OrganizationId==tenant.OrganizationId&&(tenant.IsOrganizationWide||tenant.BranchId==x.BranchId),token);
     private async Task<SchedulingPolicyResponse> ReadPolicy(CancellationToken token)
     {
         await using var command=await Command("select minimum_rest_minutes,maximum_daily_minutes,maximum_weekly_minutes,travel_buffer_minutes,maximum_continuous_minutes,required_break_minutes from scheduling_policies where organization_id=@organization and branch_id=@branch",token);

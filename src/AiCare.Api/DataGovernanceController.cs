@@ -5,6 +5,7 @@ using System.Data;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AiCare.Api;
 
@@ -100,6 +101,7 @@ public sealed class DataGovernanceController(
     }
 
     [HttpPost("service-users/{serviceUserId:guid}/anonymize")]
+    [TransactionalAction]
     public async Task<IActionResult> Anonymize(Guid serviceUserId, AnonymizeServiceUserRequest request, CancellationToken ct)
     {
         if (!currentUser.IsAdministrator) return Forbid();
@@ -108,6 +110,7 @@ public sealed class DataGovernanceController(
         if (string.IsNullOrWhiteSpace(request.Reason))
             return BadRequest(new { message = "A governance reason is required." });
 
+        if (IsPostgres()) await LockServiceUser(serviceUserId, ct);
         var person = await db.ServiceUsers.FirstOrDefaultAsync(x => x.Id == serviceUserId && x.OrganizationId == tenant.OrganizationId, ct);
         if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return NotFound();
         if (await HasActiveLegalHold(serviceUserId, ct))
@@ -197,12 +200,25 @@ public sealed class DataGovernanceController(
 
     private bool IsPostgres() => db.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true;
 
+    private async Task LockServiceUser(Guid serviceUserId, CancellationToken ct)
+    {
+        var connection = db.Database.GetDbConnection();
+        if (connection.State != ConnectionState.Open) await connection.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+        command.CommandText = """select "Id" from "ServiceUsers" where "Id"=@person and "OrganizationId"=@organization for update""";
+        var organization = command.CreateParameter(); organization.ParameterName = "organization"; organization.Value = tenant.OrganizationId; command.Parameters.Add(organization);
+        var person = command.CreateParameter(); person.ParameterName = "person"; person.Value = serviceUserId; command.Parameters.Add(person);
+        await command.ExecuteScalarAsync(ct);
+    }
+
     private async Task<bool> Exists(string sql, Guid serviceUserId, CancellationToken ct)
     {
         var connection = db.Database.GetDbConnection();
         if (connection.State != ConnectionState.Open) await connection.OpenAsync(ct);
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
+        command.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
         var organization = command.CreateParameter(); organization.ParameterName = "organization"; organization.Value = tenant.OrganizationId; command.Parameters.Add(organization);
         var person = command.CreateParameter(); person.ParameterName = "person"; person.Value = serviceUserId; command.Parameters.Add(person);
         return Convert.ToBoolean(await command.ExecuteScalarAsync(ct));

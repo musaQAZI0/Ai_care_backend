@@ -41,7 +41,20 @@ public sealed class ContextualAuthorizationService(
         var visit = await db.Visits.AsNoTracking().SingleOrDefaultAsync(item => item.Id == visitId, cancellationToken);
         if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return false;
         if (user.HasAnyRole(UserRole.Administrator, UserRole.BackOffice, UserRole.CareManager, UserRole.CareCoordinator)) return true;
-        if (user.IsCareWorker) return user.CareWorkerId == visit.CareWorkerId;
+        if (user.IsCareWorker && user.CareWorkerId is Guid workerId) return visit.CareWorkerId == workerId || await IsAdditionalVisitWorkerAsync(visit.Id, workerId, cancellationToken);
         return await CanReadServiceUserAsync(visit.ServiceUserId, cancellationToken);
     }
-}
+
+    public async Task<bool> CanOperateVisitAsync(Guid visitId, CancellationToken cancellationToken = default)
+    {
+        var visit = await db.Visits.AsNoTracking().SingleOrDefaultAsync(item => item.Id == visitId, cancellationToken);
+        if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return false;
+        if (user.HasAnyRole(UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator)) return true;
+        return user.IsCareWorker && user.CareWorkerId is Guid workerId &&
+            (visit.CareWorkerId == workerId || await IsAdditionalVisitWorkerAsync(visit.Id, workerId, cancellationToken));
+    }
+
+    private Task<bool> IsAdditionalVisitWorkerAsync(Guid visitId, Guid workerId, CancellationToken cancellationToken) =>
+        db.Database.SqlQueryRaw<bool>(
+            "select exists(select 1 from visit_care_worker_assignments where visit_id={0} and care_worker_id={1} and organization_id={2}) as \"Value\"",
+            visitId, workerId, tenant.OrganizationId).SingleAsync(cancellationToken);}

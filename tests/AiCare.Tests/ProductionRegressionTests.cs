@@ -8,8 +8,10 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Xunit;
+using Npgsql;
 
 namespace AiCare.Tests;
 
@@ -251,14 +253,67 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
 [CollectionDefinition("Postgres regression", DisableParallelization = true)]
 public sealed class PostgresRegressionCollection;
 
-public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>
+public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
+    private readonly string databaseName = $"aicare_regression_{Guid.NewGuid():N}";
+    private string? isolatedConnectionString;
+    private bool databaseCreated;
+    private string IsolatedConnectionString
+    {
+        get
+        {
+            if (isolatedConnectionString is not null) return isolatedConnectionString;
+            var connection = new NpgsqlConnectionStringBuilder(
+                Environment.GetEnvironmentVariable("AICARE_REGRESSION_CONNECTION")
+                ?? "Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres")
+            {
+                Database = databaseName,
+                Pooling = false
+            };
+            return isolatedConnectionString = connection.ConnectionString;
+        }
+    }
+
+    async Task IAsyncLifetime.InitializeAsync()
+    {
+        var admin = new NpgsqlConnectionStringBuilder(IsolatedConnectionString) { Database = "postgres" };
+        await using var connection = new NpgsqlConnection(admin.ConnectionString);
+        try
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"CREATE DATABASE \"{databaseName}\"";
+            await command.ExecuteNonQueryAsync();
+            databaseCreated = true;
+        }
+        catch (NpgsqlException ex)
+        {
+            throw new InvalidOperationException(
+                $"Cannot create the isolated regression database on {admin.Host}:{admin.Port}. " +
+                "Start the test PostgreSQL server, set AICARE_REGRESSION_CONNECTION to its connection string, " +
+                "and ensure the account has CREATEDB permission. Application startup was not attempted.", ex);
+        }
+    }
+
+    async Task IAsyncLifetime.DisposeAsync()
+    {
+        await DisposeAsync();
+        if (!databaseCreated) return;
+        // Only delete the generated database owned by this fixture, never the configured database.
+        var admin = new NpgsqlConnectionStringBuilder(IsolatedConnectionString) { Database = "postgres" };
+        await using var connection = new NpgsqlConnection(admin.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"DROP DATABASE IF EXISTS \"{databaseName}\"";
+        await command.ExecuteNonQueryAsync();
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
         builder.ConfigureAppConfiguration(configuration => configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["ConnectionStrings:DefaultConnection"] = Environment.GetEnvironmentVariable("AICARE_REGRESSION_CONNECTION") ?? "Host=localhost;Port=5432;Database=aicare_regression;Username=postgres;Password=postgres",
+            ["ConnectionStrings:DefaultConnection"] = IsolatedConnectionString,
             ["JwtOptions:Issuer"] = "AiCare",
             ["JwtOptions:Audience"] = "AiCareClient",
             ["JwtOptions:SigningKey"] = "regression-signing-key-with-enough-length-for-hmac-2026",
@@ -272,6 +327,18 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>
         }));
         builder.ConfigureServices(services =>
         {
+            // Program captures its connection before the test configuration callback can apply.
+            // Replace the context registration as well as configuration to guarantee isolation.
+            services.RemoveAll<CareDbContext>();
+            services.RemoveAll<DbContextOptions<CareDbContext>>();
+            foreach (var descriptor in services.Where(d =>
+                d.ServiceType.IsGenericType &&
+                d.ServiceType.GetGenericTypeDefinition().Name == "IDbContextOptionsConfiguration`1" &&
+                d.ServiceType.GenericTypeArguments[0] == typeof(CareDbContext)).ToArray())
+                services.Remove(descriptor);
+            services.AddDbContext<CareDbContext>((provider, options) => options
+                .UseNpgsql(IsolatedConnectionString, postgres => postgres.EnableRetryOnFailure(3))
+                .AddInterceptors(provider.GetRequiredService<DocumentStorageCleanupInterceptor>()));
             var worker = services.SingleOrDefault(descriptor => descriptor.ServiceType == typeof(IHostedService) && descriptor.ImplementationType == typeof(IntegrationJobWorker));
             if (worker is not null) services.Remove(worker);
         });
