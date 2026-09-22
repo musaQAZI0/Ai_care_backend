@@ -1,10 +1,13 @@
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace AiCare.Infrastructure.Migrations;
 
-public partial class AddMedicationDmdIdentity : Migration
+[DbContext(typeof(CareDbContext))]
+[Migration("20260921230500_AddMedicationDmdIdentity")]
+public sealed class AddMedicationDmdIdentity : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)
     {

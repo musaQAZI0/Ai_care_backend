@@ -1032,58 +1032,44 @@ phase1.MapGet("/medications/{id:guid}", (Guid id, CareDbContext context, ITenant
     var medication = context.Medications.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId) ? Results.NotFound() : Results.Ok(medication);
 });
-phase1.MapPost("/medications", (CreateMedicationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapPost("/medications", async (CreateMedicationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IMedicationTerminologyService terminology, CancellationToken cancellationToken) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
-
     if (request.ServiceUserId == Guid.Empty || Missing(request.Name, request.Dosage, request.Route, request.Schedule))
-    {
         return Error("Service user, medication name, dosage, route, and schedule are required.");
-    }
-
-    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
-    if (validation is not null) return validation;
-
-    var medication = new Medication(Guid.NewGuid(), request.ServiceUserId, request.Name, request.Dosage, request.Route, request.Schedule, request.IsPrn, request.Pharmacy, request.AllergyWarning, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId, request.DmdCode?.Trim(), request.DmdDisplay?.Trim(), request.DmdSystem?.Trim());
+    var serviceUserValidation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (serviceUserValidation is not null) return serviceUserValidation;
+    var (terminologyError, concept) = await ValidateMedicationTerminologyAsync(request, terminology, cancellationToken);
+    if (terminologyError is not null) return terminologyError;
+    var medication = new Medication(Guid.NewGuid(), request.ServiceUserId, request.Name.Trim(), request.Dosage.Trim(), request.Route.Trim(), request.Schedule.Trim(), request.IsPrn, request.Pharmacy.Trim(), request.AllergyWarning.Trim(), tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId, concept?.Code, concept?.Display, concept?.System);
     context.Medications.Add(medication);
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.created", currentUser.UserName, nameof(Medication), medication.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
-    context.SaveChanges();
+    await context.SaveChangesAsync(cancellationToken);
     return Results.Created($"/api/phase1/medications/{medication.Id}", medication);
 });
-phase1.MapPut("/medications/{id:guid}", (Guid id, CreateMedicationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapPut("/medications/{id:guid}", async (Guid id, CreateMedicationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IMedicationTerminologyService terminology, CancellationToken cancellationToken) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
-
     if (request.ServiceUserId == Guid.Empty || Missing(request.Name, request.Dosage, request.Route, request.Schedule))
-    {
         return Error("Service user, medication name, dosage, route, and schedule are required.");
-    }
-
-    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
-    if (validation is not null) return validation;
-
-    var medication = context.Medications.Find(id);
+    var serviceUserValidation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
+    if (serviceUserValidation is not null) return serviceUserValidation;
+    var medication = await context.Medications.FindAsync([id], cancellationToken);
     if (medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId)) return Results.NotFound();
-
+    var (terminologyError, concept) = await ValidateMedicationTerminologyAsync(request, terminology, cancellationToken);
+    if (terminologyError is not null) return terminologyError;
     var updated = medication with
     {
-        ServiceUserId = request.ServiceUserId,
-        Name = request.Name,
-        Dosage = request.Dosage,
-        Route = request.Route,
-        Schedule = request.Schedule,
-        IsPrn = request.IsPrn,
-        Pharmacy = request.Pharmacy,
-        AllergyWarning = request.AllergyWarning,
-        DmdCode = request.DmdCode?.Trim(),
-        DmdDisplay = request.DmdDisplay?.Trim(),
-        DmdSystem = request.DmdSystem?.Trim()
+        ServiceUserId = request.ServiceUserId, Name = request.Name.Trim(), Dosage = request.Dosage.Trim(),
+        Route = request.Route.Trim(), Schedule = request.Schedule.Trim(), IsPrn = request.IsPrn,
+        Pharmacy = request.Pharmacy.Trim(), AllergyWarning = request.AllergyWarning.Trim(),
+        DmdCode = concept?.Code, DmdDisplay = concept?.Display, DmdSystem = concept?.System
     };
-    context.Medications.Update(updated);
+    context.Entry(medication).CurrentValues.SetValues(updated);
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.updated", currentUser.UserName, nameof(Medication), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
-    context.SaveChanges();
+    await context.SaveChangesAsync(cancellationToken);
     return Results.Ok(updated);
 });
 phase1.MapDelete("/medications/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
@@ -2185,6 +2171,39 @@ static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSp
 
 static IResult Error(string message, int statusCode = StatusCodes.Status400BadRequest) =>
     Results.Json(new { message }, statusCode: statusCode);
+
+static async Task<(IResult? Error, MedicationTerminologyConcept? Concept)> ValidateMedicationTerminologyAsync(
+    CreateMedicationRequest request, IMedicationTerminologyService terminology, CancellationToken cancellationToken)
+{
+    const string dmdSystem = "https://dmd.nhs.uk";
+    var code = request.DmdCode?.Trim();
+    var display = request.DmdDisplay?.Trim();
+    var system = request.DmdSystem?.Trim();
+    var supplied = new[] { code, display, system }.Count(value => !string.IsNullOrWhiteSpace(value));
+    if (supplied == 0) return (null, null);
+    if (supplied != 3) return (Error("dm+d code, display, and system must be supplied together."), null);
+    if (!string.Equals(system, dmdSystem, StringComparison.OrdinalIgnoreCase))
+        return (Error("The medication terminology system must be https://dmd.nhs.uk."), null);
+    try
+    {
+        var concept = await terminology.LookupAsync(code!, cancellationToken);
+        if (concept is null) return (Error("The selected dm+d medication code was not found."), null);
+        if (concept.Inactive) return (Error("The selected dm+d medication is inactive and cannot be used."), null);
+        if (!string.Equals(concept.System, dmdSystem, StringComparison.OrdinalIgnoreCase))
+            return (Error("The terminology server returned an unexpected code system.", StatusCodes.Status503ServiceUnavailable), null);
+        if (!string.Equals(concept.Display.Trim(), display, StringComparison.OrdinalIgnoreCase))
+            return (Error("The submitted medication name does not match the selected dm+d code."), null);
+        return (null, concept with { Code = concept.Code.Trim(), Display = concept.Display.Trim(), System = dmdSystem });
+    }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+    {
+        return (Error("NHS dm+d validation timed out. No medication changes were saved.", StatusCodes.Status503ServiceUnavailable), null);
+    }
+    catch (HttpRequestException)
+    {
+        return (Error("NHS dm+d validation is temporarily unavailable. No medication changes were saved.", StatusCodes.Status503ServiceUnavailable), null);
+    }
+}
 
 static bool HasConfig(IConfiguration configuration, string key) => !string.IsNullOrWhiteSpace(configuration[key]);
 

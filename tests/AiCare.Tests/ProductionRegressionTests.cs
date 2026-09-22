@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using AiCare.Application;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
@@ -327,6 +328,8 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>, 
         }));
         builder.ConfigureServices(services =>
         {
+            services.RemoveAll<IMedicationTerminologyService>();
+            services.AddSingleton<IMedicationTerminologyService, RegressionMedicationTerminologyService>();
             // Program captures its connection before the test configuration callback can apply.
             // Replace the context registration as well as configuration to guarantee isolation.
             services.RemoveAll<CareDbContext>();
