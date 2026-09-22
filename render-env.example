@@ -1,7 +1,8 @@
 # Required for the Render backend service.
-ASPNETCORE_ENVIRONMENT=Production
+ASPNETCORE_ENVIRONMENT=Staging
 DOTNET_USE_POLLING_FILE_WATCHER=true
 DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
+Database__RunMigrationsOnStartup=false
 
 # Render Postgres / Supabase Postgres connection string.
 # Example:

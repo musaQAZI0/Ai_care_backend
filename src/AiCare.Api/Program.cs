@@ -14,6 +14,11 @@ using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 
+if (int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var renderPort) && renderPort is > 0 and <= 65535)
+{
+    builder.WebHost.UseUrls($"http://0.0.0.0:{renderPort}");
+}
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("ReactClient", policy =>
@@ -121,10 +126,14 @@ using (var scope = app.Services.CreateScope())
     {
         context.Database.EnsureCreated();
     }
-    else
+    else if (builder.Configuration.GetValue("Database:RunMigrationsOnStartup", !app.Environment.IsProduction()))
     {
         context.Database.Migrate();
         EnsureRuntimeSchema(context);
+    }
+    else
+    {
+        app.Logger.LogInformation("Automatic database migrations are disabled; expecting a completed deployment migration step.");
     }
 }
 

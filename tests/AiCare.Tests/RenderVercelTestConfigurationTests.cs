@@ -16,7 +16,8 @@ public sealed class RenderVercelTestConfigurationTests
             ["Cors:AllowedOrigins:1"] = "https://old.example.com",
             ["FamilyPortal:FrontendBaseUrl"] = "",
             ["Supabase:PublicFileBaseUrl"] = "https://public.example.com/files",
-            ["Demo:Enabled"] = "true"
+            ["Demo:Enabled"] = "true",
+            ["TestingData:Enabled"] = "true"
         }).Build();
 
         RenderVercelTestConfiguration.Normalize(configuration, "Production");
@@ -26,6 +27,7 @@ public sealed class RenderVercelTestConfigurationTests
         Assert.Equal(RenderVercelTestConfiguration.FrontendBaseUrl, configuration["FamilyPortal:FrontendBaseUrl"]);
         Assert.Null(configuration["Supabase:PublicFileBaseUrl"]);
         Assert.Equal("false", configuration["Demo:Enabled"]);
+        Assert.Equal("false", configuration["TestingData:Enabled"]);
     }
 
     [Fact]

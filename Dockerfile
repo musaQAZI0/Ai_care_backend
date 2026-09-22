@@ -24,8 +24,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/publish .
-ENV ASPNETCORE_ENVIRONMENT=Production
+ENV ASPNETCORE_ENVIRONMENT=Staging
 ENV DOTNET_USE_POLLING_FILE_WATCHER=true
 ENV DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 CMD curl --fail --silent http://127.0.0.1:${PORT:-8080}/health/live >/dev/null || exit 1
-CMD ["sh", "-c", "ASPNETCORE_URLS=http://+:${PORT:-8080} dotnet AiCare.Api.dll"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 CMD curl --fail --silent http://127.0.0.1:${PORT:-10000}/health/live >/dev/null || exit 1
+CMD ["sh", "-c", "exec dotnet AiCare.Api.dll"]

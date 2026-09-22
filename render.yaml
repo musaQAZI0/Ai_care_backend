@@ -6,10 +6,12 @@ services:
     healthCheckPath: /health/ready
     envVars:
       - key: ASPNETCORE_ENVIRONMENT
-        value: Production
+        value: Staging
       - key: DOTNET_USE_POLLING_FILE_WATCHER
         value: true
       - key: DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE
+        value: false
+      - key: Database__RunMigrationsOnStartup
         value: false
       - key: ConnectionStrings__DefaultConnection
         sync: false
