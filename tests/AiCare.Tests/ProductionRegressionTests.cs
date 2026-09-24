@@ -91,6 +91,7 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
         Assert.Equal(HttpStatusCode.OK, profile.StatusCode);
         Assert.Contains("Dr Regression", await profile.Content.ReadAsStringAsync());
 
+        await StepUpTestGrants.GrantAsync(_factory, client, "medication");
         var safetyEvent = await client.PostAsJsonAsync($"/api/phase1/medication-safety/mar/{RegressionIds.MarId}/events", new
         {
             eventType = "OmissionReason",

@@ -37,3 +37,15 @@ PilotSeed__Key=CHANGE_ME_LONG_RANDOM_SEED_KEY
 PilotSeed__ProviderName=AiCare Controlled Pilot Provider
 PilotSeed__AdminEmail=pilot.admin@aicare.local
 PilotSeed__AdminPassword=CHANGE_ME_STRONG_PILOT_ADMIN_PASSWORD
+
+# Resend transactional email. Store the real API key only in Render secrets.
+Email__RequiredInProduction=true
+Email__Enabled=true
+Email__SmtpHost=smtp.resend.com
+Email__SmtpPort=587
+Email__Username=resend
+Email__Password=CHANGE_ME_RESEND_API_KEY
+Email__FromAddress=notifications@CHANGE_ME_VERIFIED_DOMAIN
+Email__FromName=AI Care
+Email__ReplyToAddress=CHANGE_ME_CLIENT_INBOX
+Email__EnableSsl=true

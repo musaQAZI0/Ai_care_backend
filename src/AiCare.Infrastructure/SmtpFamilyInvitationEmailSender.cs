@@ -43,6 +43,7 @@ public sealed class SmtpFamilyInvitationEmailSender(
             IsBodyHtml = false
         };
         message.To.Add(new MailAddress(recipientEmail, recipientName));
+        AddReplyTo(message);
 
         using var client = new SmtpClient(host, port)
         {
@@ -56,6 +57,13 @@ public sealed class SmtpFamilyInvitationEmailSender(
         cancellationToken.ThrowIfCancellationRequested();
         await client.SendMailAsync(message, cancellationToken);
         logger.LogInformation("Family invitation email sent to {RecipientDomain} via configured SMTP relay.", DomainOnly(recipientEmail));
+    }
+
+    private void AddReplyTo(MailMessage message)
+    {
+        var replyToAddress = configuration["Email:ReplyToAddress"];
+        if (!string.IsNullOrWhiteSpace(replyToAddress))
+            message.ReplyToList.Add(new MailAddress(replyToAddress));
     }
 
     private string Required(string key)

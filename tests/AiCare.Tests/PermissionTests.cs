@@ -599,6 +599,7 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             using var scope = services.BuildServiceProvider().CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<CareDbContext>();
             context.Database.EnsureCreated();
+            CreateGovernedFinanceSchema(context);
             Seed(context);
         });
     }
@@ -609,6 +610,26 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
         _connection.Dispose();
     }
 
+    private static void CreateGovernedFinanceSchema(CareDbContext context)
+    {
+        context.Database.ExecuteSqlRaw("""
+            create table if not exists finance_payments (
+                id text primary key, invoice_id text not null, organization_id text not null, branch_id text not null,
+                amount numeric not null, reference text not null, received_at text not null, received_by text not null,
+                unique (organization_id, invoice_id, reference)
+            );
+            create table if not exists finance_refunds (
+                id text primary key, invoice_id text not null, organization_id text not null, branch_id text not null,
+                amount numeric not null, reference text not null, reason text not null, refunded_by text not null,
+                unique (organization_id, invoice_id, reference)
+            );
+            create table if not exists finance_credit_notes (
+                id text primary key, invoice_id text not null, organization_id text not null, branch_id text not null,
+                credit_number text not null, amount numeric not null, reason text not null,
+                status text not null default 'Issued', issued_by text not null
+            );
+            """);
+    }
     private static void Seed(CareDbContext context)
     {
         context.AppUsers.RemoveRange(context.AppUsers);

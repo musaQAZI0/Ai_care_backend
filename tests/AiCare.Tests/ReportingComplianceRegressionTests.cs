@@ -34,19 +34,25 @@ public sealed class ReportingComplianceRegressionTests(PostgresRegressionFactory
 
         var admin=await Client(adminName);var worker=await Client(workerName);await StepUpTestGrants.GrantAsync(factory,admin,"export");
         Assert.Equal(HttpStatusCode.Forbidden,(await worker.GetAsync("/api/phase1/reporting-compliance/dashboard")).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory,admin,"export");
         Assert.Equal(HttpStatusCode.BadRequest,(await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="Unknown metric",category="Operational",format="CSV",metrics=new[]{"Invented total"},filters=new Dictionary<string,string>()})).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory,admin,"export");
         Assert.Equal(HttpStatusCode.BadRequest,(await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="Unknown filter",category="Operational",format="CSV",metrics=new[]{"Completed visits"},filters=new Dictionary<string,string>{{"arbitrary","ignored before remediation"}}})).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory,admin,"export");
         Assert.Equal(HttpStatusCode.NotFound,(await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{reportDefinitionId=foreignDefinitionId,name="Foreign definition",category="Operational",format="CSV",metrics=new[]{"Completed visits"},filters=new Dictionary<string,string>()})).StatusCode);
 
+        await StepUpTestGrants.GrantAsync(factory,admin,"export");
         var report=await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="Governed operations report",category="Operational",format="CSV",metrics=new[]{"Service users","Completed visits","Open incidents","Invoice total","Audit events"},filters=new Dictionary<string,string>{{"period","Last 7 days"}}});
         Assert.Equal(HttpStatusCode.Created,report.StatusCode);
         var reportPayload=(await report.Content.ReadFromJsonAsync<JsonElement>());
         var reportId=reportPayload.GetProperty("id").GetGuid();
         var filteredCompleted=reportPayload.GetProperty("metrics").GetProperty("Completed visits").GetDecimal();
+        await StepUpTestGrants.GrantAsync(factory,admin,"export");
         var allTime=await admin.PostAsJsonAsync("/api/phase1/reporting-compliance/report-runs",new{name="All-time comparison",category="Operational",format="CSV",metrics=new[]{"Completed visits"},filters=new Dictionary<string,string>{{"period","All time"}}});
         Assert.Equal(HttpStatusCode.Created,allTime.StatusCode);
         var allTimeCompleted=(await allTime.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("metrics").GetProperty("Completed visits").GetDecimal();
         Assert.True(allTimeCompleted>filteredCompleted);
+        await StepUpTestGrants.GrantAsync(factory,admin,"export");
         var csv=await admin.GetAsync($"/api/phase1/reporting-compliance/report-runs/{reportId}/csv");
         Assert.Equal(HttpStatusCode.OK,csv.StatusCode);
         Assert.Contains("completed visits",await csv.Content.ReadAsStringAsync(),StringComparison.OrdinalIgnoreCase);
@@ -61,6 +67,7 @@ public sealed class ReportingComplianceRegressionTests(PostgresRegressionFactory
         var actionId=(await action.Content.ReadFromJsonAsync<Created>())!.Id;
         Assert.Equal(HttpStatusCode.NoContent,(await admin.PatchAsJsonAsync($"/api/phase1/reporting-compliance/actions/{actionId}",new{outcome="Evidence reviewed and retained"})).StatusCode);
 
+        await StepUpTestGrants.GrantAsync(factory,admin,"export");
         var pack=await admin.GetAsync("/api/phase1/reporting-compliance/evidence-pack.csv");
         Assert.Equal(HttpStatusCode.OK,pack.StatusCode);
         Assert.Contains("Medication governance evidence",await pack.Content.ReadAsStringAsync());

@@ -123,6 +123,19 @@ public sealed class ProductionConfigurationValidationTests
         Assert.Contains("Email:", exception.Message);
     }
 
+    [Theory]
+    [InlineData("not-an-email", "client@example.com", "Email:FromAddress")]
+    [InlineData("notifications@example.com", "not-an-email", "Email:ReplyToAddress")]
+    public void InvalidProductionEmailAddressesFail(string fromAddress, string replyToAddress, string expectedKey)
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["Email:FromAddress"] = fromAddress,
+            ["Email:ReplyToAddress"] = replyToAddress
+        });
+        var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
+        Assert.Contains(expectedKey, exception.Message);
+    }
     [Fact]
     public void DemoModeCannotBeEnabledInProduction()
     {
@@ -190,12 +203,13 @@ public sealed class ProductionConfigurationValidationTests
             ["FamilyPortal:FrontendBaseUrl"] = "https://care.example.com",
             ["Email:RequiredInProduction"] = "true",
             ["Email:Enabled"] = "true",
-            ["Email:SmtpHost"] = "smtp.hostinger.com",
+            ["Email:SmtpHost"] = "smtp.resend.com",
             ["Email:SmtpPort"] = "587",
-            ["Email:Username"] = "no-reply@care.example.com",
+            ["Email:Username"] = "resend",
             ["Email:Password"] = ValidEmailPassword,
-            ["Email:FromAddress"] = "no-reply@care.example.com",
+            ["Email:FromAddress"] = "notifications@care.example.com",
             ["Email:FromName"] = "AiCare",
+            ["Email:ReplyToAddress"] = "client@care.example.com",
             ["Email:EnableSsl"] = "true",
             ["Demo:Enabled"] = "false",
             ["Monitoring:Enabled"] = "true",

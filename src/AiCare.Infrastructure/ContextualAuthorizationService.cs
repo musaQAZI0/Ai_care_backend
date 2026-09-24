@@ -1,3 +1,4 @@
+using System.Data.Common;
 using AiCare.Application;
 using AiCare.Domain;
 using Microsoft.EntityFrameworkCore;
@@ -54,7 +55,18 @@ public sealed class ContextualAuthorizationService(
             (visit.CareWorkerId == workerId || await IsAdditionalVisitWorkerAsync(visit.Id, workerId, cancellationToken));
     }
 
-    private Task<bool> IsAdditionalVisitWorkerAsync(Guid visitId, Guid workerId, CancellationToken cancellationToken) =>
-        db.Database.SqlQueryRaw<bool>(
-            "select exists(select 1 from visit_care_worker_assignments where visit_id={0} and care_worker_id={1} and organization_id={2}) as \"Value\"",
-            visitId, workerId, tenant.OrganizationId).SingleAsync(cancellationToken);}
+    private async Task<bool> IsAdditionalVisitWorkerAsync(Guid visitId, Guid workerId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await db.Database.SqlQueryRaw<bool>(
+                "select exists(select 1 from visit_care_worker_assignments where visit_id={0} and care_worker_id={1} and organization_id={2}) as \"Value\"",
+                visitId, workerId, tenant.OrganizationId).SingleAsync(cancellationToken);
+        }
+        catch (DbException)
+        {
+            // Fail closed if the optional assignment schema is unavailable.
+            return false;
+        }
+    }
+}

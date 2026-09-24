@@ -62,8 +62,11 @@ public sealed class PrivacyRightsGovernanceRegressionTests(PostgresRegressionFac
             Assert.Equal(HttpStatusCode.OK, review.StatusCode);
         }
         Assert.Equal(HttpStatusCode.OK, (await manager.PostAsync($"/api/phase1/privacy-rights/requests/{requestId}/pack", null)).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory, manager, "privacy");
         Assert.Equal(HttpStatusCode.BadRequest, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/requests/{requestId}/release", new { releaseEvidence = "", decision = "Approved" })).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/requests/{requestId}/release", new { releaseEvidence = "Secure portal receipt SAR-1", decision = "Approved with recorded redaction" })).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory, manager, "privacy");
+        var released = await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/requests/{requestId}/release", new { releaseEvidence = "Secure portal receipt SAR-1", decision = "Approved with recorded redaction" });
+        Assert.True(released.StatusCode == HttpStatusCode.OK, $"Expected OK but received {released.StatusCode}: {await released.Content.ReadAsStringAsync()}");
         Assert.Equal(HttpStatusCode.OK, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/requests/{requestId}/transition", new { action = "Close", evidence = "Disclosure receipt confirmed" })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/requests/{requestId}/transition", new { action = "Reopen", evidence = "Requester queried omitted date range" })).StatusCode);
 
@@ -71,6 +74,7 @@ public sealed class PrivacyRightsGovernanceRegressionTests(PostgresRegressionFac
         Assert.Equal(HttpStatusCode.Created, restriction.StatusCode);
         var restrictionId = (await restriction.Content.ReadFromJsonAsync<Created>())!.Id;
         Assert.Equal(HttpStatusCode.Conflict, (await manager.GetAsync($"/api/phase1/data-governance/service-users/{personId}/export")).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory, manager, "privacy");
         Assert.Equal(HttpStatusCode.OK, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/restrictions/{restrictionId}/lift", new { evidence = "Accuracy review completed" })).StatusCode);
 
         var hold = await manager.PostAsJsonAsync("/api/phase1/privacy-rights/legal-holds", new { serviceUserId = personId, scope = "All person records", reason = "Active investigation", authority = "DPO instruction", reviewDueAt = DateTimeOffset.UtcNow.AddDays(30), organizationWide = false });
@@ -79,8 +83,10 @@ public sealed class PrivacyRightsGovernanceRegressionTests(PostgresRegressionFac
         var holdBlocksArchive = await admin.DeleteAsync($"/api/phase1/service-users/{personId}");
         Assert.Equal(HttpStatusCode.Conflict, holdBlocksArchive.StatusCode);
 
+        await StepUpTestGrants.GrantAsync(factory, manager, "privacy");
         Assert.Equal(HttpStatusCode.Forbidden, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/legal-holds/{holdId}/release", new { evidence = "Not independently approved" })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await manager.PostAsJsonAsync($"/api/phase1/privacy-rights/legal-holds/{holdId}/release-request", new { evidence = "Investigation owner confirms completion" })).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory, admin, "privacy");
         Assert.Equal(HttpStatusCode.OK, (await admin.PostAsJsonAsync($"/api/phase1/privacy-rights/legal-holds/{holdId}/release", new { evidence = "Administrator independently approved release" })).StatusCode);
 
         var finalCase = await manager.GetStringAsync($"/api/phase1/privacy-rights/requests/{requestId}");

@@ -25,7 +25,7 @@ public sealed class StepUpSecurityController(CareDbContext db, IOptions<JwtOptio
         if (user is null) return Unauthorized();
 
         var grants = await Rows(
-            "select id,purpose,operation_scope,created_at,expires_at,consumed_at from auth_step_up_grants where user_id=@user and organization_id=@organization and revoked_at is null and expires_at>now() and session_id=@session order by expires_at desc",
+            "select id,purpose,operation_scope,created_at,expires_at,consumed_at from auth_step_up_grants where user_id=@user and organization_id=@organization and consumed_at is null and revoked_at is null and expires_at>now() and session_id=@session order by expires_at desc",
             command =>
             {
                 Add(command, "user", user.Id);

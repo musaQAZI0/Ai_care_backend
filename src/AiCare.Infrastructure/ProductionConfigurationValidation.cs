@@ -1,3 +1,4 @@
+using System.Net.Mail;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -102,7 +103,8 @@ public static class ProductionConfigurationValidator
             {
                 errors.Add("Email:Password must not use a placeholder/default value.");
             }
-            Require(configuration["Email:FromAddress"], "Email:FromAddress", errors);
+            ValidateEmailAddress(configuration["Email:FromAddress"], "Email:FromAddress", true, errors);
+            ValidateEmailAddress(configuration["Email:ReplyToAddress"], "Email:ReplyToAddress", false, errors);
             if (!configuration.GetValue<bool>("Email:EnableSsl"))
             {
                 errors.Add("Email:EnableSsl must be true when production email is required.");
@@ -151,6 +153,18 @@ public static class ProductionConfigurationValidator
         {
             errors.Add($"{key} is required in Production.");
         }
+    }
+
+    private static void ValidateEmailAddress(string? value, string key, bool required, ICollection<string> errors)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            if (required) errors.Add($"{key} is required in Production.");
+            return;
+        }
+
+        if (!MailAddress.TryCreate(value, out _))
+            errors.Add($"{key} must be a valid email address in Production.");
     }
 
     private static void RequireHttpsUrl(string? value, string key, ICollection<string> errors)

@@ -23,6 +23,7 @@ public sealed class MedicationDmdGovernanceRegressionTests(PostgresRegressionFac
 
         var admin = await Login("admin");
         var valid = Request("123456", "Paracetamol 500mg tablets");
+        await StepUpTestGrants.GrantAsync(factory, admin, "medication");
         var createdResponse = await admin.PostAsJsonAsync("/api/phase1/medications", valid);
         Assert.Equal(HttpStatusCode.Created, createdResponse.StatusCode);
         var created = (await createdResponse.Content.ReadFromJsonAsync<MedicationDto>())!;
@@ -30,15 +31,20 @@ public sealed class MedicationDmdGovernanceRegressionTests(PostgresRegressionFac
         Assert.Equal("Paracetamol 500mg tablets", created.DmdDisplay);
         Assert.Equal("https://dmd.nhs.uk", created.DmdSystem);
 
+        await StepUpTestGrants.GrantAsync(factory, admin, "medication");
         var editedResponse = await admin.PutAsJsonAsync("/api/phase1/medications/" + created.Id, Request("654321", "Amoxicillin 250mg capsules") with { Dosage = "250mg" });
         Assert.True(editedResponse.StatusCode == HttpStatusCode.OK, $"Expected OK but received {editedResponse.StatusCode}: {await editedResponse.Content.ReadAsStringAsync()}");
         var edited = (await editedResponse.Content.ReadFromJsonAsync<MedicationDto>())!;
         Assert.Equal("654321", edited.DmdCode);
         Assert.Equal("250mg", edited.Dosage);
 
+        await StepUpTestGrants.GrantAsync(factory, admin, "medication");
         Assert.Equal(HttpStatusCode.BadRequest, (await admin.PutAsJsonAsync("/api/phase1/medications/" + created.Id, Request("fake", "Invented medicine"))).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory, admin, "medication");
         Assert.Equal(HttpStatusCode.BadRequest, (await admin.PutAsJsonAsync("/api/phase1/medications/" + created.Id, Request("inactive", "Inactive medicine"))).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory, admin, "medication");
         Assert.Equal(HttpStatusCode.BadRequest, (await admin.PutAsJsonAsync("/api/phase1/medications/" + created.Id, Request("654321", "Forged display"))).StatusCode);
+        await StepUpTestGrants.GrantAsync(factory, admin, "medication");
         Assert.Equal(HttpStatusCode.ServiceUnavailable, (await admin.PutAsJsonAsync("/api/phase1/medications/" + created.Id, Request("unavailable", "Unavailable medicine"))).StatusCode);
 
         var unchanged = (await admin.GetFromJsonAsync<MedicationDto>("/api/phase1/medications/" + created.Id))!;
