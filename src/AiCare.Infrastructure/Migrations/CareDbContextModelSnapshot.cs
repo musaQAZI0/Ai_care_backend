@@ -17,7 +17,7 @@ namespace AiCare.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "8.0.0")
+                .HasAnnotation("ProductVersion", "9.0.20")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -31,9 +31,15 @@ namespace AiCare.Infrastructure.Migrations
                     b.Property<Guid?>("BranchId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("CareWorkerId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("Email")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<Guid?>("FamilyMemberId")
+                        .HasColumnType("uuid");
 
                     b.Property<string>("FullName")
                         .IsRequired()
@@ -401,8 +407,7 @@ namespace AiCare.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<Guid?>("BranchId")
-                        .IsRequired()
+                    b.Property<Guid>("BranchId")
                         .HasColumnType("uuid");
 
                     b.Property<string>("DbsStatus")
@@ -413,8 +418,7 @@ namespace AiCare.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<Guid?>("OrganizationId")
-                        .IsRequired()
+                    b.Property<Guid>("OrganizationId")
                         .HasColumnType("uuid");
 
                     b.Property<string>("Specialization")
@@ -471,6 +475,50 @@ namespace AiCare.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("ComplianceItems");
+                });
+
+            modelBuilder.Entity("AiCare.Domain.DataGovernanceRequest", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("BranchId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("RequestType")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("RequestedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RequestedBy")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("ServiceUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "ServiceUserId", "RequestedAt");
+
+                    b.ToTable("DataGovernanceRequests");
                 });
 
             modelBuilder.Entity("AiCare.Domain.DocumentItem", b =>
@@ -687,6 +735,18 @@ namespace AiCare.Infrastructure.Migrations
                     b.Property<Guid?>("BranchId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("DmdCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("DmdDisplay")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("DmdSystem")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
                     b.Property<string>("Dosage")
                         .IsRequired()
                         .HasColumnType("text");
@@ -717,6 +777,8 @@ namespace AiCare.Infrastructure.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "BranchId", "DmdCode");
 
                     b.ToTable("Medications");
                 });
@@ -1011,6 +1073,50 @@ namespace AiCare.Infrastructure.Migrations
                     b.ToTable("Reports");
                 });
 
+            modelBuilder.Entity("AiCare.Domain.RetentionPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("BranchId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("DataCategory")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("DispositionAction")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("LegalBasis")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("RetentionDays")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("ReviewDueAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "DataCategory")
+                        .IsUnique();
+
+                    b.ToTable("RetentionPolicies");
+                });
+
             modelBuilder.Entity("AiCare.Domain.RiskAssessment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1060,8 +1166,7 @@ namespace AiCare.Infrastructure.Migrations
                     b.Property<string>("Allergies")
                         .HasColumnType("text");
 
-                    b.Property<Guid?>("BranchId")
-                        .IsRequired()
+                    b.Property<Guid>("BranchId")
                         .HasColumnType("uuid");
 
                     b.Property<string>("CareNeeds")
@@ -1103,8 +1208,7 @@ namespace AiCare.Infrastructure.Migrations
                     b.Property<string>("MobilityStatus")
                         .HasColumnType("text");
 
-                    b.Property<Guid?>("OrganizationId")
-                        .IsRequired()
+                    b.Property<Guid>("OrganizationId")
                         .HasColumnType("uuid");
 
                     b.Property<string>("PhoneNumber")
@@ -1170,8 +1274,7 @@ namespace AiCare.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<Guid?>("BranchId")
-                        .IsRequired()
+                    b.Property<Guid>("BranchId")
                         .HasColumnType("uuid");
 
                     b.Property<Guid>("CareWorkerId")
@@ -1198,8 +1301,7 @@ namespace AiCare.Infrastructure.Migrations
                     b.Property<int>("DurationMinutes")
                         .HasColumnType("integer");
 
-                    b.Property<Guid?>("OrganizationId")
-                        .IsRequired()
+                    b.Property<Guid>("OrganizationId")
                         .HasColumnType("uuid");
 
                     b.Property<string>("RequiredSkills")
@@ -1239,15 +1341,20 @@ namespace AiCare.Infrastructure.Migrations
                     b.Property<Guid?>("BranchId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("CareWorkerId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("Email")
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<Guid?>("FamilyMemberId")
+                        .HasColumnType("uuid");
+
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
-                    b.Property<Guid?>("OrganizationId")
-                        .IsRequired()
+                    b.Property<Guid>("OrganizationId")
                         .HasColumnType("uuid");
 
                     b.Property<string>("PasswordHash")
