@@ -593,8 +593,22 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
         });
         builder.ConfigureServices(services =>
         {
+            services.RemoveAll<CareDbContext>();
             services.RemoveAll<DbContextOptions<CareDbContext>>();
-            services.AddDbContext<CareDbContext>(options => options.UseSqlite(_connection));
+            foreach (var descriptor in services
+                .Where(descriptor =>
+                    descriptor.ServiceType.IsGenericType &&
+                    descriptor.ServiceType.GetGenericTypeDefinition().Name ==
+                        "IDbContextOptionsConfiguration`1" &&
+                    descriptor.ServiceType.GenericTypeArguments[0] ==
+                        typeof(CareDbContext))
+                .ToArray())
+            {
+                services.Remove(descriptor);
+            }
+
+            services.AddDbContext<CareDbContext>(
+                options => options.UseSqlite(_connection));
 
             using var scope = services.BuildServiceProvider().CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<CareDbContext>();
