@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Mail;
 using AiCare.Application.FamilyPortal;
+using AiCare.Application.Email;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -13,10 +14,7 @@ public sealed class SmtpFamilyInvitationEmailSender(
     ILogger<SmtpFamilyInvitationEmailSender> logger) : IFamilyInvitationEmailSender
 {
     public async Task SendInvitationAsync(
-        string recipientName,
-        string recipientEmail,
-        string activationUrl,
-        DateTimeOffset expiresAt,
+        FamilyInvitationEmailRequest request,
         CancellationToken cancellationToken)
     {
         if (!configuration.GetValue<bool>("Email:Enabled"))
@@ -39,10 +37,10 @@ public sealed class SmtpFamilyInvitationEmailSender(
         {
             From = new MailAddress(fromAddress, fromName),
             Subject = "Activate your AiCare Family Portal account",
-            Body = BuildBody(recipientName, activationUrl, expiresAt),
+            Body = BuildBody(request.RecipientName, request.ActivationUrl, request.ExpiresAtUtc),
             IsBodyHtml = false
         };
-        message.To.Add(new MailAddress(recipientEmail, recipientName));
+        message.To.Add(new MailAddress(request.RecipientEmail, request.RecipientName));
         AddReplyTo(message);
 
         using var client = new SmtpClient(host, port)
@@ -56,7 +54,7 @@ public sealed class SmtpFamilyInvitationEmailSender(
 
         cancellationToken.ThrowIfCancellationRequested();
         await client.SendMailAsync(message, cancellationToken);
-        logger.LogInformation("Family invitation email sent to {RecipientDomain} via configured SMTP relay.", DomainOnly(recipientEmail));
+        logger.LogInformation("Family invitation email sent to {RecipientDomain} via configured SMTP relay.", DomainOnly(request.RecipientEmail));
     }
 
     private void AddReplyTo(MailMessage message)

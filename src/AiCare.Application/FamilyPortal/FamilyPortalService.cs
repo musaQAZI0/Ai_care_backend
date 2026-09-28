@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using AiCare.Application.Email;
 
 namespace AiCare.Application.FamilyPortal;
 
@@ -73,12 +74,12 @@ public interface IFamilyPortalStore
 
 public interface IFamilyInvitationEmailSender
 {
-    Task SendInvitationAsync(string recipientName, string recipientEmail, string activationUrl, DateTimeOffset expiresAt, CancellationToken cancellationToken);
+    Task SendInvitationAsync(FamilyInvitationEmailRequest request, CancellationToken cancellationToken);
 }
 
 public sealed class DevelopmentFamilyInvitationEmailSender : IFamilyInvitationEmailSender
 {
-    public Task SendInvitationAsync(string recipientName, string recipientEmail, string activationUrl, DateTimeOffset expiresAt, CancellationToken cancellationToken)
+    public Task SendInvitationAsync(FamilyInvitationEmailRequest request, CancellationToken cancellationToken)
         => Task.CompletedTask;
 }
 
@@ -144,7 +145,13 @@ public sealed class FamilyPortalService : IFamilyPortalService
         var expiresAt = DateTimeOffset.UtcNow.AddHours(72);
         var invitation = await _store.CreateInvitationAsync(organizationId, branchId, actorUserId, actorName, familyMemberId, tokenHash, expiresAt, cancellationToken);
         var activationUrl = $"{frontendBaseUrl.TrimEnd('/')}/family/activate?token={Uri.EscapeDataString(rawToken)}";
-        await _emailSender.SendInvitationAsync(access.FullName, access.Email, activationUrl, expiresAt, cancellationToken);
+        await _emailSender.SendInvitationAsync(new FamilyInvitationEmailRequest(
+            invitation.InvitationId,
+            organizationId,
+            access.FullName,
+            access.Email,
+            activationUrl,
+            expiresAt), cancellationToken);
         return invitation with { DevelopmentActivationUrl = activationUrl };
     }
 
