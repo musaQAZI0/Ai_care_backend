@@ -68,7 +68,7 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
             var changed=await Exec("""
                 update finance_funders set name=@name,normalized_name=@normalized,funder_type=@type,billing_address=@address,
                   billing_email=@email,billing_phone=@phone,payment_terms_days=@terms,default_invoice_frequency=@frequency,
-                  currency=@currency,external_reference=@external,notes=@notes,updated_at=now(),updated_by=@actor
+                  currency=@currency,external_reference=@external,notes=@notes,branch_id=@recordBranch,updated_at=now(),updated_by=@actor
                 where id=@id and organization_id=@organization and (@wide or branch_id is null or branch_id=@branch)
                 """,c=>BindFunder(c,id,request),token);
             if(changed==0)return NotFound();
