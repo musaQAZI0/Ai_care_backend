@@ -103,7 +103,7 @@ public sealed class EmailQueueWorker(
     private static void Validate(EmailJobV1? job)
     {
         if (job is null || job.Version != 1 || job.JobId == Guid.Empty || job.TenantId == Guid.Empty ||
-            job.EmailType != "family-invitation" || string.IsNullOrWhiteSpace(job.IdempotencyKey) ||
+            job.EmailType is not ("family-invitation" or "account-invitation") || string.IsNullOrWhiteSpace(job.IdempotencyKey) ||
             string.IsNullOrWhiteSpace(job.RecipientEmail) || string.IsNullOrWhiteSpace(job.ActivationUrl))
             throw new InvalidOperationException("SQS email job is invalid or uses an unsupported schema version.");
     }

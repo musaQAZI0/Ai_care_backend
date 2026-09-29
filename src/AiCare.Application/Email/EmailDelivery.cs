@@ -11,7 +11,8 @@ public sealed record EmailJobV1(
     string ActivationUrl,
     DateTimeOffset ExpiresAtUtc,
     DateTimeOffset CreatedAtUtc,
-    string CorrelationId);
+    string CorrelationId,
+    string? Role = null);
 
 public sealed record FamilyInvitationEmailRequest(
     Guid InvitationId,
@@ -20,6 +21,8 @@ public sealed record FamilyInvitationEmailRequest(
     string RecipientEmail,
     string ActivationUrl,
     DateTimeOffset ExpiresAtUtc);
+
+public sealed record AccountInvitationEmailRequest(Guid InvitationId, Guid TenantId, string RecipientName, string RecipientEmail, string ActivationUrl, DateTimeOffset ExpiresAtUtc, string Role);
 
 public interface IEmailDeliveryStore
 {

@@ -29,7 +29,7 @@ public sealed class ResendEmailClient(HttpClient httpClient, IConfiguration conf
             from = $"{fromName} <{fromAddress}>",
             to = new[] { $"{job.RecipientName} <{job.RecipientEmail}>" },
             reply_to = string.IsNullOrWhiteSpace(replyTo) ? null : replyTo,
-            subject = "Activate your AiCare Family Portal account",
+            subject = job.EmailType == "account-invitation" ? $"Activate your AiCare {job.Role} account" : "Activate your AiCare Family Portal account",
             text = BuildBody(job)
         });
 
@@ -54,7 +54,9 @@ public sealed class ResendEmailClient(HttpClient httpClient, IConfiguration conf
             ? configuration[key]!
             : throw new InvalidOperationException($"{key} must be configured.");
 
-    private static string BuildBody(EmailJobV1 job) =>
+    private static string BuildBody(EmailJobV1 job) => job.EmailType == "account-invitation"
+        ? $"Hello {job.RecipientName},\n\nYour care provider has invited you to AiCare as {job.Role}. Create your password using this one-time secure link:\n\n{job.ActivationUrl}\n\nThis invitation expires at {job.ExpiresAtUtc:yyyy-MM-dd HH:mm 'UTC'}.\n\nNo password or care information is included in this email. If you were not expecting this invitation, ignore it and contact the provider."
+        :
         $"Hello {job.RecipientName},\n\n" +
         "You have been invited to the AiCare Family Portal. Use the secure link below to activate your account:\n\n" +
         $"{job.ActivationUrl}\n\n" +

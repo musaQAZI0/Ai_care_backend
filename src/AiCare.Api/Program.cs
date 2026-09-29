@@ -1501,10 +1501,15 @@ phase1.MapGet("/admin/users", (ICareRepository repository, ICurrentUserContext c
     var denied = RequireAdministrator(currentUser);
     return denied ?? Results.Ok(repository.GetAdminUsers());
 });
-phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository repository, ICurrentUserContext currentUser, CareDbContext context, ITenantContext tenant) =>
+phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository repository, ICurrentUserContext currentUser, CareDbContext context, ITenantContext tenant, IConfiguration configuration, IWebHostEnvironment environment) =>
 {
     var denied = RequireAdministrator(currentUser);
     if (denied is not null) return denied;
+
+    if (!environment.IsDevelopment() && !environment.IsEnvironment("Testing") && !configuration.GetValue<bool>("AccountInvitations:AllowLegacyPasswordProvisioning"))
+    {
+        return Results.Problem("Direct password provisioning is disabled. Use the account invitation endpoint.", statusCode: StatusCodes.Status410Gone);
+    }
 
     if (Missing(request.UserName, request.Email, request.Password) || !LooksLikeEmail(request.Email))
     {

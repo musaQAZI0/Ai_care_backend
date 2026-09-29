@@ -3,6 +3,8 @@ using AiCare.Application.CarePlans;
 using AiCare.Application.FamilyPortal;
 using AiCare.Application.Email;
 using AiCare.Infrastructure.Email;
+using AiCare.Application.Accounts;
+using AiCare.Infrastructure.Accounts;
 using Amazon;
 using Amazon.SQS;
 using Microsoft.AspNetCore.Hosting;
@@ -53,6 +55,9 @@ public static class DependencyInjection
         services.AddScoped<IFamilyPortalQueryStore, FamilyPortalQueryStore>();
         services.AddScoped<IFamilyPortalQueryService, FamilyPortalQueryService>();
         services.AddSingleton<IFamilyInvitationEmailSender, SqsFamilyInvitationEmailSender>();
+        services.AddScoped<IAccountInvitationStore, AccountInvitationStore>();
+        services.AddScoped<IAccountInvitationService, AccountInvitationService>();
+        services.AddSingleton<IAccountInvitationEmailSender, SqsAccountInvitationEmailSender>();
         return services;
     }
 }
