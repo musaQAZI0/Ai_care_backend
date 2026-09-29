@@ -97,7 +97,7 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
             left join finance_funders f on f.id=a.funder_id and f.organization_id=a.organization_id
             left join finance_rate_cards rc on rc.id=a.rate_card_id and rc.organization_id=a.organization_id
            where a.organization_id=@organization and (@wide or a.branch_id=@branch)
-             and (@person is null or a.service_user_id=@person)
+             and (cast(@person as uuid) is null or a.service_user_id=@person)
            order by a.valid_from desc
         """,c=>Add(c,"person",serviceUserId),r=>new{id=r.GetGuid(0),serviceUserId=r.GetGuid(1),funderId=r.IsDBNull(2)?null:(Guid?)r.GetGuid(2),funderName=r.GetString(3),rateCardId=r.IsDBNull(4)?null:(Guid?)r.GetGuid(4),rateCardName=r.GetString(5),startDate=r.GetFieldValue<DateTime>(6),endDate=r.IsDBNull(7)?null:(DateTime?)r.GetFieldValue<DateTime>(7),invoiceFrequency=r.GetString(8),allocationRule=r.GetString(9),billingReference=r.GetString(10),purchaseOrderReference=r.GetString(11),authorizedHoursPerWeek=r.GetDecimal(12),status=r.GetString(13),notes=r.GetString(14),branchId=r.GetGuid(15)},token);
         return Ok(rows);

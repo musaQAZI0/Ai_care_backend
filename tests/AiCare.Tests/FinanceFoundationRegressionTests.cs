@@ -29,6 +29,7 @@ public sealed class FinanceFoundationRegressionTests(PostgresRegressionFactory f
         Assert.Equal(HttpStatusCode.Conflict,(await finance.PostAsJsonAsync("/api/phase1/finance/funders",new{name="foundation council",funderType="LocalAuthority",billingEmail="",paymentTermsDays=30,defaultInvoiceFrequency="Monthly",currency="GBP"})).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden,(await manager.PostAsJsonAsync("/api/phase1/finance/funders",new{name="Not allowed",funderType="Other",paymentTermsDays=30,defaultInvoiceFrequency="Monthly",currency="GBP"})).StatusCode);
         Assert.Contains("Foundation Council",await manager.GetStringAsync("/api/phase1/finance/funders"));
+        Assert.Equal("[]", await manager.GetStringAsync("/api/phase1/finance/funding-arrangements"));
 
         var cardResponse=await finance.PostAsJsonAsync("/api/phase1/finance/rate-cards",new{name="Council Personal Care 2040",serviceType="Personal care",currency="GBP"});
         Assert.Equal(HttpStatusCode.Created,cardResponse.StatusCode);var card=(await cardResponse.Content.ReadFromJsonAsync<Identifier>())!;
