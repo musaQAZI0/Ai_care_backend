@@ -116,10 +116,8 @@ public sealed class FullProviderJourneyRegressionTests(PostgresRegressionFactory
         Assert.Contains("Observation", timeline);
         Assert.Contains("Handover", timeline);
 
-        var invoiceBatch = await finance.PostAsJsonAsync("/api/phase1/finance/invoice-batches", new { periodStart = starts.AddHours(-1), periodEnd = starts.AddDays(1), defaultHourlyRate = 25m, mileageRate = 0m });
-        Assert.Equal(HttpStatusCode.Created, invoiceBatch.StatusCode);
-        var invoicePayload = (await invoiceBatch.Content.ReadFromJsonAsync<InvoiceBatchDto>())!;
-        Assert.Contains(invoicePayload.Invoices, x => x.ServiceUserId == serviceUserId && x.Amount == 30m);
+        var governedInvoices = await GovernedInvoiceTestData.GenerateAsync(factory, finance, DateOnly.FromDateTime(starts.AddHours(-1).UtcDateTime), DateOnly.FromDateTime(starts.AddDays(1).UtcDateTime), new GovernedInvoiceTestData.Event(visitId, serviceUserId, DateOnly.FromDateTime(starts.UtcDateTime), 1m, 30m));
+        Assert.Contains(governedInvoices, x => x.ServiceUserId == serviceUserId && x.Amount == 30m);
 
 
         using var verify = factory.Services.CreateScope();
@@ -129,7 +127,7 @@ public sealed class FullProviderJourneyRegressionTests(PostgresRegressionFactory
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "visit.observation_recorded"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "care_note.reviewed"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "visit_handover.created"));
-        Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "finance.invoice_batch_generated"));
+        Assert.True(await verifyDb.AuditEvents.AnyAsync(x => x.Action == "INVOICE_RUN_CREATED"));
     }
 
     private async Task<LifecycleDto> PostLifecycle(HttpClient client, Guid planId, string action, long expectedRevision, string comment)

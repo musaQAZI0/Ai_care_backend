@@ -32,11 +32,8 @@ public sealed class FinanceGovernanceRegressionTests(PostgresRegressionFactory f
         var finance=await Client(financeName);var worker=await Client(workerName);
         Assert.Equal(HttpStatusCode.Forbidden,(await worker.GetAsync("/api/phase1/finance/dashboard")).StatusCode);
 
-        var invoiceBatch=await finance.PostAsJsonAsync("/api/phase1/finance/invoice-batches",new{periodStart=start,periodEnd=end,defaultHourlyRate=25m,mileageRate=0m});
-        Assert.Equal(HttpStatusCode.Created,invoiceBatch.StatusCode);
-        var invoicePayload=(await invoiceBatch.Content.ReadFromJsonAsync<InvoiceBatch>())!;
-        Assert.True(invoicePayload.Count >= 1);
-        var generatedInvoice=invoicePayload.Invoices.Single(x=>x.ServiceUserId==personId);
+        var governedInvoices=await GovernedInvoiceTestData.GenerateAsync(factory,finance,DateOnly.FromDateTime(start.UtcDateTime),DateOnly.FromDateTime(end.UtcDateTime),new(visitOne,personId,DateOnly.FromDateTime(start.UtcDateTime),1m,30m),new(visitTwo,personId,DateOnly.FromDateTime(start.AddDays(1).UtcDateTime),0.5m,30m));
+        var generatedInvoice=governedInvoices.Single(x=>x.ServiceUserId==personId);
         var invoiceId=generatedInvoice.Id;
         Assert.Equal(45m,generatedInvoice.Amount);
 
@@ -45,6 +42,7 @@ public sealed class FinanceGovernanceRegressionTests(PostgresRegressionFactory f
         Assert.Equal(45m,lines.Sum(x=>x.Amount));
 
         Assert.Equal(HttpStatusCode.Conflict,(await finance.PostAsJsonAsync($"/api/phase1/finance/invoices/{invoiceId}/payments",new{amount=45m,reference="PREMATURE",receivedAt=(DateTimeOffset?)null})).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,(await finance.PostAsync($"/api/phase1/finance/invoices/{invoiceId}/review",null)).StatusCode);
         Assert.Equal(HttpStatusCode.OK,(await finance.PostAsync($"/api/phase1/finance/invoices/{invoiceId}/approve",null)).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict,(await finance.PostAsync($"/api/phase1/finance/invoices/{invoiceId}/approve",null)).StatusCode);
         Assert.Equal(HttpStatusCode.OK,(await finance.PostAsync($"/api/phase1/finance/invoices/{invoiceId}/issue",null)).StatusCode);
@@ -56,8 +54,8 @@ public sealed class FinanceGovernanceRegressionTests(PostgresRegressionFactory f
         Assert.Equal(HttpStatusCode.Created,payment.StatusCode);Assert.Contains("Paid",await payment.Content.ReadAsStringAsync());
 
 
-        // Repeating a period must not claim the same visits or produce another batch.
-        Assert.Equal(HttpStatusCode.Conflict, (await finance.PostAsJsonAsync(
+        // The retired raw-visit generator must remain unavailable.
+        Assert.Equal(HttpStatusCode.Gone, (await finance.PostAsJsonAsync(
             "/api/phase1/finance/invoice-batches", new { periodStart=start, periodEnd=end, defaultHourlyRate=25m, mileageRate=0m })).StatusCode);
         Assert.Equal(2, (await finance.GetFromJsonAsync<List<InvoiceLine>>($"/api/phase1/finance/invoices/{invoiceId}/lines"))!.Count);
 
@@ -68,7 +66,7 @@ public sealed class FinanceGovernanceRegressionTests(PostgresRegressionFactory f
         Assert.Contains("paymentsReceived",dashboard);Assert.DoesNotContain("payrollTotal",dashboard);
 
         using var verify=factory.Services.CreateScope();var verifyDb=verify.ServiceProvider.GetRequiredService<CareDbContext>();
-        Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="finance.invoice_batch_generated"));
+        Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="INVOICE_RUN_CREATED"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="finance.payment_recorded"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="finance.funding_reconciled"));
         await Assert.ThrowsAnyAsync<Exception>(()=>verifyDb.Database.ExecuteSqlRawAsync("update finance_invoice_lines set amount=amount+1 where invoice_id={0}",invoiceId));

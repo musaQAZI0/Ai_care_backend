@@ -22,11 +22,11 @@ public sealed class FinanceGovernanceController(CareDbContext db,ITenantContext 
         approvedInvoices=await Scalar("select count(*) from \"Invoices\" where \"OrganizationId\"=@organization and \"Status\"='Approved'",t),
         paidInvoices=await Scalar("select count(*) from \"Invoices\" where \"OrganizationId\"=@organization and \"Status\"='Paid'",t),
         invoiceTotal=await Money("select coalesce(sum(\"Amount\"),0) from \"Invoices\" where \"OrganizationId\"=@organization and \"Status\"<>'Void'",t),
-        paymentsReceived=await Money("select coalesce(sum(amount),0) from finance_payments where organization_id=@organization",t),
+        paymentsReceived=await Money("select coalesce((select sum(amount) from finance_payments where organization_id=@organization),0)+coalesce((select sum(amount) from finance_payment_allocations where organization_id=@organization and reversed_at is null),0)",t),
         openReconciliations=await Scalar("select count(*) from finance_funding_reconciliations where organization_id=@organization and status='Open'",t)});
 
     [HttpPost("invoice-batches")]
-    public Task<IActionResult> GenerateInvoiceBatch(GenerateFinanceBatchRequest request,CancellationToken t) => InTransaction(()=>GenerateInvoiceBatchCore(request,t),t);
+    public IActionResult GenerateInvoiceBatch(GenerateFinanceBatchRequest request,CancellationToken t) => StatusCode(StatusCodes.Status410Gone,new{message="Legacy raw-visit invoice generation is retired. Generate and approve billable events, then use an invoice run."});
     private async Task<IActionResult> GenerateInvoiceBatchCore(GenerateFinanceBatchRequest request,CancellationToken t)
     {
         if(request.PeriodStart>=request.PeriodEnd)return BadRequest(new{message="Period start must be before period end."});

@@ -17,11 +17,20 @@ namespace AiCare.Api;
 [Route("api/phase1/finance/invoices")]
 public sealed class InvoiceLifecycleController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user):ControllerBase
 {
+    [HttpPost("{id:guid}/review")]
+    public async Task<IActionResult> Review(Guid id,CancellationToken token)
+    {
+        var invoice=await Lock(id,token);if(invoice is null)return NotFound();
+        if(invoice.Status!="Generated")return Conflict(new{message="Only a generated invoice can be reviewed."});
+        await SetStatus(id,"Reviewed",token);Audit("invoice.reviewed",id);await db.SaveChangesAsync(token);
+        return Ok(new{id,status="Reviewed"});
+    }
+
     [HttpPost("{id:guid}/approve")]
     public async Task<IActionResult> Approve(Guid id,CancellationToken token)
     {
         var invoice=await Lock(id,token);if(invoice is null)return NotFound();
-        if(invoice.Status!="Generated")return Conflict(new{message="Only a generated invoice can be approved."});
+        if(invoice.Status!="Reviewed")return Conflict(new{message="Only a reviewed invoice can be approved."});
         await SetStatus(id,"Approved",token);Audit("invoice.approved",id);await db.SaveChangesAsync(token);
         return Ok(new{id,status="Approved"});
     }
