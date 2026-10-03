@@ -6,6 +6,7 @@ using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AiCare.Api;
 
@@ -42,37 +43,53 @@ public sealed class MedicationSafetyController : ControllerBase
     }
     [HttpPut("medications/{medicationId:guid}/profile")]
     [Authorize(Roles = "CareCoordinator,CareManager,Administrator")]
-    public async Task<IActionResult> UpsertProfile(Guid medicationId, MedicationSafetyProfileRequest request, CancellationToken cancellationToken)
+    public Task<IActionResult> UpsertProfile(Guid medicationId, MedicationSafetyProfileRequest request, CancellationToken cancellationToken) =>
+        _context.Database.CreateExecutionStrategy().ExecuteAsync(() => UpsertProfileCore(medicationId, request, cancellationToken));
+
+    private async Task<IActionResult> UpsertProfileCore(Guid medicationId, MedicationSafetyProfileRequest request, CancellationToken cancellationToken)
     {
         var medication = await _context.Medications.SingleOrDefaultAsync(x => x.Id == medicationId, cancellationToken);
         if (medication is null || !_tenant.CanAccess(medication.OrganizationId, medication.BranchId)) return NotFound();
         if (request.DoseWindowMinutes is < 0 or > 1440) return BadRequest(new { message = "Dose window must be between 0 and 1440 minutes." });
-        if (medication.IsPrn && string.IsNullOrWhiteSpace(request.PrnIndication)) return BadRequest(new { message = "PRN indication is required for PRN medication." });
         if (request.MaxPrnDoses24h is < 1 || request.MinPrnIntervalMinutes is < 0) return BadRequest(new { message = "PRN limits are invalid." });
         var allowedStatuses = new[] { "Draft", "NeedsReview", "Verified", "Superseded", "Discontinued" };
-        var reconciliationStatus = string.IsNullOrWhiteSpace(request.ReconciliationStatus) ? (request.LastReconciledAt is not null && !string.IsNullOrWhiteSpace(request.ReconciledBy) ? "Verified" : "NeedsReview") : request.ReconciliationStatus.Trim();
+        var reconciliationStatus = string.IsNullOrWhiteSpace(request.ReconciliationStatus) ? "Draft" : request.ReconciliationStatus.Trim();
         if (!allowedStatuses.Contains(reconciliationStatus, StringComparer.Ordinal)) return BadRequest(new { message = "Medication reconciliation status is invalid." });
         if (reconciliationStatus == "Verified" && (string.IsNullOrWhiteSpace(request.SourceType) || string.IsNullOrWhiteSpace(request.SourceReference) || string.IsNullOrWhiteSpace(request.ReconciledBy) || request.LastReconciledAt is null)) return BadRequest(new { message = "Verified medication reconciliation requires source type, source reference, reviewer and reviewed time." });
         if (reconciliationStatus is "Superseded" or "Discontinued" && string.IsNullOrWhiteSpace(request.ChangeReason)) return BadRequest(new { message = "Superseded or discontinued medication reconciliation requires a change reason." });
-        var previous = await QueryProfile(medicationId, cancellationToken);
+        await using var transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
+        var previous = await QueryProfile(medicationId, cancellationToken, forUpdate: true);
+        if (previous?.ReconciliationStatus == "Verified")
+            return Conflict(new { message = "Verified medication instructions must be changed through a reviewed medication change request." });
+        if (previous?.ReconciliationStatus is "Superseded" or "Discontinued")
+            return Conflict(new { message = "A stopped or superseded medication cannot be edited as a new draft. Create a new medication order." });
+        if (reconciliationStatus == "Verified")
+            return Conflict(new { message = "Initial verification requires submission and approval by a different authorised reviewer." });
+        var pendingInitialReview = await _context.Database.SqlQueryRaw<int>(
+            "select 1 as \"Value\" from medication_initial_verification_requests where medication_id={0} and organization_id={1} and branch_id={2} and status='Pending' limit 1",
+            medicationId, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId).AnyAsync(cancellationToken);
+        if (pendingInitialReview)
+            return Conflict(new { message = "This profile is awaiting independent review. A reviewer must approve or reject it before further edits." });
+        reconciliationStatus = "Draft";
 
         await Execute("""
             insert into medication_safety_profiles
-              (medication_id,organization_id,branch_id,indication,prescriber,form,strength,start_date,end_date,dose_window_minutes,max_prn_doses_24h,min_prn_interval_minutes,prn_indication,prn_effect_review_minutes,stock_on_hand,reorder_level,requires_witness,last_reconciled_at,reconciled_by,reconciliation_status,source_type,source_reference,reviewed_by_user_id,reviewed_at,profile_version,change_reason,updated_at)
-            values (@medication,@organization,@branch,@indication,@prescriber,@form,@strength,@start,@end,@window,@maxprn,@interval,@prnindication,@review,@stock,@reorder,@witness,@reconciled,@reconciledby,@status,@sourceType,@sourceReference,@reviewedByUser,@reviewedAt,1,@changeReason,now())
+              (medication_id,organization_id,branch_id,indication,prescriber,form,strength,start_date,end_date,dose_window_minutes,max_prn_doses_24h,min_prn_interval_minutes,prn_indication,prn_effect_review_minutes,stock_on_hand,reorder_level,requires_witness,last_reconciled_at,reconciled_by,reconciliation_status,source_type,source_reference,reviewed_by_user_id,reviewed_at,profile_version,change_reason,updated_at,dose_unit,frequency,administration_instructions,review_due_at)
+            values (@medication,@organization,@branch,@indication,@prescriber,@form,@strength,@start,@end,@window,@maxprn,@interval,@prnindication,@review,@stock,@reorder,@witness,@reconciled,@reconciledby,@status,@sourceType,@sourceReference,@reviewedByUser,@reviewedAt,1,@changeReason,now(),coalesce(@doseUnit,''),coalesce(@frequency,''),coalesce(@instructions,''),@reviewDue)
             on conflict (medication_id) do update set
-              indication=excluded.indication,prescriber=excluded.prescriber,form=excluded.form,strength=excluded.strength,start_date=excluded.start_date,end_date=excluded.end_date,
+              indication=excluded.indication,prescriber=excluded.prescriber,form=excluded.form,strength=excluded.strength,start_date=coalesce(@start,medication_safety_profiles.start_date),end_date=coalesce(@end,medication_safety_profiles.end_date),
               dose_window_minutes=excluded.dose_window_minutes,max_prn_doses_24h=excluded.max_prn_doses_24h,min_prn_interval_minutes=excluded.min_prn_interval_minutes,
               prn_indication=excluded.prn_indication,prn_effect_review_minutes=excluded.prn_effect_review_minutes,stock_on_hand=excluded.stock_on_hand,reorder_level=excluded.reorder_level,
-              requires_witness=excluded.requires_witness,last_reconciled_at=excluded.last_reconciled_at,reconciled_by=excluded.reconciled_by,reconciliation_status=excluded.reconciliation_status,source_type=excluded.source_type,source_reference=excluded.source_reference,reviewed_by_user_id=excluded.reviewed_by_user_id,reviewed_at=excluded.reviewed_at,profile_version=medication_safety_profiles.profile_version+1,change_reason=excluded.change_reason,updated_at=now()
+              requires_witness=excluded.requires_witness,last_reconciled_at=excluded.last_reconciled_at,reconciled_by=excluded.reconciled_by,reconciliation_status=excluded.reconciliation_status,source_type=excluded.source_type,source_reference=excluded.source_reference,reviewed_by_user_id=excluded.reviewed_by_user_id,reviewed_at=excluded.reviewed_at,profile_version=medication_safety_profiles.profile_version+1,change_reason=excluded.change_reason,updated_at=now(),dose_unit=coalesce(@doseUnit,medication_safety_profiles.dose_unit),frequency=coalesce(@frequency,medication_safety_profiles.frequency),administration_instructions=coalesce(@instructions,medication_safety_profiles.administration_instructions),review_due_at=case when @clearReviewDue then null else coalesce(@reviewDue,medication_safety_profiles.review_due_at) end
             """, command =>
         {
             Add(command,"medication",medicationId); Add(command,"organization",medication.OrganizationId ?? _tenant.OrganizationId); Add(command,"branch",medication.BranchId ?? _tenant.BranchId ?? TenantDefaults.BranchId);
-            Add(command,"indication",request.Indication.Trim()); Add(command,"prescriber",request.Prescriber.Trim()); Add(command,"form",request.Form.Trim()); Add(command,"strength",request.Strength.Trim());
+            Add(command,"indication",request.Indication?.Trim() ?? ""); Add(command,"prescriber",request.Prescriber?.Trim() ?? ""); Add(command,"form",request.Form?.Trim() ?? ""); Add(command,"strength",request.Strength?.Trim() ?? "");
             Add(command,"start",request.StartDate?.UtcDateTime); Add(command,"end",request.EndDate?.UtcDateTime); Add(command,"window",request.DoseWindowMinutes); Add(command,"maxprn",request.MaxPrnDoses24h);
-            Add(command,"interval",request.MinPrnIntervalMinutes); Add(command,"prnindication",request.PrnIndication.Trim()); Add(command,"review",request.PrnEffectReviewMinutes); Add(command,"stock",request.StockOnHand);
-            Add(command,"reorder",request.ReorderLevel); Add(command,"witness",request.RequiresWitness); Add(command,"reconciled",request.LastReconciledAt?.UtcDateTime); Add(command,"reconciledby",request.ReconciledBy.Trim());
-            Add(command,"status",reconciliationStatus); Add(command,"sourceType",request.SourceType?.Trim() ?? ""); Add(command,"sourceReference",request.SourceReference?.Trim() ?? ""); Add(command,"reviewedByUser",_currentUser.UserId); Add(command,"reviewedAt",request.LastReconciledAt?.UtcDateTime); Add(command,"changeReason",request.ChangeReason?.Trim() ?? "");
+            Add(command,"interval",request.MinPrnIntervalMinutes); Add(command,"prnindication",request.PrnIndication?.Trim() ?? ""); Add(command,"review",request.PrnEffectReviewMinutes); Add(command,"stock",request.StockOnHand);
+            Add(command,"reorder",request.ReorderLevel); Add(command,"witness",request.RequiresWitness); Add(command,"reconciled",null); Add(command,"reconciledby","");
+            Add(command,"status",reconciliationStatus); Add(command,"sourceType",request.SourceType?.Trim() ?? ""); Add(command,"sourceReference",request.SourceReference?.Trim() ?? ""); Add(command,"reviewedByUser",null); Add(command,"reviewedAt",null); Add(command,"changeReason",request.ChangeReason?.Trim() ?? "");
+            Add(command,"doseUnit",request.DoseUnit?.Trim()); Add(command,"frequency",request.Frequency?.Trim()); Add(command,"instructions",request.AdministrationInstructions?.Trim()); Add(command,"reviewDue",request.ReviewDueAt?.UtcDateTime); Add(command,"clearReviewDue",request.ClearReviewDueAt);
         }, cancellationToken);
 
         await Execute("""
@@ -81,11 +98,12 @@ public sealed class MedicationSafetyController : ControllerBase
             """, command =>
         {
             Add(command,"id",Guid.NewGuid()); Add(command,"medication",medicationId); Add(command,"organization",medication.OrganizationId ?? _tenant.OrganizationId); Add(command,"branch",medication.BranchId ?? _tenant.BranchId ?? TenantDefaults.BranchId);
-            Add(command,"previous",previous?.ReconciliationStatus ?? ""); Add(command,"status",reconciliationStatus); Add(command,"sourceType",request.SourceType?.Trim() ?? ""); Add(command,"sourceReference",request.SourceReference?.Trim() ?? ""); Add(command,"reviewedByUser",_currentUser.UserId); Add(command,"reviewedBy",request.ReconciledBy.Trim()); Add(command,"reviewedAt",request.LastReconciledAt?.UtcDateTime); Add(command,"changeReason",request.ChangeReason?.Trim() ?? ""); Add(command,"createdBy",_currentUser.UserName);
+            Add(command,"previous",previous?.ReconciliationStatus ?? ""); Add(command,"status",reconciliationStatus); Add(command,"sourceType",request.SourceType?.Trim() ?? ""); Add(command,"sourceReference",request.SourceReference?.Trim() ?? ""); Add(command,"reviewedByUser",null); Add(command,"reviewedBy",""); Add(command,"reviewedAt",null); Add(command,"changeReason",request.ChangeReason?.Trim() ?? ""); Add(command,"createdBy",_currentUser.UserName);
         }, cancellationToken);
 
         _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.reconciliation_updated", _currentUser.UserName, nameof(Medication), medicationId, DateTimeOffset.UtcNow, medication.OrganizationId, medication.BranchId));
         await _context.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return Ok(await QueryProfile(medicationId, cancellationToken));
     }
 
@@ -125,16 +143,17 @@ public sealed class MedicationSafetyController : ControllerBase
 
     private bool CanAccessMar(MedicationAdministrationRecord mar) => _currentUser.IsAdministrator || _currentUser.IsCareManager || _currentUser.IsCareCoordinator || (_currentUser.IsCareWorker && _currentUser.CareWorkerId == mar.CareWorkerId);
 
-    private async Task<MedicationSafetyProfileResponse?> QueryProfile(Guid medicationId, CancellationToken cancellationToken)
+    private async Task<MedicationSafetyProfileResponse?> QueryProfile(Guid medicationId, CancellationToken cancellationToken, bool forUpdate = false)
     {
         var connection = _context.Database.GetDbConnection(); var opened = connection.State != ConnectionState.Open; if (opened) await connection.OpenAsync(cancellationToken);
         try
         {
             await using var command = connection.CreateCommand();
-            command.CommandText = "select medication_id,indication,prescriber,form,strength,start_date,end_date,dose_window_minutes,max_prn_doses_24h,min_prn_interval_minutes,prn_indication,prn_effect_review_minutes,stock_on_hand,reorder_level,requires_witness,last_reconciled_at,reconciled_by,updated_at,reconciliation_status,source_type,source_reference,reviewed_by_user_id,reviewed_at,profile_version,change_reason from medication_safety_profiles where medication_id=@id and organization_id=@organization";
+            command.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
+            command.CommandText = "select medication_id,indication,prescriber,form,strength,start_date,end_date,dose_window_minutes,max_prn_doses_24h,min_prn_interval_minutes,prn_indication,prn_effect_review_minutes,stock_on_hand,reorder_level,requires_witness,last_reconciled_at,reconciled_by,updated_at,reconciliation_status,source_type,source_reference,reviewed_by_user_id,reviewed_at,profile_version,change_reason,dose_unit,frequency,administration_instructions,review_due_at from medication_safety_profiles where medication_id=@id and organization_id=@organization" + (forUpdate ? " for update" : "");
             Add(command,"id",medicationId); Add(command,"organization",_tenant.OrganizationId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken); if (!await reader.ReadAsync(cancellationToken)) return null;
-            return new MedicationSafetyProfileResponse(reader.GetGuid(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),ReadDate(reader,5),ReadDate(reader,6),reader.GetInt32(7),ReadInt(reader,8),ReadInt(reader,9),reader.GetString(10),ReadInt(reader,11),ReadDecimal(reader,12),ReadDecimal(reader,13),reader.GetBoolean(14),ReadDate(reader,15),reader.GetString(16),reader.GetDateTime(17),reader.GetString(18),reader.GetString(19),reader.GetString(20),reader.IsDBNull(21)?null:reader.GetGuid(21),ReadDate(reader,22),reader.GetInt32(23),reader.GetString(24));
+            return new MedicationSafetyProfileResponse(reader.GetGuid(0),reader.GetString(1),reader.GetString(2),reader.GetString(3),reader.GetString(4),ReadDate(reader,5),ReadDate(reader,6),reader.GetInt32(7),ReadInt(reader,8),ReadInt(reader,9),reader.GetString(10),ReadInt(reader,11),ReadDecimal(reader,12),ReadDecimal(reader,13),reader.GetBoolean(14),ReadDate(reader,15),reader.GetString(16),reader.GetDateTime(17),reader.GetString(18),reader.GetString(19),reader.GetString(20),reader.IsDBNull(21)?null:reader.GetGuid(21),ReadDate(reader,22),reader.GetInt32(23),reader.GetString(24),reader.GetString(25),reader.GetString(26),reader.GetString(27),ReadDate(reader,28));
         }
         finally { if (opened) await connection.CloseAsync(); }
     }
@@ -166,7 +185,7 @@ public sealed class MedicationSafetyController : ControllerBase
     private async Task Execute(string sql, Action<DbCommand> bind, CancellationToken cancellationToken)
     {
         var connection = _context.Database.GetDbConnection(); var opened = connection.State != ConnectionState.Open; if (opened) await connection.OpenAsync(cancellationToken);
-        try { await using var command = connection.CreateCommand(); command.CommandText = sql; bind(command); await command.ExecuteNonQueryAsync(cancellationToken); }
+        try { await using var command = connection.CreateCommand(); command.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction(); command.CommandText = sql; bind(command); await command.ExecuteNonQueryAsync(cancellationToken); }
         finally { if (opened) await connection.CloseAsync(); }
     }
 
@@ -176,8 +195,8 @@ public sealed class MedicationSafetyController : ControllerBase
     private static void Add(DbCommand command,string name,object? value) { var p=command.CreateParameter(); p.ParameterName=name; p.Value=value??DBNull.Value; command.Parameters.Add(p); }
 }
 
-public sealed record MedicationSafetyProfileRequest(string Indication,string Prescriber,string Form,string Strength,DateTimeOffset? StartDate,DateTimeOffset? EndDate,int DoseWindowMinutes,int? MaxPrnDoses24h,int? MinPrnIntervalMinutes,string PrnIndication,int? PrnEffectReviewMinutes,decimal? StockOnHand,decimal? ReorderLevel,bool RequiresWitness,DateTimeOffset? LastReconciledAt,string ReconciledBy,string? ReconciliationStatus,string? SourceType,string? SourceReference,string? ChangeReason);
-public sealed record MedicationSafetyProfileResponse(Guid MedicationId,string Indication,string Prescriber,string Form,string Strength,DateTimeOffset? StartDate,DateTimeOffset? EndDate,int DoseWindowMinutes,int? MaxPrnDoses24h,int? MinPrnIntervalMinutes,string PrnIndication,int? PrnEffectReviewMinutes,decimal? StockOnHand,decimal? ReorderLevel,bool RequiresWitness,DateTimeOffset? LastReconciledAt,string ReconciledBy,DateTimeOffset UpdatedAt,string ReconciliationStatus,string SourceType,string SourceReference,Guid? ReviewedByUserId,DateTimeOffset? ReviewedAt,int ProfileVersion,string ChangeReason);
+public sealed record MedicationSafetyProfileRequest(string? Indication,string? Prescriber,string? Form,string? Strength,DateTimeOffset? StartDate,DateTimeOffset? EndDate,int DoseWindowMinutes,int? MaxPrnDoses24h,int? MinPrnIntervalMinutes,string? PrnIndication,int? PrnEffectReviewMinutes,decimal? StockOnHand,decimal? ReorderLevel,bool RequiresWitness,DateTimeOffset? LastReconciledAt,string? ReconciledBy,string? ReconciliationStatus,string? SourceType,string? SourceReference,string? ChangeReason,string? DoseUnit=null,string? Frequency=null,string? AdministrationInstructions=null,DateTimeOffset? ReviewDueAt=null,bool ClearReviewDueAt=false);
+public sealed record MedicationSafetyProfileResponse(Guid MedicationId,string Indication,string Prescriber,string Form,string Strength,DateTimeOffset? StartDate,DateTimeOffset? EndDate,int DoseWindowMinutes,int? MaxPrnDoses24h,int? MinPrnIntervalMinutes,string PrnIndication,int? PrnEffectReviewMinutes,decimal? StockOnHand,decimal? ReorderLevel,bool RequiresWitness,DateTimeOffset? LastReconciledAt,string ReconciledBy,DateTimeOffset UpdatedAt,string ReconciliationStatus,string SourceType,string SourceReference,Guid? ReviewedByUserId,DateTimeOffset? ReviewedAt,int ProfileVersion,string ChangeReason,string DoseUnit,string Frequency,string AdministrationInstructions,DateTimeOffset? ReviewDueAt);
 public sealed record MedicationReconciliationHistoryResponse(Guid Id,string PreviousStatus,string NewStatus,string SourceType,string SourceReference,string ReviewedBy,DateTimeOffset? ReviewedAt,string ChangeReason,string CreatedBy,DateTimeOffset CreatedAt);
 public sealed record MarSafetyEventRequest(string EventType,string? Reason,string? Effect,string? WitnessedBy,decimal? StockDelta);
 public sealed record MarSafetyEventResponse(Guid Id,string EventType,string Reason,string Effect,string WitnessedBy,decimal? StockDelta,string CreatedBy,DateTimeOffset CreatedAt);

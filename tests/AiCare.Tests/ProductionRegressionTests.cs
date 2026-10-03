@@ -60,12 +60,21 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
     public async Task MedicationSafetyProfileAndMarAuditEventRoundTrip()
     {
         await _factory.EnsureClinicalSeedAsync();
+        var medicationId = Guid.NewGuid();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.Medications.Add(new Medication(medicationId, RegressionIds.ServiceUserId,
+                "Isolated profile regression medicine", "500 mg", "Oral", "Morning", false,
+                "Pharmacy", "None", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+        }
         var client = _factory.CreateClient();
         var login = await Login(client);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.Token);
         await StepUpTestGrants.GrantAsync(_factory, client, "medication");
 
-        var profile = await client.PutAsJsonAsync($"/api/phase1/medication-safety/medications/{RegressionIds.MedicationId}/profile", new
+        var profile = await MedicationVerificationTestHelper.SaveAndVerifyAsync(_factory, client, medicationId, new
         {
             indication = "Pain management",
             prescriber = "Dr Regression",
@@ -246,6 +255,48 @@ public sealed class ProductionRegressionTests : IClassFixture<PostgresRegression
         });
         Assert.Equal(HttpStatusCode.BadRequest, profile.StatusCode);
         Assert.Contains("source", await profile.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+    }
+    [Fact]
+    public async Task MedicationReconciliationPersistsPrescriptionDetails()
+    {
+        await _factory.EnsureClinicalSeedAsync();
+        var client = _factory.CreateClient();
+        var login = await Login(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.Token);
+        await StepUpTestGrants.GrantAsync(_factory, client, "medication");
+
+        var response = await MedicationVerificationTestHelper.SaveAndVerifyAsync(_factory, client, RegressionIds.MedicationId, new
+        {
+            indication = "Pain management", prescriber = "Dr Regression", form = "Tablet", strength = "500 mg",
+            doseUnit = "tablet", frequency = "Twice daily", administrationInstructions = "Give with food",
+            reviewDueAt = DateTimeOffset.UtcNow.AddMonths(1),
+            startDate = DateTimeOffset.UtcNow.AddDays(-1), endDate = (DateTimeOffset?)null,
+            doseWindowMinutes = 60, maxPrnDoses24h = 4, minPrnIntervalMinutes = 240,
+            prnIndication = "Pain score 4 or above", prnEffectReviewMinutes = 60, stockOnHand = 20m, reorderLevel = 5m,
+            requiresWitness = false, lastReconciledAt = DateTimeOffset.UtcNow, reconciledBy = "Regression Admin",
+            reconciliationStatus = "Verified", sourceType = "Prescription", sourceReference = "RX-DETAIL-1", changeReason = "Detail review"
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var profile = await client.GetStringAsync($"/api/phase1/medication-safety/medications/{RegressionIds.MedicationId}/profile");
+        Assert.Contains("\"doseUnit\":\"tablet\"", profile);
+        Assert.Contains("\"frequency\":\"Twice daily\"", profile);
+        Assert.Contains("\"administrationInstructions\":\"Give with food\"", profile);
+        Assert.Contains("\"reviewDueAt\":", profile);
+        await StepUpTestGrants.GrantAsync(_factory, client, "medication");
+        var legacyUpdate = await client.PutAsJsonAsync($"/api/phase1/medication-safety/medications/{RegressionIds.MedicationId}/profile", new
+        {
+            indication = "Pain management", prescriber = "Dr Regression", form = "Tablet", strength = "500 mg",
+            doseWindowMinutes = 60, maxPrnDoses24h = 4, minPrnIntervalMinutes = 240,
+            prnIndication = "Pain score 4 or above", prnEffectReviewMinutes = 60,
+            stockOnHand = 20m, reorderLevel = 5m, requiresWitness = false,
+            lastReconciledAt = DateTimeOffset.UtcNow, reconciledBy = "Regression Admin",
+            reconciliationStatus = "Verified", sourceType = "Prescription", sourceReference = "RX-DETAIL-1", changeReason = "Legacy client update"
+        });
+        Assert.Equal(HttpStatusCode.Conflict, legacyUpdate.StatusCode);
+        var preserved = await client.GetStringAsync($"/api/phase1/medication-safety/medications/{RegressionIds.MedicationId}/profile");
+        Assert.Contains("\"doseUnit\":\"tablet\"", preserved);
+        Assert.Contains("\"frequency\":\"Twice daily\"", preserved);
+        Assert.Contains("\"administrationInstructions\":\"Give with food\"", preserved);
     }
     private sealed record LoginResponse(string Token, string RefreshToken, int ExpiresInMinutes);
     private sealed record CreatedId(Guid Id);

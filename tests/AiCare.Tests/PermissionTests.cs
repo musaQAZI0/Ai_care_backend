@@ -191,7 +191,7 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
-    public async Task AssignedCareWorkerCanAdministerMedication()
+    public async Task AssignedCareWorkerCannotUseLegacyMarWritePath()
     {
         var client = _factory.CreateClient();
         await Login(client, "worker", "WorkerPassword123!");
@@ -203,7 +203,8 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         });
 
         var body = await response.Content.ReadAsStringAsync();
-        Assert.True(response.StatusCode == HttpStatusCode.OK, $"Expected OK but got {(int)response.StatusCode}: {body}");
+        Assert.Equal(HttpStatusCode.Gone, response.StatusCode);
+        Assert.Contains("governed eMAR", body, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

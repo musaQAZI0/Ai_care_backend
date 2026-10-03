@@ -44,11 +44,23 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, HttpTenantContext>();
 builder.Services.AddScoped<ICurrentUserContext, HttpCurrentUserContext>();
 builder.Services.AddHttpClient();
+var decisionSupportMode = builder.Configuration["MedicationSafety:DecisionSupportMode"] ?? "Disabled";
+if (!Enum.TryParse<MedicationDecisionSupportMode>(decisionSupportMode, ignoreCase: true, out var parsedDecisionSupportMode)
+    || parsedDecisionSupportMode != MedicationDecisionSupportMode.Disabled)
+{
+    throw new InvalidOperationException(
+        "Medication decision support is not configured. V1 supports Disabled only; LocalRules and ExternalProvider require a reviewed implementation.");
+}
+builder.Services.AddSingleton<IMedicationDecisionSupport, DisabledMedicationDecisionSupport>();
 builder.Services.AddHttpClient<IMedicationTerminologyService, NhsDmdTerminologyService>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(15);
 });
 builder.Services.AddInfrastructure(connectionString);
+builder.Services.AddScoped<MedicationChangeActivationService>();
+builder.Services.AddHostedService<MedicationChangeActivationWorker>();
+builder.Services.AddScoped<EmarMonitoringService>();
+if (!builder.Environment.IsEnvironment("Testing")) builder.Services.AddHostedService<EmarMonitoringWorker>();
 
 var jwtOptions = builder.Configuration.GetSection("JwtOptions").Get<JwtOptions>() ?? throw new InvalidOperationException("Missing JwtOptions");
 if (builder.Environment.IsEnvironment("Testing") && string.IsNullOrWhiteSpace(jwtOptions.SigningKey))
@@ -1060,6 +1072,15 @@ phase1.MapPut("/medications/{id:guid}", async (Guid id, CreateMedicationRequest 
     if (medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId)) return Results.NotFound();
     var (terminologyError, concept) = await ValidateMedicationTerminologyAsync(request, terminology, cancellationToken);
     if (terminologyError is not null) return terminologyError;
+    var verifiedProfile = context.Database.SqlQueryRaw<int>(
+        "select 1 as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} and reconciliation_status='Verified' limit 1",
+        id, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).Any();
+    if (verifiedProfile &&
+        (medication.ServiceUserId != request.ServiceUserId || medication.Name != request.Name.Trim() ||
+         medication.Dosage != request.Dosage.Trim() || medication.Route != request.Route.Trim() ||
+         medication.Schedule != request.Schedule.Trim() || medication.IsPrn != request.IsPrn ||
+         medication.DmdCode != concept?.Code || medication.AllergyWarning != request.AllergyWarning.Trim()))
+        return Results.Conflict(new { message = "Verified medication instructions require a reviewed change request. A different medicine identity requires a new reconciled medication." });
     var updated = medication with
     {
         ServiceUserId = request.ServiceUserId, Name = request.Name.Trim(), Dosage = request.Dosage.Trim(),
@@ -1079,6 +1100,10 @@ phase1.MapDelete("/medications/{id:guid}", (Guid id, CareDbContext context, ITen
 
     var medication = context.Medications.Find(id);
     if (medication is null || !tenant.CanAccess(medication.OrganizationId, medication.BranchId)) return Results.NotFound();
+    var verifiedForStop = context.Database.ProviderName != "Microsoft.EntityFrameworkCore.Sqlite" && context.Database.SqlQueryRaw<int>(
+        "select 1 as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} and reconciliation_status='Verified' limit 1",
+        id, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).Any();
+    if (verifiedForStop) return Results.Conflict(new { message = "Stop a verified medication through a reviewed medication change request." });
     if (context.MedicationAdministrationRecords.Any(item => item.MedicationId == id && item.OrganizationId == tenant.OrganizationId)) return Results.Conflict(new { message = "Medication with administration history must be discontinued, not deleted." });
     context.Entry(medication).CurrentValues.SetValues(medication with { Schedule = "Discontinued", AllergyWarning = $"[Discontinued] {medication.AllergyWarning}" });
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "medication.discontinued", currentUser.UserName, nameof(Medication), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
@@ -1096,10 +1121,35 @@ phase1.MapPost("/mar", (CreateMedicationAdministrationRecordRequest request, Car
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
 
+    var discontinued = context.Database.SqlQueryRaw<int>(
+        "select 1 as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} and reconciliation_status='Discontinued' limit 1",
+        request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).Any();
+    if (discontinued) return Results.Conflict(new { message = "This medication has been stopped. A new verified order is required before scheduling." });
+
     var validation = ValidateMedicationAdministrationReferences(request.MedicationId, request.VisitId, request.CareWorkerId, context, tenant);
     if (validation is not null) return validation;
 
-    var record = new MedicationAdministrationRecord(Guid.NewGuid(), request.MedicationId, request.VisitId, request.CareWorkerId, request.ScheduledAt, null, "Scheduled", request.Notes, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var pendingEffectiveChange = context.Database.SqlQueryRaw<int>(
+        "select 1 as \"Value\" from medication_change_requests where medication_id={0} and organization_id={1} and branch_id={2} and status in ('Pending','Approved') and effective_at<={3} limit 1",
+        request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId, request.ScheduledAt).Any();
+    if (pendingEffectiveChange) return Results.Conflict(new { message = "A medication change is due before this dose. Review and activate the change before scheduling." });
+    var profileVersion = context.Database.SqlQueryRaw<int?>(
+        "select profile_version as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} limit 1",
+        request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).SingleOrDefault();
+    var orderSnapshot = context.Database.SqlQueryRaw<string>("""
+        select json_build_object(
+          'medicationName',m."Name",'dosage',m."Dosage",'route',m."Route",'schedule',m."Schedule",
+          'isPrn',m."IsPrn",'form',coalesce(p.form,''),'strength',coalesce(p.strength,''),
+          'prnIndication',coalesce(p.prn_indication,''),'doseWindowMinutes',coalesce(p.dose_window_minutes,60),
+          'requiresWitness',coalesce(p.requires_witness,false),'indication',coalesce(p.indication,''),
+          'doseUnit',coalesce(p.dose_unit,''),'frequency',coalesce(p.frequency,''),
+          'administrationInstructions',coalesce(p.administration_instructions,'')
+        )::text as "Value"
+        from "Medications" m left join medication_safety_profiles p
+          on p.medication_id=m."Id" and p.organization_id=m."OrganizationId" and p.branch_id=m."BranchId"
+        where m."Id"={0} and m."OrganizationId"={1} and m."BranchId"={2}
+        """, request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).Single();
+    var record = new MedicationAdministrationRecord(Guid.NewGuid(), request.MedicationId, request.VisitId, request.CareWorkerId, request.ScheduledAt, null, "Scheduled", request.Notes, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId, profileVersion, orderSnapshot);
     context.MedicationAdministrationRecords.Add(record);
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "emar.scheduled", currentUser.UserName, nameof(MedicationAdministrationRecord), record.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
@@ -2762,26 +2812,15 @@ static IResult? ValidateMedicationAdministrationReferences(Guid medicationId, Gu
 
 static IResult CompleteMedicationAdministration(Guid id, string outcome, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration)
 {
-    if (!configuration.GetValue<bool>("MedicationSafety:EmarProductionEnabled")) return Results.Json(new { message = "eMAR administration is disabled until the medication clinical-safety gate is approved." }, statusCode: StatusCodes.Status423Locked);
+    if (!EmarPilotGate.IsEnabledForBranch(configuration, tenant.BranchId ?? TenantDefaults.BranchId)) return Results.Json(new { message = "eMAR administration is disabled for this branch until the medication clinical-safety gate is approved." }, statusCode: StatusCodes.Status423Locked);
     var record = context.MedicationAdministrationRecords.Find(id);
     if (record is null || !tenant.CanAccess(record.OrganizationId, record.BranchId)) return Results.NotFound();
 
     var denied = RequireAssignedVisitForCareWorker(record.VisitId, context, tenant, currentUser);
     if (denied is not null) return denied;
 
-    if (outcome is "Refused" or "Missed" or "Held" && string.IsNullOrWhiteSpace(request.Notes)) return Results.BadRequest(new { message = "A reason/note is required for refused, missed, or held medication outcomes." });
-    if (record.Outcome != "Scheduled") return Results.Conflict(new { message = "Medication administration record already has a final outcome." });
+    return Results.Json(new { message = "This legacy MAR endpoint cannot record final outcomes. Use the governed eMAR record endpoint." }, statusCode: StatusCodes.Status410Gone);
 
-    var completed = record with
-    {
-        AdministeredAt = request.AdministeredAt ?? DateTimeOffset.UtcNow,
-        Outcome = outcome,
-        Notes = request.Notes?.Trim() ?? ""
-    };
-    context.Entry(record).CurrentValues.SetValues(completed);
-    context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"emar.{outcome.ToLowerInvariant()}", currentUser.UserName, nameof(MedicationAdministrationRecord), id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
-    context.SaveChanges();
-    return Results.Ok(completed);
 }
 
 static bool PilotSeedAccessAllowed(HttpContext httpContext, IConfiguration configuration)

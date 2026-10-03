@@ -125,6 +125,10 @@ public static class ProductionConfigurationValidator
 
         if (configuration.GetValue<bool>("MedicationSafety:EmarProductionEnabled"))
         {
+            if (!Guid.TryParse(configuration["MedicationSafety:PilotBranchId"], out var pilotBranchId) || pilotBranchId == Guid.Empty)
+            {
+                errors.Add("MedicationSafety:PilotBranchId must identify the approved pilot branch when eMAR is enabled.");
+            }
             Require(configuration["MedicationSafety:ClinicalSafetyOfficer"], "MedicationSafety:ClinicalSafetyOfficer", errors);
             Require(configuration["MedicationSafety:MedicationSafetyLead"], "MedicationSafety:MedicationSafetyLead", errors);
             Require(configuration["MedicationSafety:ClinicalSafetyCaseReference"], "MedicationSafety:ClinicalSafetyCaseReference", errors);

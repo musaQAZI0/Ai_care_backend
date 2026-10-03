@@ -182,6 +182,7 @@ public sealed class ProductionConfigurationValidationTests
         Assert.Contains("MedicationSafety:MedicationSafetyLead is required", exception.Message);
         Assert.Contains("MedicationSafety:ClinicalSafetyCaseReference is required", exception.Message);
         Assert.Contains("MedicationSafety:MedicationUatEvidenceReference is required", exception.Message);
+        Assert.Contains("MedicationSafety:PilotBranchId must identify the approved pilot branch", exception.Message);
     }
     private const string ValidSigningKey = "prod-test-signing-key-2026-very-long-and-random-value";
     private const string ValidEmailPassword = "smtp-test-only-secret-value";

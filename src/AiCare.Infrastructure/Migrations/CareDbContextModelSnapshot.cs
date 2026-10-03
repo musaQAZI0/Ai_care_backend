@@ -801,6 +801,12 @@ namespace AiCare.Infrastructure.Migrations
                     b.Property<Guid>("MedicationId")
                         .HasColumnType("uuid");
 
+                    b.Property<int?>("MedicationProfileVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("MedicationOrderSnapshotJson")
+                        .HasColumnType("text");
+
                     b.Property<string>("Notes")
                         .IsRequired()
                         .HasColumnType("text");

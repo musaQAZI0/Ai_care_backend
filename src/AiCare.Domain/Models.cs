@@ -180,7 +180,9 @@ public sealed record MedicationAdministrationRecord(
     string Outcome,
     string Notes,
     Guid? OrganizationId = null,
-    Guid? BranchId = null);
+    Guid? BranchId = null,
+    int? MedicationProfileVersion = null,
+    string? MedicationOrderSnapshotJson = null);
 
 public sealed record CareNote(
     Guid Id,

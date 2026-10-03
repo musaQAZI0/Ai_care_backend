@@ -60,6 +60,15 @@ public sealed record Rule(string Purpose, string Scope)
         if (method == "POST" && Has("/privacy-rights/requests/") && Ends("/release")) return new("privacy", "privacy.pack.release");
         if (method == "POST" && Has("/privacy-rights/legal-holds/") && Ends("/release")) return new("privacy", "privacy.legal-hold.release");
         if (method == "POST" && Has("/privacy-rights/restrictions/") && Ends("/lift")) return new("privacy", "privacy.restriction.lift");
+        if (method == "POST" && Has("/medication-safety/medications/") && Has("/changes"))
+        {
+            if (Ends("/changes")) return new("medication", "medication.change.request");
+            if (Ends("/review")) return new("medication", "medication.change.review");
+            if (Ends("/activate")) return new("medication", "medication.change.activate");
+            if (Ends("/cancel")) return new("medication", "medication.change.cancel");
+        }
+        if (method == "POST" && Has("/medication-safety/medications/") && Ends("/profile/submit")) return new("medication", "medication.profile.submit");
+        if (method == "POST" && Has("/medication-safety/medications/") && Has("/profile/reviews/")) return new("medication", "medication.profile.review");
         if (method == "PUT" && Has("/medication-safety/medications/") && Ends("/profile")) return new("medication", "medication.profile.update");
         if (method == "POST" && path == "/api/phase1/medications") return new("medication", "medication.create");
         if (method == "PUT" && Has("/medications/")) return new("medication", "medication.update");
