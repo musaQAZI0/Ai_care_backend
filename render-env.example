@@ -12,9 +12,11 @@ ConnectionStrings__DefaultConnection=
 # Use a long random secret, at least 32 characters.
 JwtOptions__SigningKey=
 
-# Your deployed frontend URL, for example:
-# https://ai-care-frontend.vercel.app
-Cors__AllowedOrigins__0=https://ai-care-frontend.vercel.app
+# Public frontend origin. Keep these three URLs identical so browser requests and
+# staff/family activation links reach the deployed application.
+Cors__AllowedOrigins__0=https://azidotechnology.com
+FamilyPortal__FrontendBaseUrl=https://azidotechnology.com
+Frontend__BaseUrl=https://azidotechnology.com
 
 # File storage. Use Supabase to store uploaded documents outside Render's temporary filesystem.
 Storage__Provider=Supabase

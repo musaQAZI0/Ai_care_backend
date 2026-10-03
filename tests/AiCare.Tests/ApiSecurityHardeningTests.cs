@@ -5,6 +5,7 @@ using System.Security.Claims;
 using System.Text;
 using AiCare.Domain;
 using AiCare.Infrastructure;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
@@ -27,14 +28,40 @@ public sealed class ApiSecurityHardeningTests : IClassFixture<AiCareApiFactory>
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["Cors:AllowedOrigins:0"] = "https://ai-care-frontend.vercel.app"
+                ["Cors:AllowedOrigins:0"] = "https://azidotechnology.com"
             })
             .Build();
 
-        Assert.True(ApiSecurityPolicy.IsOriginAllowed(configuration, "https://ai-care-frontend.vercel.app"));
-        Assert.True(ApiSecurityPolicy.IsOriginAllowed(configuration, "https://ai-care-frontend.vercel.app/"));
+        Assert.True(ApiSecurityPolicy.IsOriginAllowed(configuration, "https://azidotechnology.com"));
+        Assert.True(ApiSecurityPolicy.IsOriginAllowed(configuration, "https://azidotechnology.com/"));
+        Assert.False(ApiSecurityPolicy.IsOriginAllowed(configuration, "https://ai-care-frontend.vercel.app"));
         Assert.False(ApiSecurityPolicy.IsOriginAllowed(configuration, "http://localhost:5173"));
         Assert.False(ApiSecurityPolicy.IsOriginAllowed(configuration, "https://evil.example"));
+    }
+
+    [Fact]
+    public async Task RuntimeCorsAllowsNewDomainAndRejectsFormerDomain()
+    {
+        using var configured = _factory.WithWebHostBuilder(builder => builder.ConfigureAppConfiguration(configuration =>
+            configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Cors:AllowedOrigins:0"] = "https://azidotechnology.com"
+            })));
+        using var client = configured.CreateClient();
+
+        async Task<HttpResponseMessage> Preflight(string origin)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Options, "/api/phase1/service-users");
+            request.Headers.Add("Origin", origin);
+            request.Headers.Add("Access-Control-Request-Method", "GET");
+            return await client.SendAsync(request);
+        }
+
+        using var approved = await Preflight("https://azidotechnology.com");
+        Assert.Equal("https://azidotechnology.com", approved.Headers.GetValues("Access-Control-Allow-Origin").Single());
+
+        using var former = await Preflight("https://ai-care-frontend.vercel.app");
+        Assert.False(former.Headers.Contains("Access-Control-Allow-Origin"));
     }
 
     [Theory]

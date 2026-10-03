@@ -5,7 +5,7 @@ namespace AiCare.Infrastructure;
 
 public static class RenderVercelTestConfiguration
 {
-    public const string FrontendBaseUrl = "https://ai-care-frontend.vercel.app";
+    public const string FrontendBaseUrl = "https://azidotechnology.com";
 
     public static void Normalize(IConfiguration configuration, string environmentName)
     {
@@ -22,6 +22,7 @@ public static class RenderVercelTestConfiguration
 
         configuration["Cors:AllowedOrigins:0"] = FrontendBaseUrl;
         configuration["FamilyPortal:FrontendBaseUrl"] = FrontendBaseUrl;
+        configuration["Frontend:BaseUrl"] = FrontendBaseUrl;
         configuration["Supabase:PublicFileBaseUrl"] = null;
         configuration["Demo:Enabled"] = "false";
         configuration["TestingData:Enabled"] = "false";

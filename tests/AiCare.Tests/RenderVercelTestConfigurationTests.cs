@@ -15,6 +15,7 @@ public sealed class RenderVercelTestConfigurationTests
             ["Cors:AllowedOrigins:0"] = "http://localhost:5173",
             ["Cors:AllowedOrigins:1"] = "https://old.example.com",
             ["FamilyPortal:FrontendBaseUrl"] = "",
+            ["Frontend:BaseUrl"] = "https://ai-care-frontend.vercel.app",
             ["Supabase:PublicFileBaseUrl"] = "https://public.example.com/files",
             ["Demo:Enabled"] = "true",
             ["TestingData:Enabled"] = "true"
@@ -25,6 +26,7 @@ public sealed class RenderVercelTestConfigurationTests
         Assert.Equal(RenderVercelTestConfiguration.FrontendBaseUrl, configuration["Cors:AllowedOrigins:0"]);
         Assert.Null(configuration["Cors:AllowedOrigins:1"]);
         Assert.Equal(RenderVercelTestConfiguration.FrontendBaseUrl, configuration["FamilyPortal:FrontendBaseUrl"]);
+        Assert.Equal(RenderVercelTestConfiguration.FrontendBaseUrl, configuration["Frontend:BaseUrl"]);
         Assert.Null(configuration["Supabase:PublicFileBaseUrl"]);
         Assert.Equal("false", configuration["Demo:Enabled"]);
         Assert.Equal("false", configuration["TestingData:Enabled"]);
