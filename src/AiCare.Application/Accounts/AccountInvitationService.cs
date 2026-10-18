@@ -25,9 +25,10 @@ public interface IAccountInvitationService
 
 public sealed class AccountInvitationService(IAccountInvitationStore store, IAccountInvitationEmailSender emailSender) : IAccountInvitationService
 {
-    private static readonly HashSet<UserRole> StaffRoles = [UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker, UserRole.BackOffice];
+    private static readonly HashSet<UserRole> StaffRoles = [UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker];
     public async Task<AccountInvitationResult> CreateAsync(Guid organizationId, Guid? branchId, Guid actorUserId, string actorName, CreateAccountInvitationCommand command, string frontendBaseUrl, CancellationToken ct)
     {
+        if (command.Role == UserRole.BackOffice) throw new InvalidOperationException("Platform BackOffice access cannot be granted by an organisation administrator.");
         if (!StaffRoles.Contains(command.Role)) throw new InvalidOperationException("Use the governed recipient invitation workflow for family and service-user accounts.");
         if (string.IsNullOrWhiteSpace(command.UserName) || string.IsNullOrWhiteSpace(command.Email)) throw new InvalidOperationException("Username and email are required.");
         if (!System.Net.Mail.MailAddress.TryCreate(command.Email.Trim(), out _)) throw new InvalidOperationException("A valid email is required.");

@@ -1,6 +1,8 @@
 using AiCare.Application;
 using AiCare.Application.CarePlans;
 using AiCare.Application.FamilyPortal;
+using AiCare.Application.Accounting;
+using AiCare.Infrastructure.Accounting;
 using AiCare.Application.Email;
 using AiCare.Infrastructure.Email;
 using AiCare.Application.Accounts;
@@ -29,6 +31,7 @@ public static class DependencyInjection
         services.AddHostedService<RenderTestPatientSeeder>();
         services.AddHostedService<IntegrationJobWorker>();
         services.AddHostedService<InvoiceOverdueWorker>();
+        services.AddHostedService<AccountingOutboxWorker>();
         services.AddHostedService<EmailQueueWorker>();
         services.AddSingleton<IAmazonSQS>(serviceProvider =>
         {
@@ -40,6 +43,7 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(30));
         services.AddScoped<IEmailDeliveryStore, EmailDeliveryStore>();
         services.AddScoped<IResendWebhookProcessor, ResendWebhookProcessor>();
+        services.AddScoped<IAccountingProvider, SageAccountingProvider>();
         services.AddSingleton<IDocumentMalwareScanner, BasicDocumentMalwareScanner>();
         services.AddSingleton<IProductionAlertSink, WebhookProductionAlertSink>();
         services.AddSingleton<IStartupFilter, ApiSecurityHardeningStartupFilter>();

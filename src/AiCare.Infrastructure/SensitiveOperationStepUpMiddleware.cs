@@ -57,6 +57,9 @@ public sealed record Rule(string Purpose, string Scope)
         if (method == "POST" && Has("/payroll-runs/") && Ends("/approve")) return new("payroll", "payroll.approve");
         if (method == "POST" && path == "/api/phase1/admin/users") return new("admin", "admin.user.create");
         if (method == "PATCH" && Has("/admin/users/") && Ends("/role")) return new("admin", "admin.role.change");
+        if (method == "PATCH" && Has("/admin/accounts/") && Ends("/status")) return new("admin", "admin.account.status");
+        if (method == "PUT" && Has("/admin/accounts/") && Ends("/permissions")) return new("admin", "admin.permission.change");
+        if (method == "POST" && path == "/api/phase1/admin/accounts/bulk-unblock") return new("admin", "admin.account.unblock");
         if (method == "POST" && Has("/privacy-rights/requests/") && Ends("/release")) return new("privacy", "privacy.pack.release");
         if (method == "POST" && Has("/privacy-rights/legal-holds/") && Ends("/release")) return new("privacy", "privacy.legal-hold.release");
         if (method == "POST" && Has("/privacy-rights/restrictions/") && Ends("/lift")) return new("privacy", "privacy.restriction.lift");

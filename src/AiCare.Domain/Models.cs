@@ -90,6 +90,21 @@ public sealed record CareWorker(
     Guid? OrganizationId = null,
     Guid? BranchId = null);
 
+public sealed record ProfileContactDetails(
+    Guid Id,
+    string SubjectType,
+    Guid SubjectId,
+    Guid OrganizationId,
+    Guid BranchId,
+    string Email,
+    string MobilePhone,
+    string Address,
+    string Postcode,
+    string EmergencyContactName,
+    string EmergencyContactRelationship,
+    string EmergencyContactPhone,
+    string PreferredContactMethod);
+
 public sealed record Visit(
     Guid Id,
     Guid ServiceUserId,

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -15,6 +16,52 @@ public sealed class SchedulingAvailabilityRegressionTests : IClassFixture<Postgr
     private readonly PostgresRegressionFactory _factory;
 
     public SchedulingAvailabilityRegressionTests(PostgresRegressionFactory factory) => _factory = factory;
+
+    [Fact]
+    public async Task CareManagerPreflightValidatesReferencesAndCreatedVisitAppearsInRota()
+    {
+        await _factory.EnsureClinicalSeedAsync();
+        var workerId = Guid.NewGuid();
+        var personId = Guid.NewGuid();
+        var managerName = $"scheduling.manager.{Guid.NewGuid():N}";
+        var startsAt = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(35).AddHours(10), TimeSpan.Zero);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.CareWorkers.Add(new CareWorker(workerId, "Manager Scheduling Worker", "Personal care", "Flexible", 0, 0, "Valid", "Compliant", "10 miles", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.ServiceUsers.Add(new ServiceUser(personId, "Manager Scheduling Person", new DateOnly(1970, 1, 1), "+10000000003", "Personal care", "Regression contact", "", RiskLevel.Low, "Onboarded", "Regression address", "None", "None", "Private", "Regression", "", "Independent", "Independent", "Verbal", "None", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.AppUsers.Add(new AppUser(Guid.NewGuid(), managerName, $"{managerName}@aicare.local", PasswordHasher.HashPassword("Manager123!"), UserRole.CareManager, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, null, null));
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        var login = await client.PostAsJsonAsync("/api/auth/login", new { userName = managerName, password = "Manager123!", mfaCode = (string?)null });
+        login.EnsureSuccessStatusCode();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await login.Content.ReadFromJsonAsync<LoginResponse>())!.Token);
+
+        object Request(Guid serviceUserId, Guid careWorkerId) => new { serviceUserId, careWorkerId, startsAt, visitType = "Personal care", durationMinutes = 30, requiredSkills = "Personal care" };
+        var missingPerson = await client.PostAsJsonAsync("/api/phase1/visits/conflicts", Request(Guid.NewGuid(), workerId));
+        Assert.Equal(HttpStatusCode.BadRequest, missingPerson.StatusCode);
+        Assert.Contains("Service user does not exist", await missingPerson.Content.ReadAsStringAsync());
+
+        var missingWorker = await client.PostAsJsonAsync("/api/phase1/visits/conflicts", Request(personId, Guid.NewGuid()));
+        Assert.Equal(HttpStatusCode.BadRequest, missingWorker.StatusCode);
+        Assert.Contains("Care worker does not exist", await missingWorker.Content.ReadAsStringAsync());
+
+        var preflight = await client.PostAsJsonAsync("/api/phase1/visits/conflicts", Request(personId, workerId));
+        Assert.Equal(HttpStatusCode.OK, preflight.StatusCode);
+        Assert.Contains("\"hasConflicts\":false", await preflight.Content.ReadAsStringAsync());
+
+        var created = await client.PostAsJsonAsync("/api/phase1/visits", Request(personId, workerId));
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var visitId = (await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+        var from = Uri.EscapeDataString(startsAt.AddHours(-1).ToString("O"));
+        var to = Uri.EscapeDataString(startsAt.AddHours(2).ToString("O"));
+        var rota = await client.GetAsync($"/api/phase1/rota?from={from}&to={to}");
+        Assert.Equal(HttpStatusCode.OK, rota.StatusCode);
+        Assert.Contains(visitId.ToString(), await rota.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+    }
 
     [Fact]
     public async Task StructuredAvailabilityIsExplainedAndEnforcedForVisitCreation()

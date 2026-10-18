@@ -54,6 +54,7 @@ public sealed class EfCoreCareRepository : ICareRepository
             _tenant.BranchId ?? TenantDefaults.BranchId);
 
         _context.ServiceUsers.Add(serviceUser);
+        SaveContact("ServiceUser", serviceUser.Id, serviceUser.BranchId!.Value, request.Contact);
         AddAudit("service_user.onboarded", "system", nameof(ServiceUser), serviceUser.Id);
         _context.SaveChanges();
         return serviceUser;
@@ -87,7 +88,8 @@ public sealed class EfCoreCareRepository : ICareRepository
             CulturalPreferences = request.CulturalPreferences,
             DietaryRequirements = request.DietaryRequirements
         };
-        _context.ServiceUsers.Update(updated);
+        _context.Entry(serviceUser).CurrentValues.SetValues(updated);
+        SaveContact("ServiceUser", id, serviceUser.BranchId!.Value, request.Contact);
         AddAudit("service_user.updated", "system", nameof(ServiceUser), id);
         _context.SaveChanges();
         return updated;
@@ -99,6 +101,7 @@ public sealed class EfCoreCareRepository : ICareRepository
     {
         var careWorker = new CareWorker(Guid.NewGuid(), request.FullName, request.Specialization, request.Availability, 0, 0, request.DbsStatus, request.TrainingCompliance, request.TravelRadius, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId);
         _context.CareWorkers.Add(careWorker);
+        SaveContact("CareWorker", careWorker.Id, careWorker.BranchId!.Value, request.Contact);
         AddAudit("care_worker.added", "system", nameof(CareWorker), careWorker.Id);
         _context.SaveChanges();
         return careWorker;
@@ -121,16 +124,33 @@ public sealed class EfCoreCareRepository : ICareRepository
             TrainingCompliance = request.TrainingCompliance,
             TravelRadius = request.TravelRadius
         };
-        _context.CareWorkers.Update(updated);
+        _context.Entry(careWorker).CurrentValues.SetValues(updated);
+        SaveContact("CareWorker", id, careWorker.BranchId!.Value, request.Contact);
         AddAudit("care_worker.updated", "system", nameof(CareWorker), id);
         _context.SaveChanges();
         return updated;
+    }
+
+    private void SaveContact(string subjectType, Guid subjectId, Guid branchId, ProfileContactRequest? request)
+    {
+        if (request is null) return;
+        var current = _context.ProfileContactDetails.SingleOrDefault(item => item.OrganizationId == _tenant.OrganizationId && item.SubjectType == subjectType && item.SubjectId == subjectId);
+        var next = new ProfileContactDetails(
+            current?.Id ?? Guid.NewGuid(), subjectType, subjectId, _tenant.OrganizationId, branchId,
+            request.Email?.Trim() ?? "", request.MobilePhone?.Trim() ?? "", request.Address?.Trim() ?? "",
+            request.Postcode?.Trim().ToUpperInvariant() ?? "", request.EmergencyContactName?.Trim() ?? "",
+            request.EmergencyContactRelationship?.Trim() ?? "", request.EmergencyContactPhone?.Trim() ?? "",
+            request.PreferredContactMethod?.Trim() ?? "");
+        if (current is null) _context.ProfileContactDetails.Add(next);
+        else _context.Entry(current).CurrentValues.SetValues(next);
+        AddAudit("profile_contact.updated", "system", nameof(ProfileContactDetails), next.Id);
     }
 
     public IReadOnlyCollection<Visit> GetVisits() => Visible(_context.Visits).ToList();
 
     public Visit AddVisit(CreateVisitRequest request)
     {
+        var visitBranch = _context.ServiceUsers.AsNoTracking().Where(item => item.Id == request.ServiceUserId && item.OrganizationId == _tenant.OrganizationId).Select(item => item.BranchId).FirstOrDefault() ?? _tenant.BranchId ?? TenantDefaults.BranchId;
         var visit = new Visit(
             Guid.NewGuid(),
             request.ServiceUserId,
@@ -147,7 +167,7 @@ public sealed class EfCoreCareRepository : ICareRepository
             null,
             null,
             _tenant.OrganizationId,
-            _tenant.BranchId ?? TenantDefaults.BranchId);
+            visitBranch);
 
         _context.Visits.Add(visit);
         AddAudit("visit.scheduled", "system", nameof(Visit), visit.Id);
@@ -187,11 +207,11 @@ public sealed class EfCoreCareRepository : ICareRepository
             return null;
         }
 
-        visit = visit with { Status = status };
-        _context.Visits.Update(visit);
+        var updated = visit with { Status = status };
+        _context.Entry(visit).CurrentValues.SetValues(updated);
         AddAudit("visit.status_updated", "system", nameof(Visit), id);
         _context.SaveChanges();
-        return visit;
+        return updated;
     }
 
     public Visit? CheckInVisit(Guid id, VisitCheckInRequest request)
@@ -558,18 +578,50 @@ public sealed class EfCoreCareRepository : ICareRepository
         return new AdminUser(user.Id, user.UserName, user.Email, user.Role, "Active", user.OrganizationId, user.BranchId, user.CareWorkerId, user.FamilyMemberId);
     }
 
-    public AdminUser? UpdateUserRole(Guid id, UserRole role)
+    public AdminUser? UpdateUserRole(Guid id, UserRole role, string reason)
     {
+        if (string.IsNullOrWhiteSpace(reason) || reason.Trim().Length is < 10 or > 500)
+            throw new InvalidOperationException("A reason of 10 to 500 characters is required for role changes.");
         var user = _context.AppUsers.Find(id);
         if (user is null || !IsVisible(user.OrganizationId, user.BranchId))
         {
             return null;
         }
 
+        if (user.Role == UserRole.BackOffice || role == UserRole.BackOffice)
+            throw new InvalidOperationException("Platform BackOffice access cannot be changed by an organisation administrator.");
+
+        if (user.Role == role)
+            return new AdminUser(user.Id, user.UserName, user.Email, user.Role, user.IsActive ? "Active" : "Suspended", user.OrganizationId, user.BranchId, user.CareWorkerId, user.FamilyMemberId);
+        if (user.Id == _currentUser.UserId && user.Role == UserRole.Administrator && role != UserRole.Administrator)
+            throw new InvalidOperationException("You cannot remove your own administrator role.");
+        if (role == UserRole.CareWorker && user.CareWorkerId is null)
+            throw new InvalidOperationException("Link a care worker profile before assigning the CareWorker role.");
+        if (role == UserRole.FamilyMember && user.FamilyMemberId is null)
+            throw new InvalidOperationException("Link a family member profile before assigning the FamilyMember role.");
+        if (role == UserRole.ServiceUser)
+            throw new InvalidOperationException("Service-user access must be created through the linked person account workflow.");
+
+        var oldRole = user.Role;
         var updated = user with { Role = role };
-        _context.AppUsers.Update(updated);
-        AddAudit("admin.role_updated", "system", nameof(AppUser), id);
-        _context.SaveChanges();
+        _context.Database.CreateExecutionStrategy().Execute(() =>
+        {
+            using var transaction = _context.Database.BeginTransaction();
+            if (user.Role == UserRole.Administrator && role != UserRole.Administrator && user.IsActive)
+            {
+                var organization = user.OrganizationId ?? _tenant.OrganizationId;
+                if (_context.Database.IsNpgsql())
+                    _context.Database.ExecuteSqlInterpolated($"select pg_advisory_xact_lock(hashtext({organization.ToString()}))");
+                if (!_context.AppUsers.Any(other => other.Id != id && other.IsActive && other.Role == UserRole.Administrator && other.OrganizationId == organization))
+                    throw new InvalidOperationException("The organization must retain an active administrator.");
+            }
+            _context.Entry(user).CurrentValues.SetValues(updated);
+            AddAudit("admin.role_updated", "system", nameof(AppUser), id);
+            _context.Database.ExecuteSqlInterpolated($"insert into admin_role_change_events(id,organization_id,branch_id,user_id,old_role,new_role,reason,changed_by) values ({Guid.NewGuid()},{user.OrganizationId ?? _tenant.OrganizationId},{user.BranchId},{id},{oldRole.ToString()},{role.ToString()},{reason.Trim()},{_currentUser.UserName})");
+            _context.Database.ExecuteSqlInterpolated($"update auth_sessions set revoked_at=now(),revoked_by={_currentUser.UserName},revocation_reason={reason.Trim()} where user_id={id} and revoked_at is null");
+            _context.Database.ExecuteSqlInterpolated($"update auth_refresh_tokens set revoked_at=now() where user_id={id} and revoked_at is null");
+            transaction.Commit();
+        });
         return new AdminUser(updated.Id, updated.UserName, updated.Email, updated.Role, updated.IsActive ? "Active" : "Suspended", updated.OrganizationId, updated.BranchId, updated.CareWorkerId, updated.FamilyMemberId);
     }
 

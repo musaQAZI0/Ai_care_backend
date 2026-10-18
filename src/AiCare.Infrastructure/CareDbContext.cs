@@ -17,6 +17,7 @@ public sealed class CareDbContext : DbContext
     public DbSet<Organization> Organizations => Set<Organization>();
     public DbSet<Branch> Branches => Set<Branch>();
     public DbSet<CareWorker> CareWorkers => Set<CareWorker>();
+    public DbSet<ProfileContactDetails> ProfileContactDetails => Set<ProfileContactDetails>();
     public DbSet<Visit> Visits => Set<Visit>();
     public DbSet<CarePlan> CarePlans => Set<CarePlan>();
     public DbSet<RiskAssessment> RiskAssessments => Set<RiskAssessment>();
@@ -141,6 +142,22 @@ public sealed class CareDbContext : DbContext
             builder.Property(careWorker => careWorker.DbsStatus).IsRequired();
             builder.Property(careWorker => careWorker.TrainingCompliance).IsRequired();
             builder.Property(careWorker => careWorker.TravelRadius).IsRequired();
+        });
+
+        modelBuilder.Entity<ProfileContactDetails>(builder =>
+        {
+            builder.ToTable("ProfileContactDetails");
+            builder.HasKey(profile => profile.Id);
+            builder.HasIndex(profile => new { profile.OrganizationId, profile.SubjectType, profile.SubjectId }).IsUnique();
+            builder.HasIndex(profile => new { profile.OrganizationId, profile.BranchId });
+            builder.Property(profile => profile.Email).HasMaxLength(254);
+            builder.Property(profile => profile.MobilePhone).HasMaxLength(40);
+            builder.Property(profile => profile.Address).HasMaxLength(500);
+            builder.Property(profile => profile.Postcode).HasMaxLength(16);
+            builder.Property(profile => profile.EmergencyContactName).HasMaxLength(200);
+            builder.Property(profile => profile.EmergencyContactRelationship).HasMaxLength(100);
+            builder.Property(profile => profile.EmergencyContactPhone).HasMaxLength(40);
+            builder.Property(profile => profile.PreferredContactMethod).HasMaxLength(20);
         });
 
         modelBuilder.Entity<Visit>(builder =>

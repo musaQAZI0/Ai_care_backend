@@ -73,6 +73,8 @@ public sealed class AccessReviewRegressionTests(PostgresRegressionFactory factor
 
         var weakDecision = await admin.PostAsJsonAsync($"/api/security/access-reviews/{campaignId}/items/{itemId}/decide", new { decision = "Suspend", justification = "Too short" });
         Assert.Equal(HttpStatusCode.BadRequest, weakDecision.StatusCode);
+        var missingJustification = await admin.PostAsJsonAsync($"/api/security/access-reviews/{campaignId}/items/{itemId}/decide", new { decision = "Suspend", justification = (string?)null });
+        Assert.Equal(HttpStatusCode.BadRequest, missingJustification.StatusCode);
 
         var decision = await admin.PostAsJsonAsync($"/api/security/access-reviews/{campaignId}/items/{itemId}/decide", new { decision = "Suspend", justification = "Orphaned dormant care-worker account must be suspended." });
         Assert.Equal(HttpStatusCode.NoContent, decision.StatusCode);

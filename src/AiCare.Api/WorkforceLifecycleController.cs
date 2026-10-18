@@ -42,6 +42,7 @@ public sealed class WorkforceLifecycleController(CareDbContext db, ITenantContex
         var statuses = new[] { "PreEmployment", "Employed", "Suspended", "LeaveOfAbsence", "Leaver" };
         if (!statuses.Contains(request.EmploymentStatus) || request.ContractedWeeklyMinutes < 0) return BadRequest(new { message = "Employment status or contracted minutes are invalid." });
         if (request.EmploymentStatus == "Employed" && (request.StartDate is null || string.IsNullOrWhiteSpace(request.JobTitle) || string.IsNullOrWhiteSpace(request.ContractType))) return BadRequest(new { message = "Employed workers require a start date, job title, and contract type." });
+        var configuredTitles = await db.Database.SqlQuery<string>($"""select value as "Value" from care_operation_options where organization_id={tenant.OrganizationId} and kind='JobTitle' and active=true""").ToArrayAsync(token);
         if (request.EmploymentStatus is "Suspended" or "Leaver" && string.IsNullOrWhiteSpace(request.StatusReason)) return BadRequest(new { message = "A status reason is required." });
         if (request.EmploymentStatus == "Leaver" && request.EndDate is null) return BadRequest(new { message = "A leaver date is required." });
         if (request.EndDate < request.StartDate) return BadRequest(new { message = "End date cannot precede start date." });
@@ -52,9 +53,23 @@ public sealed class WorkforceLifecycleController(CareDbContext db, ITenantContex
         {
             if (await command.ExecuteScalarAsync(token) is not Guid) return NotFound();
         }
-        var current = await One("select revision from worker_employment_profiles where care_worker_id=@worker and organization_id=@organization",workerId,token);
+        var current = await One("select revision,job_title,employment_status,status_reason from worker_employment_profiles where care_worker_id=@worker and organization_id=@organization",workerId,token);
         var revision = current.TryGetValue("revision",out var value) ? Convert.ToInt32(value) : 0;
         if (request.ExpectedRevision != revision) return Conflict(new { message = "Employment profile changed. Reload it before saving.", currentRevision = revision });
+        var previousTitle = current.TryGetValue("jobTitle", out var recordedTitle) ? recordedTitle?.ToString() : null;
+        if (configuredTitles.Length > 0 && !string.IsNullOrWhiteSpace(request.JobTitle)
+            && !configuredTitles.Contains(request.JobTitle.Trim(), StringComparer.OrdinalIgnoreCase)
+            && !string.Equals(previousTitle?.Trim(), request.JobTitle.Trim(), StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { message = "Choose an active job title configured in Administration." });
+        if (request.EmploymentStatus == "Leaver")
+        {
+            var leavingReasons = await db.Database.SqlQuery<string>($"""select value as "Value" from care_operation_options where organization_id={tenant.OrganizationId} and kind='WorkerLeavingReason' and active=true""").ToArrayAsync(token);
+            var previousReason = current.TryGetValue("statusReason", out var recordedReason) ? recordedReason?.ToString() : null;
+            var previouslyLeaver = current.TryGetValue("employmentStatus", out var recordedStatus) && string.Equals(recordedStatus?.ToString(), "Leaver", StringComparison.Ordinal);
+            if (leavingReasons.Length > 0 && !leavingReasons.Contains(request.StatusReason.Trim(), StringComparer.OrdinalIgnoreCase)
+                && !(previouslyLeaver && string.Equals(previousReason?.Trim(), request.StatusReason.Trim(), StringComparison.OrdinalIgnoreCase)))
+                return BadRequest(new { message = "Choose an active carer leaving reason configured in Administration." });
+        }
         await Exec("""
             insert into worker_employment_profiles(care_worker_id,organization_id,branch_id,recruitment_status,employment_status,contract_type,job_title,contracted_weekly_minutes,start_date,end_date,line_manager,status_reason,approved_by,approved_at,updated_at,revision)
             select @worker,@organization,"BranchId",@recruitment,@status,@contract,@job,@minutes,@start,@end,@manager,@reason,@actor,now(),now(),1
@@ -62,7 +77,7 @@ public sealed class WorkforceLifecycleController(CareDbContext db, ITenantContex
             on conflict(care_worker_id) do update set recruitment_status=@recruitment,employment_status=@status,
             contract_type=@contract,job_title=@job,contracted_weekly_minutes=@minutes,start_date=@start,end_date=@end,
             line_manager=@manager,status_reason=@reason,approved_by=@actor,approved_at=now(),updated_at=now(),revision=worker_employment_profiles.revision+1
-            """,workerId,c=>{Add(c,"recruitment",request.RecruitmentStatus);Add(c,"status",request.EmploymentStatus);Add(c,"contract",request.ContractType);Add(c,"job",request.JobTitle);Add(c,"minutes",request.ContractedWeeklyMinutes);Add(c,"start",request.StartDate);Add(c,"end",request.EndDate);Add(c,"manager",request.LineManager);Add(c,"reason",request.StatusReason);},token);
+            """,workerId,c=>{Add(c,"recruitment",request.RecruitmentStatus);Add(c,"status",request.EmploymentStatus);Add(c,"contract",request.ContractType);Add(c,"job",request.JobTitle?.Trim());Add(c,"minutes",request.ContractedWeeklyMinutes);Add(c,"start",request.StartDate);Add(c,"end",request.EndDate);Add(c,"manager",request.LineManager);Add(c,"reason",request.StatusReason?.Trim());},token);
         await Exec("""
             insert into worker_employment_history(id,care_worker_id,organization_id,branch_id,revision,snapshot,change_reason,actor_user_id,actor)
             select @id,care_worker_id,organization_id,branch_id,revision,to_jsonb(p),@reason,@actorId,@actor

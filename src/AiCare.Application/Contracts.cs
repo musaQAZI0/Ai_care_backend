@@ -53,7 +53,7 @@ public interface ICareRepository
     IReadOnlyCollection<NotificationItem> GetNotifications();
     IReadOnlyCollection<AdminUser> GetAdminUsers();
     AdminUser AddAdminUser(CreateAdminUserRequest request);
-    AdminUser? UpdateUserRole(Guid id, UserRole role);
+    AdminUser? UpdateUserRole(Guid id, UserRole role, string reason);
     IReadOnlyCollection<AuditEvent> GetAuditEvents();
     byte[] ExportPdf(string reportName);
 }
@@ -108,7 +108,18 @@ public sealed record CreateServiceUserRequest(
     string CognitiveStatus = "",
     string CommunicationNeeds = "",
     string CulturalPreferences = "",
-    string DietaryRequirements = "");
+    string DietaryRequirements = "",
+    ProfileContactRequest? Contact = null);
+
+public sealed record ProfileContactRequest(
+    string Email = "",
+    string MobilePhone = "",
+    string Address = "",
+    string Postcode = "",
+    string EmergencyContactName = "",
+    string EmergencyContactRelationship = "",
+    string EmergencyContactPhone = "",
+    string PreferredContactMethod = "");
 
 public sealed record UpsertPersonRecordRequest(
     string PreferredName,
@@ -155,7 +166,8 @@ public sealed record CreateCareWorkerRequest(
     string Availability,
     string DbsStatus = "Pending",
     string TrainingCompliance = "Not started",
-    string TravelRadius = "10 miles");
+    string TravelRadius = "10 miles",
+    ProfileContactRequest? Contact = null);
 
 public sealed record CreateVisitRequest(
     Guid ServiceUserId,
@@ -165,13 +177,17 @@ public sealed record CreateVisitRequest(
     int DurationMinutes = 30,
     string RequiredSkills = "",
     IReadOnlyCollection<Guid>? AdditionalCareWorkerIds = null,
-    string ChangeReason = "Scheduled visit");
+    string ChangeReason = "Scheduled visit",
+    Guid? ExcludeVisitId = null);
 
 public sealed record VisitCheckInRequest(decimal Latitude, decimal Longitude);
 
 public sealed record VisitCheckOutRequest(decimal Latitude, decimal Longitude);
 
-public sealed record UpdateVisitStatusRequest(VisitStatus Status, string Reason = "Status updated");
+public sealed record UpdateVisitStatusRequest(
+    [property: System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<VisitStatus>))]
+    VisitStatus Status,
+    string Reason = "Status updated");
 
 public sealed record CreateCarePlanRequest(
     Guid ServiceUserId,
@@ -227,7 +243,10 @@ public sealed record CreateMessageThreadRequest(
     MessagePriority Priority,
     string LastMessage);
 
-public sealed record UpdateUserRoleRequest(UserRole Role);
+public sealed record UpdateUserRoleRequest(
+    [property: System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<UserRole>))]
+    UserRole Role,
+    string? Reason);
 
 public sealed record CreateAdminUserRequest(
     string UserName,

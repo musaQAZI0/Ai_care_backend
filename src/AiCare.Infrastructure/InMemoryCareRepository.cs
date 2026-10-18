@@ -591,14 +591,27 @@ public sealed class InMemoryCareRepository : ICareRepository
         return user;
     }
 
-    public AdminUser? UpdateUserRole(Guid id, UserRole role)
+    public AdminUser? UpdateUserRole(Guid id, UserRole role, string reason)
     {
+        if (string.IsNullOrWhiteSpace(reason) || reason.Trim().Length is < 10 or > 500)
+            throw new InvalidOperationException("A reason of 10 to 500 characters is required for role changes.");
         var index = _adminUsers.FindIndex(user => user.Id == id);
         if (index < 0)
         {
             return null;
         }
 
+        if (_adminUsers[index].Role == UserRole.BackOffice || role == UserRole.BackOffice)
+            throw new InvalidOperationException("Platform BackOffice access cannot be changed by an organisation administrator.");
+        if (_adminUsers[index].Role == UserRole.Administrator && role != UserRole.Administrator && _adminUsers[index].Status == "Active" &&
+            !_adminUsers.Any(other => other.Id != id && other.Status == "Active" && other.Role == UserRole.Administrator && other.OrganizationId == _adminUsers[index].OrganizationId))
+            throw new InvalidOperationException("The organization must retain an active administrator.");
+        if (role == UserRole.CareWorker && _adminUsers[index].CareWorkerId is null)
+            throw new InvalidOperationException("Link a care worker profile before assigning the CareWorker role.");
+        if (role == UserRole.FamilyMember && _adminUsers[index].FamilyMemberId is null)
+            throw new InvalidOperationException("Link a family member profile before assigning the FamilyMember role.");
+        if (role == UserRole.ServiceUser)
+            throw new InvalidOperationException("Service-user access must be created through the linked person account workflow.");
         _adminUsers[index] = _adminUsers[index] with { Role = role };
         AddAudit("admin.role_updated", "system", nameof(AdminUser), id);
         return _adminUsers[index];

@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
 using AiCare.Domain;
@@ -129,6 +130,41 @@ public sealed class ApiSecurityHardeningTests : IClassFixture<AiCareApiFactory>
     }
 
     [Fact]
+    public async Task ValidCredentialsAuthenticateTheExpectedUser()
+    {
+        var client = _factory.CreateClient();
+        var login = await client.PostAsJsonAsync("/api/auth/login", new { userName = "admin", password = "AdminPassword123!", mfaCode = (string?)null });
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        var token = (await login.Content.ReadFromJsonAsync<LoginResult>())!.Token;
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        var me = await client.GetFromJsonAsync<CurrentUserResult>("/api/auth/me");
+        Assert.Equal("admin", me!.UserName);
+        Assert.Equal("Administrator", me.Role);
+    }
+
+    [Fact]
+    public async Task InvalidCredentialsReturnTheSameSafeErrorForKnownAndUnknownUsers()
+    {
+        var client = _factory.CreateClient();
+        var known = await client.PostAsJsonAsync("/api/auth/login", new { userName = "admin", password = "wrong-password" });
+        var unknown = await client.PostAsJsonAsync("/api/auth/login", new { userName = "not-a-real-user", password = "wrong-password" });
+        Assert.Equal(HttpStatusCode.Unauthorized, known.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, unknown.StatusCode);
+        Assert.Equal(await known.Content.ReadAsStringAsync(), await unknown.Content.ReadAsStringAsync());
+        Assert.Contains("Invalid credentials", await known.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task ProtectedApiRejectsMissingAndExpiredAuthentication()
+    {
+        var anonymous = _factory.CreateClient();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/auth/me")).StatusCode);
+        var expired = _factory.CreateClient();
+        expired.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(TenantDefaults.OrganizationId, "expired-user", DateTime.UtcNow.AddMinutes(-5)));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await expired.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
     public async Task CrossTenantAdministratorCannotReadServiceUserById()
     {
         var client = CrossTenantAdminClient();
@@ -183,7 +219,7 @@ public sealed class ApiSecurityHardeningTests : IClassFixture<AiCareApiFactory>
         return client;
     }
 
-    private static string CreateToken(Guid organizationId, string userName)
+    private static string CreateToken(Guid organizationId, string userName, DateTime? expires = null)
     {
         var claims = new List<Claim>
         {
@@ -201,7 +237,10 @@ public sealed class ApiSecurityHardeningTests : IClassFixture<AiCareApiFactory>
             "AiCare",
             "AiCareClient",
             claims,
-            expires: DateTime.UtcNow.AddMinutes(30),
+            expires: expires ?? DateTime.UtcNow.AddMinutes(30),
             signingCredentials: credentials));
     }
+
+    private sealed record LoginResult(string Token);
+    private sealed record CurrentUserResult(string UserName, string Role);
 }

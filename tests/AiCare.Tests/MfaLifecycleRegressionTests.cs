@@ -34,6 +34,8 @@ public sealed class MfaLifecycleRegressionTests(PostgresRegressionFactory factor
         var enrollment = await manager.PostAsync("/api/security/mfa/enroll", null); Assert.Equal(HttpStatusCode.OK, enrollment.StatusCode);
         var secret = JsonDocument.Parse(await enrollment.Content.ReadAsStringAsync()).RootElement.GetProperty("secret").GetString()!;
         Assert.Equal(HttpStatusCode.BadRequest, (await manager.PostAsJsonAsync("/api/security/mfa/enroll/verify", new { code = "000000" })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await manager.PostAsJsonAsync("/api/security/mfa/enroll/verify", new { code = TotpAt(secret, DateTimeOffset.UtcNow.AddMinutes(-3)) })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await manager.PostAsJsonAsync("/api/security/mfa/enroll/verify", new { code = Totp(secret, DateTimeOffset.UtcNow.AddMinutes(-3)) })).StatusCode);
         var verified = await manager.PostAsJsonAsync("/api/security/mfa/enroll/verify", new { code = Totp(secret) }); Assert.Equal(HttpStatusCode.OK, verified.StatusCode);
         var recovery = JsonDocument.Parse(await verified.Content.ReadAsStringAsync()).RootElement.GetProperty("recoveryCodes")[0].GetString()!;
         using (var scope = factory.Services.CreateScope())
@@ -64,6 +66,15 @@ public sealed class MfaLifecycleRegressionTests(PostgresRegressionFactory factor
     private async Task<Login> PasswordLogin(string name) { var response = await factory.CreateClient().PostAsJsonAsync("/api/auth/login", new { userName = name, password = "Admin123!", mfaCode = (string?)null }); response.EnsureSuccessStatusCode(); return (await response.Content.ReadFromJsonAsync<Login>())!; }
     private HttpClient Auth(Login login) { var client = factory.CreateClient(); client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.Token); return client; }
     private static AppUser User(string name, UserRole role) => new(Guid.NewGuid(), name, $"{name}@aicare.local", PasswordHasher.HashPassword("Admin123!"), role, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId);
-    private static string Totp(string secret) { const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; var output = new List<byte>(); int buffer = 0, bits = 0; foreach (var ch in secret) { buffer = (buffer << 5) | alphabet.IndexOf(ch); bits += 5; if (bits >= 8) { output.Add((byte)(buffer >> (bits - 8))); bits -= 8; buffer &= (1 << bits) - 1; } } var counter = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 30; var bytes = BitConverter.GetBytes(counter); if (BitConverter.IsLittleEndian) Array.Reverse(bytes); using var hmac = new HMACSHA1(output.ToArray()); var hash = hmac.ComputeHash(bytes); var index = hash[^1] & 15; var value = (((hash[index] & 127) << 24) | ((hash[index + 1] & 255) << 16) | ((hash[index + 2] & 255) << 8) | (hash[index + 3] & 255)) % 1_000_000; return value.ToString("D6"); }
+    private static string Totp(string secret, DateTimeOffset? at = null) { const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; var output = new List<byte>(); int buffer = 0, bits = 0; foreach (var ch in secret) { buffer = (buffer << 5) | alphabet.IndexOf(ch); bits += 5; if (bits >= 8) { output.Add((byte)(buffer >> (bits - 8))); bits -= 8; buffer &= (1 << bits) - 1; } } var counter = (at ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds() / 30; var bytes = BitConverter.GetBytes(counter); if (BitConverter.IsLittleEndian) Array.Reverse(bytes); using var hmac = new HMACSHA1(output.ToArray()); var hash = hmac.ComputeHash(bytes); var index = hash[^1] & 15; var value = (((hash[index] & 127) << 24) | ((hash[index + 1] & 255) << 16) | ((hash[index + 2] & 255) << 8) | (hash[index + 3] & 255)) % 1_000_000; return value.ToString("D6"); }
+    private static string TotpAt(string secret, DateTimeOffset at)
+    {
+        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        var output = new List<byte>(); int buffer = 0, bits = 0;
+        foreach (var ch in secret) { buffer = (buffer << 5) | alphabet.IndexOf(ch); bits += 5; if (bits >= 8) { output.Add((byte)(buffer >> (bits - 8))); bits -= 8; buffer &= (1 << bits) - 1; } }
+        var bytes = BitConverter.GetBytes(at.ToUnixTimeSeconds() / 30); if (BitConverter.IsLittleEndian) Array.Reverse(bytes);
+        using var hmac = new HMACSHA1(output.ToArray()); var hash = hmac.ComputeHash(bytes); var index = hash[^1] & 15;
+        return ((((hash[index] & 127) << 24) | ((hash[index + 1] & 255) << 16) | ((hash[index + 2] & 255) << 8) | (hash[index + 3] & 255)) % 1_000_000).ToString("D6");
+    }
     private sealed record Login(string Token, string RefreshToken, int ExpiresInMinutes);
 }

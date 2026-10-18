@@ -2,12 +2,14 @@ using System.Data;
 using System.Data.Common;
 using System.Net;
 using System.Net.Mail;
+using System.Security.Cryptography;
 using AiCare.Application;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AiCare.Api;
 
@@ -25,7 +27,7 @@ public sealed class InvoiceDocumentsController(
     public async Task<IActionResult> GetProfile(CancellationToken token)
     {
         await using var command = await Command("""
-            select provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason
+            select provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,logo_sha256
             from finance_invoice_profiles where organization_id=@organization and branch_id=@branch
             """, token);
         await using var reader = await command.ExecuteReaderAsync(token);
@@ -34,13 +36,61 @@ public sealed class InvoiceDocumentsController(
                 providerName=reader.GetString(0),providerAddress=reader.GetString(1),providerEmail=reader.GetString(2),
                 providerPhone=reader.GetString(3),companyNumber=reader.GetString(4),vatNumber=reader.GetString(5),
                 remittanceDetails=reader.GetString(6),paymentTermsDays=reader.GetInt32(7),vatRate=reader.GetDecimal(8),
-                vatExemptionReason=reader.GetString(9)
+                vatExemptionReason=reader.GetString(9),logoAvailable=!reader.IsDBNull(10),logoVersion=reader.IsDBNull(10)?null:reader.GetString(10)
             });
         await reader.DisposeAsync();
         var organization = await db.Organizations.AsNoTracking().SingleAsync(x => x.Id == tenant.OrganizationId, token);
         return Ok(new {
             providerName=organization.Name,providerAddress="",providerEmail="",providerPhone="",companyNumber="",
-            vatNumber="",remittanceDetails="",paymentTermsDays=30,vatRate=0m,vatExemptionReason="VAT not charged"
+            vatNumber="",remittanceDetails="",paymentTermsDays=30,vatRate=0m,vatExemptionReason="VAT not charged",logoAvailable=false,logoVersion=(string?)null
+        });
+    }
+
+    [HttpGet("invoice-profile/logo")]
+    public async Task<IActionResult> GetLogo(CancellationToken token)
+    {
+        await using var command=await Command("select logo_content_type,logo_bytes,logo_sha256 from finance_invoice_profiles where organization_id=@organization and branch_id=@branch and logo_bytes is not null",token);
+        await using var reader=await command.ExecuteReaderAsync(token);
+        if(!await reader.ReadAsync(token))return NotFound();
+        Response.Headers.CacheControl="private, max-age=300";
+        Response.Headers.ETag=$"\"{reader.GetString(2)}\"";
+        return File((byte[])reader[1],reader.GetString(0));
+    }
+
+    [HttpPost("invoice-profile/logo")]
+    [RequestSizeLimit(2_097_152)]
+    public async Task<IActionResult> UploadLogo(IFormFile logo,CancellationToken token)
+    {
+        if(logo is null||logo.Length is <=0 or >2_097_152)return BadRequest(new{message="Choose a logo smaller than 2 MB."});
+        await using var stream=new MemoryStream();await logo.CopyToAsync(stream,token);var bytes=stream.ToArray();
+        var type=DetectLogoType(bytes);if(type is null)return BadRequest(new{message="Only valid PNG and JPEG logo files are supported."});
+        var hash=Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async()=>
+        {
+            await using var transaction=await db.Database.BeginTransactionAsync(token);
+            await using(var profileLock=await Command("select pg_advisory_xact_lock(hashtextextended(@key,0))",token)){Add(profileLock,"key",$"invoice-profile:{tenant.OrganizationId}:{tenant.BranchId??TenantDefaults.BranchId}");await profileLock.ExecuteNonQueryAsync(token);}
+            var organization=await db.Organizations.AsNoTracking().SingleAsync(x=>x.Id==tenant.OrganizationId,token);
+            await using(var update=await Command("""
+                insert into finance_invoice_profiles(organization_id,branch_id,provider_name,logo_content_type,logo_bytes,logo_sha256)
+                values(@organization,@branch,@provider,@contentType,@bytes,@hash)
+                on conflict(organization_id,branch_id) do update set logo_content_type=excluded.logo_content_type,logo_bytes=excluded.logo_bytes,logo_sha256=excluded.logo_sha256,updated_at=now()
+                """,token)){Add(update,"provider",organization.Name);Add(update,"contentType",type);Add(update,"bytes",bytes);Add(update,"hash",hash);await update.ExecuteNonQueryAsync(token);}
+            await AppendProfileVersion(token);
+            Audit("finance.invoice_logo_updated",null);await db.SaveChangesAsync(token);await transaction.CommitAsync(token);
+            return Ok(new{logoAvailable=true,logoVersion=hash});
+        });
+    }
+
+    [HttpDelete("invoice-profile/logo")]
+    public async Task<IActionResult> DeleteLogo(CancellationToken token)
+    {
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async()=>
+        {
+            await using var transaction=await db.Database.BeginTransactionAsync(token);
+            await using(var profileLock=await Command("select pg_advisory_xact_lock(hashtextextended(@key,0))",token)){Add(profileLock,"key",$"invoice-profile:{tenant.OrganizationId}:{tenant.BranchId??TenantDefaults.BranchId}");await profileLock.ExecuteNonQueryAsync(token);}
+            await using(var update=await Command("update finance_invoice_profiles set logo_content_type=null,logo_bytes=null,logo_sha256=null,updated_at=now() where organization_id=@organization and branch_id=@branch",token))await update.ExecuteNonQueryAsync(token);
+            await AppendProfileVersion(token);
+            Audit("finance.invoice_logo_removed",null);await db.SaveChangesAsync(token);await transaction.CommitAsync(token);return NoContent();
         });
     }
     [HttpPut("invoice-profile")]
@@ -51,14 +101,27 @@ public sealed class InvoiceDocumentsController(
         if (request.VatRate == 0 && string.IsNullOrWhiteSpace(request.VatExemptionReason))
             return BadRequest(new { message = "A VAT exemption or non-taxable reason is required when VAT is zero." });
 
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async () =>
+        {
+        await using var transaction = await db.Database.BeginTransactionAsync(token);
+        await using (var profileLock = await Command("select pg_advisory_xact_lock(hashtextextended(@key,0))", token))
+        {
+            Add(profileLock, "key", $"invoice-profile:{tenant.OrganizationId}:{tenant.BranchId ?? TenantDefaults.BranchId}");
+            await profileLock.ExecuteNonQueryAsync(token);
+        }
+
         await using var command = await Command("""
             insert into finance_invoice_profiles(organization_id,branch_id,provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,updated_at)
             values(@organization,@branch,@provider,@address,@email,@phone,@company,@vatNumber,@remittance,@terms,@vatRate,@exemption,now())
             on conflict(organization_id,branch_id) do update set provider_name=excluded.provider_name,provider_address=excluded.provider_address,provider_email=excluded.provider_email,provider_phone=excluded.provider_phone,company_number=excluded.company_number,vat_number=excluded.vat_number,remittance_details=excluded.remittance_details,default_payment_terms_days=excluded.default_payment_terms_days,default_vat_rate=excluded.default_vat_rate,vat_exemption_reason=excluded.vat_exemption_reason,updated_at=now()
             """, token);
         Add(command,"provider",request.ProviderName.Trim());Add(command,"address",request.ProviderAddress?.Trim()??"");Add(command,"email",request.ProviderEmail?.Trim()??"");Add(command,"phone",request.ProviderPhone?.Trim()??"");Add(command,"company",request.CompanyNumber?.Trim()??"");Add(command,"vatNumber",request.VatNumber?.Trim()??"");Add(command,"remittance",request.RemittanceDetails?.Trim()??"");Add(command,"terms",request.PaymentTermsDays);Add(command,"vatRate",request.VatRate);Add(command,"exemption",request.VatExemptionReason?.Trim()??"");
-        await command.ExecuteNonQueryAsync(token);Audit("finance.invoice_profile_updated",null);await db.SaveChangesAsync(token);
+        await command.ExecuteNonQueryAsync(token);
+        await AppendProfileVersion(token);
+        Audit("finance.invoice_profile_updated",null);await db.SaveChangesAsync(token);
+        await transaction.CommitAsync(token);
         return NoContent();
+        });
     }
 
     [HttpGet("invoices")]
@@ -84,9 +147,9 @@ public sealed class InvoiceDocumentsController(
     public async Task<IActionResult> Pdf(Guid id,CancellationToken token)
     {
         await MarkOverdue(token);var document=await Load(id,token);if(document is null)return NotFound();
-        if(document.Status=="Generated")return Conflict(new{message="Approve the invoice before downloading its final PDF."});
+        if(document.Status is "Generated" or "Reviewed" or "Approved")return Conflict(new{message="Issue the invoice before downloading its final PDF."});
         Audit("finance.invoice_pdf_downloaded",id);await db.SaveChangesAsync(token);
-        return File(InvoicePdfDocument.Create(document),"application/pdf",$"{document.Number}.pdf");
+        return File(await GetOrCreatePdf(id,document,token),"application/pdf",$"{document.Number}.pdf");
     }
 
     [HttpPost("invoices/{id:guid}/deliver")]
@@ -95,7 +158,7 @@ public sealed class InvoiceDocumentsController(
         if(string.IsNullOrWhiteSpace(request.RecipientEmail)||!MailAddress.TryCreate(request.RecipientEmail.Trim(),out var recipient))return BadRequest(new{message="A valid recipient email is required."});
         var document=await Load(id,token);if(document is null)return NotFound();if(document.Status is not ("Issued" or "Part paid" or "Paid" or "Overdue" or "Credited"))return Conflict(new{message="Only an issued invoice can be delivered."});
         if(!configuration.GetValue<bool>("Email:Enabled"))return StatusCode(StatusCodes.Status503ServiceUnavailable,new{message="Invoice email delivery is not configured."});
-        var bytes=InvoicePdfDocument.Create(document);var deliveryId=Guid.NewGuid();
+        var bytes=await GetOrCreatePdf(id,document,token);var deliveryId=Guid.NewGuid();
         try
         {
             using var message=new MailMessage{From=new MailAddress(Required("Email:FromAddress"),configuration["Email:FromName"]??"AiCare"),Subject=$"Invoice {document.Number}",Body=$"Please find invoice {document.Number} attached. Amount due: {document.Currency} {Math.Max(0,document.Gross-document.Paid-document.Credits):0.00}.",IsBodyHtml=false};message.To.Add(recipient);var replyTo=configuration["Email:ReplyToAddress"];if(!string.IsNullOrWhiteSpace(replyTo))message.ReplyToList.Add(new MailAddress(replyTo));message.Attachments.Add(new Attachment(new MemoryStream(bytes),$"{document.Number}.pdf","application/pdf"));
@@ -123,6 +186,25 @@ public sealed class InvoiceDocumentsController(
         return Ok(new{asOf=DateOnly.FromDateTime(DateTime.UtcNow),totals=new{current,days1To30=d30,days31To60=d60,days61To90=d90,over90=older,total=current+d30+d60+d90+older},invoices=rows});
     }
 
+    private async Task<byte[]> GetOrCreatePdf(Guid id,InvoicePdfData document,CancellationToken token)
+    {
+        async Task<byte[]?> Read()
+        {
+            await using var existing=await Command("select pdf_bytes from finance_invoice_document_versions where invoice_id=@invoice and organization_id=@organization and (@organizationWide or branch_id=@branch) and version=1",token);
+            Add(existing,"invoice",id);Add(existing,"organizationWide",tenant.IsOrganizationWide);
+            return await existing.ExecuteScalarAsync(token) as byte[];
+        }
+        var archived=await Read();
+        if(archived is not null)return archived;
+        var rendered=InvoicePdfDocument.Create(document);
+        await using(var insert=await Command("insert into finance_invoice_document_versions(id,invoice_id,organization_id,branch_id,version,pdf_bytes,created_by) select @id,i.\"Id\",i.\"OrganizationId\",i.\"BranchId\",1,@bytes,@actor from \"Invoices\" i where i.\"Id\"=@invoice and i.\"OrganizationId\"=@organization and (@organizationWide or i.\"BranchId\"=@branch) on conflict(invoice_id,version) do nothing",token))
+        {
+            Add(insert,"id",Guid.NewGuid());Add(insert,"invoice",id);Add(insert,"organizationWide",tenant.IsOrganizationWide);Add(insert,"bytes",rendered);
+            await insert.ExecuteNonQueryAsync(token);
+        }
+        return await Read()??throw new InvalidOperationException("The issued invoice document could not be archived.");
+    }
+
     private async Task<InvoicePdfData?> Load(Guid id,CancellationToken token)
     {
         await using var command=await Command("""
@@ -134,8 +216,27 @@ public sealed class InvoiceDocumentsController(
     }
 
     private async Task MarkOverdue(CancellationToken token){await using var command=await Command("update \"Invoices\" i set \"Status\"='Overdue' from finance_invoice_details d where d.invoice_id=i.\"Id\" and i.\"OrganizationId\"=@organization and (@organizationWide or i.\"BranchId\"=@branch) and i.\"Status\"='Issued' and d.due_date<current_date",token);Add(command,"organizationWide",tenant.IsOrganizationWide);await command.ExecuteNonQueryAsync(token);}
+    private async Task AppendProfileVersion(CancellationToken token)
+    {
+        await using var version=await Command("""
+            insert into finance_invoice_profile_versions(id,organization_id,branch_id,version,effective_from,profile_snapshot,changed_by)
+            select @id,p.organization_id,p.branch_id,coalesce((select max(v.version) from finance_invoice_profile_versions v where v.organization_id=p.organization_id and v.branch_id=p.branch_id),0)+1,now(),
+                jsonb_build_object('providerName',p.provider_name,'providerAddress',p.provider_address,'providerEmail',p.provider_email,'providerPhone',p.provider_phone,'companyNumber',p.company_number,'vatNumber',p.vat_number,'remittanceDetails',p.remittance_details,'paymentTermsDays',p.default_payment_terms_days,'vatRate',p.default_vat_rate,'vatExemptionReason',p.vat_exemption_reason,'logoSha256',p.logo_sha256),@actor
+            from finance_invoice_profiles p where p.organization_id=@organization and p.branch_id=@branch
+            """,token);Add(version,"id",Guid.NewGuid());await version.ExecuteNonQueryAsync(token);
+    }
+    private static string? DetectLogoType(byte[] bytes)
+    {
+        if(bytes.Length>=24&&bytes.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10})&&bytes[12]==73&&bytes[13]==72&&bytes[14]==68&&bytes[15]==82)
+        {
+            var width=System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(bytes.AsSpan(16,4));var height=System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(bytes.AsSpan(20,4));
+            return width is >0 and <=4000&&height is >0 and <=2000?"image/png":null;
+        }
+        if(bytes.Length>=4&&bytes[0]==0xff&&bytes[1]==0xd8&&bytes[^2]==0xff&&bytes[^1]==0xd9)return "image/jpeg";
+        return null;
+    }
     private async Task RecordDelivery(Guid id,Guid invoice,string recipient,string status,string detail,DateTimeOffset? delivered,CancellationToken token){await using var command=await Command("insert into finance_invoice_deliveries(id,invoice_id,organization_id,branch_id,recipient_email,status,detail,delivered_at,requested_by) values(@id,@invoice,@organization,@branch,@recipient,@status,@detail,@delivered,@actor)",token);Add(command,"id",id);Add(command,"invoice",invoice);Add(command,"recipient",recipient);Add(command,"status",status);Add(command,"detail",detail);Add(command,"delivered",delivered);await command.ExecuteNonQueryAsync(token);}
-    private async Task<DbCommand> Command(string sql,CancellationToken token){var connection=db.Database.GetDbConnection();if(connection.State!=ConnectionState.Open)await connection.OpenAsync(token);var command=connection.CreateCommand();command.CommandText=sql;Add(command,"organization",tenant.OrganizationId);Add(command,"branch",tenant.BranchId??TenantDefaults.BranchId);Add(command,"actor",user.UserName);return command;}
+    private async Task<DbCommand> Command(string sql,CancellationToken token){var connection=db.Database.GetDbConnection();if(connection.State!=ConnectionState.Open)await connection.OpenAsync(token);var command=connection.CreateCommand();command.Transaction=db.Database.CurrentTransaction?.GetDbTransaction();command.CommandText=sql;Add(command,"organization",tenant.OrganizationId);Add(command,"branch",tenant.BranchId??TenantDefaults.BranchId);Add(command,"actor",user.UserName);return command;}
     private static void Add(DbCommand command,string name,object? value){if(command.Parameters.Contains(name))return;var p=command.CreateParameter();p.ParameterName=name;p.Value=value??DBNull.Value;command.Parameters.Add(p);}
     private void Audit(string action,Guid? id)=>db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),action,user.UserName,"Invoice",id,DateTimeOffset.UtcNow,tenant.OrganizationId,tenant.BranchId??TenantDefaults.BranchId));
     private string Required(string key)=>string.IsNullOrWhiteSpace(configuration[key])?throw new InvalidOperationException($"{key} is required."):configuration[key]!;

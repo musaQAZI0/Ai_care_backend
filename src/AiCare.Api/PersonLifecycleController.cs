@@ -29,7 +29,41 @@ public sealed class PersonLifecycleController(CareDbContext db,ITenantContext te
     public async Task<IActionResult> ProgressReferral(Guid id,ProgressReferralRequest request,CancellationToken t){if(request.Status is not("Screening" or "Accepted" or "Declined" or "Closed"))return BadRequest(new{message="Referral status must be Screening, Accepted, Declined, or Closed."});var row=await Query("select service_user_id,status from person_referrals where id=@id and organization_id=@organization",c=>Add(c,"id",id),r=>new{PersonId=r.GetGuid(0),Status=r.GetString(1)},t);if(row.Count==0)return NotFound();var person=await FindPerson(row[0].PersonId,t);if(person is null)return NotFound();await Exec("update person_referrals set status=@status,outcome=@outcome,closure_reason=@closure,owner=@owner,updated_at=now() where id=@id and organization_id=@organization",c=>{Add(c,"id",id);Add(c,"status",request.Status);Add(c,"outcome",request.Outcome?.Trim()??"");Add(c,"closure",request.ClosureReason?.Trim()??"");Add(c,"owner",request.Owner?.Trim()??user.UserName);},t);var next=request.Status=="Accepted"?"Assessment":request.Status=="Declined"?"Closed":"Referred";await RecordEvent(person,"Referral"+request.Status,person.Status,next,request.Outcome??request.Status,t);await SetStatus(person,next,request.Outcome??request.Status,t);Audit("person_referral.progressed","PersonReferral",id);await db.SaveChangesAsync(t);return NoContent();}
 
     [HttpPost("service-users/{personId:guid}/status")]
-    public async Task<IActionResult> ChangeStatus(Guid personId,ChangePersonStatusRequest request,CancellationToken t){var person=await FindPerson(personId,t);if(person is null)return NotFound();var allowed=new[]{"Referred","Assessment","Onboarding","Active","Suspended","Discharged","Archived"};if(!allowed.Contains(request.Status,StringComparer.OrdinalIgnoreCase))return BadRequest(new{message="Unsupported lifecycle status."});if(Missing(request.Reason))return BadRequest(new{message="Reason is required for lifecycle status changes."});await RecordEvent(person,"StatusChanged",person.Status,request.Status,request.Reason,t);await SetStatus(person,request.Status,request.Reason,t);if(request.Status.Equals("Discharged",StringComparison.OrdinalIgnoreCase))await MarkDischarged(personId,request.EffectiveAt??DateTimeOffset.UtcNow,t);await db.SaveChangesAsync(t);return NoContent();}
+    public async Task<IActionResult> ChangeStatus(Guid personId,ChangePersonStatusRequest request,CancellationToken t)
+    {
+        var person=await FindPerson(personId,t);
+        if(person is null)return NotFound();
+        var status=request.Status?.Trim()??"";
+        if(status.Length==0||status.Length>120)return BadRequest(new{message="Choose a configured client status."});
+        if(status.Equals("Archived",StringComparison.OrdinalIgnoreCase)&&!user.IsAdministrator&&!user.IsCareManager)return Forbid();
+        var configured=await Query("select value from care_operation_options where organization_id=@organization and kind='ClientStatus' and active=true",_=>{},r=>r.GetString(0),t);
+        if(status.Equals("Archived",StringComparison.OrdinalIgnoreCase)) status="Archived";
+        else
+        {
+            var configuredStatus=configured.FirstOrDefault(value=>value.Equals(status,StringComparison.OrdinalIgnoreCase));
+            if(configuredStatus is null)return BadRequest(new{message="Choose an active client status configured in Administration."});
+            status=configuredStatus;
+        }
+        var reason=request.Reason?.Trim()??"";
+        if(reason.Length==0||reason.Length>500)return BadRequest(new{message="A reason up to 500 characters is required for client status changes."});
+        if(status.Equals("Discharged",StringComparison.OrdinalIgnoreCase)||status.Equals("Archived",StringComparison.OrdinalIgnoreCase))
+        {
+            if(status.Equals("Discharged",StringComparison.OrdinalIgnoreCase))
+            {
+                var reasons=await Query("select value from care_operation_options where organization_id=@organization and kind='ClientLeavingReason' and active=true",_=>{},r=>r.GetString(0),t);
+                if(reasons.Count>0&&!reasons.Contains(reason,StringComparer.OrdinalIgnoreCase))return BadRequest(new{message="Choose an active client leaving reason configured in Administration."});
+            }
+            var future=await db.Visits.AsNoTracking().AnyAsync(x=>x.OrganizationId==tenant.OrganizationId&&x.ServiceUserId==personId&&x.StartsAt>DateTimeOffset.UtcNow&&x.Status!=VisitStatus.Cancelled&&x.Status!=VisitStatus.Completed,t);
+            if(future)return Conflict(new{message="Cancel or complete future visits before closing this client record."});
+            if(status.Equals("Archived",StringComparison.OrdinalIgnoreCase)&&await db.Incidents.AsNoTracking().AnyAsync(x=>x.OrganizationId==tenant.OrganizationId&&x.ServiceUserId==personId&&x.Status!="Closed",t))return Conflict(new{message="Resolve open incidents before archiving this client."});
+            if(status.Equals("Archived",StringComparison.OrdinalIgnoreCase)&&await db.Database.SqlQuery<bool>($"select exists(select 1 from legal_holds where organization_id={tenant.OrganizationId} and status in ('Active','ReleaseRequested') and (service_user_id is null or service_user_id={personId})) as \"Value\"").SingleAsync(t))return Conflict(new{message="An active legal hold prevents archiving this client."});
+        }
+        await RecordEvent(person,"StatusChanged",person.Status,status,reason,t);
+        await SetStatus(person,status,reason,t);
+        if(status.Equals("Discharged",StringComparison.OrdinalIgnoreCase))await MarkDischarged(personId,request.EffectiveAt??DateTimeOffset.UtcNow,t);
+        await db.SaveChangesAsync(t);
+        return NoContent();
+    }
 
     [HttpPost("service-users/{personId:guid}/reviews")]
     public async Task<IActionResult> CreateReview(Guid personId,CreateReviewCheckpointRequest request,CancellationToken t){if(await FindPerson(personId,t) is null)return NotFound();if(Missing(request.CheckpointType)||request.DueAt==default)return BadRequest(new{message="Checkpoint type and due date are required."});var id=Guid.NewGuid();await Exec("insert into person_review_checkpoints(id,service_user_id,organization_id,branch_id,checkpoint_type,status,due_at,owner,notes,created_by) values(@id,@person,@organization,@branch,@type,'Open',@due,@owner,@notes,@actor)",c=>{Add(c,"id",id);Add(c,"person",personId);Add(c,"type",request.CheckpointType.Trim());Add(c,"due",request.DueAt);Add(c,"owner",request.Owner?.Trim()??user.UserName);Add(c,"notes",request.Notes?.Trim()??"");},t);Audit("person_review.created","PersonReviewCheckpoint",id);await db.SaveChangesAsync(t);return Created($"/api/phase1/person-lifecycle/service-users/{personId}/reviews/{id}",new{id});}

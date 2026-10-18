@@ -42,6 +42,64 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
+    [Theory]
+    [InlineData("/api/phase1/care-operations/diary")]
+    [InlineData("/api/phase1/care-operations/training-calendar")]
+    [InlineData("/api/phase1/care-operations/monitoring")]
+    [InlineData("/api/phase1/care-operations/live-map")]
+    public async Task FamilyMemberCannotAccessProviderCareOperations(string path)
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "family", "FamilyPassword123!");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(path)).StatusCode);
+    }
+
+    [Fact]
+    public async Task CareWorkerCannotRecordMonitoringOutcomeForAnotherWorkersVisit()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "other-worker", "OtherWorkerPassword123!");
+        var response = await client.PutAsJsonAsync($"/api/phase1/care-operations/monitoring/{TestIds.VisitId}/outcome", new { careProvided = "Personal care", durationReason = "", exceptionReason = "" });
+        Assert.True(response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task CareManagerDiaryValidationRejectsIncompleteEntriesBeforePersistence()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "manager", "ManagerPassword123!");
+        var response = await client.PostAsJsonAsync("/api/phase1/care-operations/diary", new { category = "", priority = "Routine", subject = "", detail = "", eventAt = DateTimeOffset.UtcNow });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CareManagerCanCreateVisitAndSeeItInRota()
+    {
+        var client = _factory.CreateClient();
+        await Login(client, "manager", "ManagerPassword123!");
+        var startsAt = TestIds.VisitStartsAt.AddDays(40);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/phase1/visits");
+        request.Headers.Add("Idempotency-Key", $"manager-rota-{Guid.NewGuid():N}");
+        request.Content = JsonContent.Create(new
+        {
+            serviceUserId = TestIds.ServiceUserId,
+            careWorkerId = TestIds.WorkerId,
+            startsAt,
+            visitType = "Manager scheduled care",
+            durationMinutes = 30,
+            requiredSkills = "Personal care"
+        });
+
+        var created = await client.SendAsync(request);
+        var createdBody = await created.Content.ReadAsStringAsync();
+        Assert.True(created.StatusCode == HttpStatusCode.Created, $"Expected Created but got {(int)created.StatusCode}: {createdBody}");
+
+        var rota = await client.GetAsync($"/api/phase1/rota?from={Uri.EscapeDataString(startsAt.AddHours(-1).ToString("O"))}&to={Uri.EscapeDataString(startsAt.AddHours(2).ToString("O"))}");
+        var rotaBody = await rota.Content.ReadAsStringAsync();
+        Assert.True(rota.StatusCode == HttpStatusCode.OK, $"Expected OK but got {(int)rota.StatusCode}: {rotaBody}");
+        Assert.Contains("Manager scheduled care", rotaBody);
+    }
+
     [Fact]
     public async Task CareWorkerCanCreateCareNoteForOwnAssignedVisit()
     {
@@ -771,6 +829,7 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             new Invoice(TestIds.VoidInvoiceId, TestIds.ServiceUserId, "Private", 90m, "Generated", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         context.AppUsers.AddRange(
             new AppUser(Guid.NewGuid(), "admin", "admin@test.local", PasswordHasher.HashPassword("AdminPassword123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId),
+            new AppUser(Guid.NewGuid(), "manager", "manager@test.local", PasswordHasher.HashPassword("ManagerPassword123!"), UserRole.CareManager, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId),
             new AppUser(Guid.NewGuid(), "backoffice", "backoffice@test.local", PasswordHasher.HashPassword("BackOfficePassword123!"), UserRole.BackOffice, true, TenantDefaults.OrganizationId),
             new AppUser(Guid.NewGuid(), "worker", "worker@test.local", PasswordHasher.HashPassword("WorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.WorkerId),
             new AppUser(Guid.NewGuid(), "other-worker", "other@test.local", PasswordHasher.HashPassword("OtherWorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.OtherWorkerId),

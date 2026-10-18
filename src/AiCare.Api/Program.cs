@@ -46,6 +46,7 @@ var connectionString = NormalizePostgresConnectionString(
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, HttpTenantContext>();
 builder.Services.AddScoped<ICurrentUserContext, HttpCurrentUserContext>();
+builder.Services.AddScoped<AdminPermissionService>();
 builder.Services.AddHttpClient();
 var decisionSupportMode = builder.Configuration["MedicationSafety:DecisionSupportMode"] ?? "Disabled";
 if (!Enum.TryParse<MedicationDecisionSupportMode>(decisionSupportMode, ignoreCase: true, out var parsedDecisionSupportMode)
@@ -251,6 +252,7 @@ app.Use(async (context, next) =>
     await next();
 });
 app.UseMiddleware<PrivilegedAccessMiddleware>();
+app.UseMiddleware<AdminPermissionGateMiddleware>();
 if (!app.Environment.IsEnvironment("Testing")) app.UseMiddleware<SensitiveOperationStepUpMiddleware>();
 app.UseAuthorization();
 
@@ -391,6 +393,9 @@ phase1.MapPost("/service-users", (CreateServiceUserRequest request, ICareReposit
         return Error("Date of birth cannot be in the future.");
     }
 
+    if (InvalidContact(request.Contact)) return Error("Check contact details: valid email, supported contact method, and field length limits are required.");
+    if (ContactEmailInUse(context, tenant, request.Contact, "ServiceUser")) return Results.Conflict(new { message = "This contact email is already used by another profile." });
+
     var normalizedName = request.FullName.Trim().ToUpperInvariant();
     var duplicate = context.ServiceUsers.AsNoTracking().AsEnumerable().Any(item =>
         TenantVisible(tenant, item.OrganizationId, item.BranchId) &&
@@ -401,7 +406,7 @@ phase1.MapPost("/service-users", (CreateServiceUserRequest request, ICareReposit
     var serviceUser = repository.AddServiceUser(request);
     return Results.Created($"/api/phase1/service-users/{serviceUser.Id}", serviceUser);
 });
-phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest request, ICareRepository repository, ICurrentUserContext currentUser) =>
+phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
@@ -414,6 +419,9 @@ phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest req
     {
         return Error("Date of birth cannot be in the future.");
     }
+
+    if (InvalidContact(request.Contact)) return Error("Check contact details: valid email, supported contact method, and field length limits are required.");
+    if (ContactEmailInUse(context, tenant, request.Contact, "ServiceUser", id)) return Results.Conflict(new { message = "This contact email is already used by another profile." });
 
     var serviceUser = repository.UpdateServiceUser(id, request);
     return serviceUser is null ? Results.NotFound() : Results.Ok(serviceUser);
@@ -504,6 +512,8 @@ phase1.MapPost("/care-plans/{id:guid}/approve", (Guid id, CareDbContext context,
 
 phase1.MapGet("/care-workers", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.BackOffice, UserRole.CareWorker);
+    if (denied is not null) return denied;
     if (!currentUser.IsCareWorker)
     {
         return Results.Ok(repository.GetCareWorkers());
@@ -521,29 +531,48 @@ phase1.MapGet("/care-workers", (ICareRepository repository, CareDbContext contex
         .ToList();
     return Results.Ok(worker);
 });
-phase1.MapGet("/care-workers/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/care-workers/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.BackOffice, UserRole.CareWorker);
+    if (denied is not null) return denied;
+    if (currentUser.IsCareWorker && currentUser.CareWorkerId != id) return Results.NotFound();
     var worker = context.CareWorkers.AsNoTracking().FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (worker is null || !tenant.CanAccess(worker.OrganizationId, worker.BranchId)) return Results.NotFound();
-    var visits = context.Visits.AsNoTracking().Where(item => item.CareWorkerId == id && item.OrganizationId == tenant.OrganizationId).OrderByDescending(item => item.StartsAt).Take(25).ToList();
+    var visits = context.Visits.AsNoTracking().Where(item => item.CareWorkerId == id && item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || item.BranchId == tenant.BranchId)).OrderByDescending(item => item.StartsAt).Take(25).ToList();
     return Results.Ok(new { worker, visits });
 });
-phase1.MapPost("/care-workers", (CreateCareWorkerRequest request, ICareRepository repository) =>
+phase1.MapPost("/care-workers", (CreateCareWorkerRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
-    if (Missing(request.FullName, request.Specialization, request.Availability))
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager);
+    if (denied is not null) return denied;
+    if (Missing(request.FullName, request.Specialization, request.Availability) ||
+        request.FullName.Length > 200 || request.Specialization.Length > 200 || request.Availability.Length > 200 ||
+        request.DbsStatus is null || request.TrainingCompliance is null || request.TravelRadius is null ||
+        request.DbsStatus.Length > 80 || request.TrainingCompliance.Length > 80 || request.TravelRadius.Length > 80)
     {
-        return Error("Full name, specialization, and availability are required.");
+        return Error("Provide a full name, specialisation, and availability within the field length limits.");
     }
+
+    if (InvalidContact(request.Contact)) return Error("Check contact details: valid email, supported contact method, and field length limits are required.");
+    if (ContactEmailInUse(context, tenant, request.Contact, "CareWorker")) return Results.Conflict(new { message = "This contact email is already used by another profile." });
 
     var careWorker = repository.AddCareWorker(request);
     return Results.Created($"/api/phase1/care-workers/{careWorker.Id}", careWorker);
 });
-phase1.MapPut("/care-workers/{id:guid}", (Guid id, CreateCareWorkerRequest request, ICareRepository repository) =>
+phase1.MapPut("/care-workers/{id:guid}", (Guid id, CreateCareWorkerRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
-    if (Missing(request.FullName, request.Specialization, request.Availability))
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager);
+    if (denied is not null) return denied;
+    if (Missing(request.FullName, request.Specialization, request.Availability) ||
+        request.FullName.Length > 200 || request.Specialization.Length > 200 || request.Availability.Length > 200 ||
+        request.DbsStatus is null || request.TrainingCompliance is null || request.TravelRadius is null ||
+        request.DbsStatus.Length > 80 || request.TrainingCompliance.Length > 80 || request.TravelRadius.Length > 80)
     {
-        return Error("Full name, specialization, and availability are required.");
+        return Error("Provide a full name, specialisation, and availability within the field length limits.");
     }
+
+    if (InvalidContact(request.Contact)) return Error("Check contact details: valid email, supported contact method, and field length limits are required.");
+    if (ContactEmailInUse(context, tenant, request.Contact, "CareWorker", id)) return Results.Conflict(new { message = "This contact email is already used by another profile." });
 
     var careWorker = repository.UpdateCareWorker(id, request);
     return careWorker is null ? Results.NotFound() : Results.Ok(careWorker);
@@ -624,7 +653,10 @@ phase1.MapGet("/rota", (DateTimeOffset? from, DateTimeOffset? to, Guid? careWork
         visit,
         careWorkerName = workers.TryGetValue(visit.CareWorkerId, out var worker) ? worker.FullName : "",
         serviceUserName = serviceUsers.TryGetValue(visit.ServiceUserId, out var serviceUser) ? serviceUser.FullName : "",
-        conflicts = FindVisitConflicts(context, tenant, visit.CareWorkerId, visit.StartsAt, visit.DurationMinutes, visit.Id).Count
+        conflicts = FindVisitConflicts(context, tenant, visit.CareWorkerId, visit.StartsAt, visit.DurationMinutes, visit.Id).Count,
+        runName = AppointmentWorkflow.RunName(context, tenant.OrganizationId, visit.BranchId ?? TenantDefaults.BranchId, visit.Id),
+        appearance = AppointmentConfigurationStore.Load(context, tenant.OrganizationId, visit.BranchId).RosterAppearance,
+        monitoring = AppointmentWorkflow.Monitoring(visit, AppointmentConfigurationStore.Load(context, tenant.OrganizationId, visit.BranchId).MonitoringSettings, DateTimeOffset.UtcNow)
     }));
 });
 phase1.MapPost("/visits/conflicts", (CreateVisitRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
@@ -632,20 +664,32 @@ phase1.MapPost("/visits/conflicts", (CreateVisitRequest request, CareDbContext c
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
 
-    if (request.CareWorkerId == Guid.Empty || request.DurationMinutes <= 0)
+    if (request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || string.IsNullOrWhiteSpace(request.VisitType) || request.DurationMinutes <= 0)
     {
-        return Error("Care worker and a positive duration are required.");
+        return Error("Service user, care worker, visit type, and a positive duration are required.");
     }
 
     var workerIds = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
-    var validation = workerIds.Select(id => ValidateCareWorkerReference(id, context, tenant)).FirstOrDefault(result => result is not null);
+    var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant)
+        ?? workerIds.Skip(1).Select(id => ValidateCareWorkerReference(id, context, tenant)).FirstOrDefault(result => result is not null)
+        ?? ValidateAppointmentBranch(request.ServiceUserId, workerIds, context, tenant);
     if (validation is not null) return validation;
 
-    var conflicts = workerIds.SelectMany(id => FindVisitConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes)).ToList();
+    if (request.ExcludeVisitId is Guid excluded)
+    {
+        var excludedVisit = context.Visits.AsNoTracking().FirstOrDefault(x => x.Id == excluded && x.OrganizationId == tenant.OrganizationId && x.ServiceUserId == request.ServiceUserId);
+        if (excludedVisit is null || !tenant.CanAccess(excludedVisit.OrganizationId, excludedVisit.BranchId)) return Results.NotFound();
+    }
+
+    var conflicts = workerIds.SelectMany(id => FindVisitConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes, request.ExcludeVisitId)).ToList();
     var availabilityConflicts = workerIds.SelectMany(id => FindWorkerAvailabilityConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes)).ToList();
     var safetyConflicts = workerIds.SelectMany(id => FindWorkerSafetyConflicts(context, tenant, id, request.StartsAt, request.RequiredSkills)).ToList();
-    var operationalConflicts = workerIds.SelectMany(id => FindWorkerOperationalConflicts(context, tenant, id, request.ServiceUserId, request.StartsAt, request.DurationMinutes)).ToList();
-    return Results.Ok(new { hasConflicts = conflicts.Count > 0 || availabilityConflicts.Count > 0 || safetyConflicts.Count > 0 || operationalConflicts.Count > 0, conflicts, availabilityConflicts, safetyConflicts, operationalConflicts });
+    var operationalConflicts = workerIds.SelectMany(id => FindWorkerOperationalConflicts(context, tenant, id, request.ServiceUserId, request.StartsAt, request.DurationMinutes, request.ExcludeVisitId)).ToList();
+    var branch = context.ServiceUsers.AsNoTracking().Where(x => x.Id == request.ServiceUserId && x.OrganizationId == tenant.OrganizationId).Select(x => x.BranchId).FirstOrDefault() ?? TenantDefaults.BranchId;
+    var policy = workerIds.Select(id => AppointmentWorkflow.Check(context, tenant, branch, id, request.StartsAt, request.DurationMinutes, request.ExcludeVisitId)).ToArray();
+    var bookingBlocks = policy.SelectMany(x => x.Blocks).Distinct().ToArray();
+    var bookingWarnings = policy.SelectMany(x => x.Warnings).Distinct().ToArray();
+    return Results.Ok(new { hasConflicts = conflicts.Count > 0 || availabilityConflicts.Count > 0 || safetyConflicts.Count > 0 || operationalConflicts.Count > 0 || bookingBlocks.Length > 0, conflicts, availabilityConflicts, safetyConflicts, operationalConflicts, bookingBlocks, bookingWarnings });
 });
 phase1.MapPost("/visits", (CreateVisitRequest request, HttpContext httpContext, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
@@ -666,8 +710,13 @@ phase1.MapPost("/visits", (CreateVisitRequest request, HttpContext httpContext, 
 
     var workerIds = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
     var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant)
-        ?? workerIds.Skip(1).Select(id => ValidateCareWorkerReference(id, context, tenant)).FirstOrDefault(result => result is not null);
+        ?? workerIds.Skip(1).Select(id => ValidateCareWorkerReference(id, context, tenant)).FirstOrDefault(result => result is not null)
+        ?? ValidateAppointmentBranch(request.ServiceUserId, workerIds, context, tenant);
     if (validation is not null) return validation;
+
+    var createBranch = context.ServiceUsers.AsNoTracking().Where(x => x.Id == request.ServiceUserId && x.OrganizationId == tenant.OrganizationId).Select(x => x.BranchId).FirstOrDefault() ?? TenantDefaults.BranchId;
+    var createPolicy = workerIds.Select(id => AppointmentWorkflow.Check(context, tenant, createBranch, id, request.StartsAt, request.DurationMinutes)).ToArray();
+    if (createPolicy.Any(x => x.Blocks.Length > 0)) return Error(string.Join(" ", createPolicy.SelectMany(x => x.Blocks).Distinct()));
 
     var conflicts = FindVisitConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes);
     if (conflicts.Count > 0)
@@ -708,7 +757,8 @@ phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRe
 
     var workerIds = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
     var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant)
-        ?? workerIds.Skip(1).Select(workerId => ValidateCareWorkerReference(workerId, context, tenant)).FirstOrDefault(result => result is not null);
+        ?? workerIds.Skip(1).Select(workerId => ValidateCareWorkerReference(workerId, context, tenant)).FirstOrDefault(result => result is not null)
+        ?? ValidateAppointmentBranch(request.ServiceUserId, workerIds, context, tenant);
     if (validation is not null) return validation;
 
     var conflicts = FindVisitConflicts(context, tenant, request.CareWorkerId, request.StartsAt, request.DurationMinutes, id);
@@ -733,6 +783,18 @@ phase1.MapPut("/visits/{id:guid}", (Guid id, CreateVisitRequest request, ICareRe
     if (additionalConflicts.Count > 0 || operationalConflicts.Count > 0) return Error("One or more assigned workers fail availability, compliance, working-time, absence, or travel requirements.");
 
     var previousVisit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    if (previousVisit is null || !tenant.CanAccess(previousVisit.OrganizationId, previousVisit.BranchId)) return Results.NotFound();
+    var updateBranch = previousVisit.BranchId ?? TenantDefaults.BranchId;
+    var requestedBranch = context.ServiceUsers.AsNoTracking().Where(x => x.Id == request.ServiceUserId && x.OrganizationId == tenant.OrganizationId).Select(x => x.BranchId).FirstOrDefault() ?? TenantDefaults.BranchId;
+    if (requestedBranch != updateBranch) return Error("A visit cannot be moved to another branch through rescheduling.");
+    var updatePolicy = workerIds.Select(workerId => AppointmentWorkflow.Check(context, tenant, updateBranch, workerId, request.StartsAt, request.DurationMinutes, id)).ToArray();
+    if (updatePolicy.Any(x => x.Blocks.Length > 0)) return Error(string.Join(" ", updatePolicy.SelectMany(x => x.Blocks).Distinct()));
+    if (previousVisit.StartsAt != request.StartsAt && context.Database.IsNpgsql())
+    {
+        var maxChange = context.Database.SqlQuery<int>($"""select coalesce(max_change_minutes,0) as "Value" from appointment_start_variance_settings where organization_id={tenant.OrganizationId}""").SingleOrDefault();
+        if (maxChange > 0 && Math.Abs((request.StartsAt - previousVisit.StartsAt).TotalMinutes) > maxChange)
+            return Error($"The new start is more than {maxChange} minutes from the scheduled start. Adjust the visit or ask an administrator to change the appointment variance setting.");
+    }
     var visit = repository.UpdateVisit(id, request);
     if (visit is not null) SyncVisitWorkerAssignments(context, tenant, visit.Id, request.CareWorkerId, request.AdditionalCareWorkerIds);
     if (visit is not null) RecordScheduleChange(context, tenant, currentUser, visit.Id, previousVisit?.CareWorkerId != visit.CareWorkerId ? "Reassigned" : previousVisit?.StartsAt != visit.StartsAt ? "Rescheduled" : "Updated", previousVisit, visit, request.ChangeReason);
@@ -755,8 +817,14 @@ phase1.MapPost("/visits/recurring", (CreateRecurringVisitRequest request, CareDb
 
     var validation = ValidateVisitReferences(request.ServiceUserId, request.CareWorkerId, context, tenant);
     if (validation is not null) return validation;
+    var branchValidation = ValidateAppointmentBranch(request.ServiceUserId, VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds), context, tenant);
+    if (branchValidation is not null) return branchValidation;
 
     var starts = ExpandRecurringStarts(request.StartsAt, request.Frequency, request.Occurrences).ToList();
+    var recurringBranch = context.ServiceUsers.AsNoTracking().Where(x => x.Id == request.ServiceUserId && x.OrganizationId == tenant.OrganizationId).Select(x => x.BranchId).FirstOrDefault() ?? TenantDefaults.BranchId;
+    var recurringWorkers = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
+    var recurringBlocks = starts.SelectMany(at => recurringWorkers.SelectMany(workerId => AppointmentWorkflow.Check(context, tenant, recurringBranch, workerId, at, request.DurationMinutes).Blocks)).Distinct().ToArray();
+    if (recurringBlocks.Length > 0) return Error(string.Join(" ", recurringBlocks));
     var conflicts = starts.SelectMany(startsAt => FindVisitConflicts(context, tenant, request.CareWorkerId, startsAt, request.DurationMinutes)).ToList();
     if (conflicts.Count > 0)
     {
@@ -797,7 +865,7 @@ phase1.MapPost("/visits/recurring", (CreateRecurringVisitRequest request, CareDb
         null,
         null,
         tenant.OrganizationId,
-        tenant.BranchId ?? TenantDefaults.BranchId)).ToList();
+        recurringBranch)).ToList();
     context.Visits.AddRange(visits);
     AddAudit(context, tenant, currentUser, $"visit.recurring_scheduled:{visits.Count}", nameof(Visit), visits.First().Id);
     context.SaveChanges();
@@ -808,22 +876,31 @@ phase1.MapPatch("/visits/{id:guid}/status", (Guid id, UpdateVisitStatusRequest r
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
-
     var previousVisit = context.Visits.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    if (previousVisit is null || !tenant.CanAccess(previousVisit.OrganizationId, previousVisit.BranchId)) return Results.NotFound();
+    if (request.Status == VisitStatus.Cancelled && !ValidVisitCancellationReason(context, tenant, request.Reason))
+        return Error("Choose an active cancellation reason configured in Administration.");
+
     var visit = repository.UpdateVisitStatus(id, request.Status);
     if (visit is not null) RecordScheduleChange(context, tenant, currentUser, id, request.Status == VisitStatus.Cancelled ? "Cancelled" : "StatusChanged", previousVisit, visit, request.Reason);
+    if (visit is not null && request.Status == VisitStatus.Cancelled)
+    {
+        AddAudit(context, tenant, currentUser, "visit.cancelled", nameof(Visit), id);
+        context.SaveChanges();
+    }
     return visit is null ? Results.NotFound() : Results.Ok(visit);
 });
-phase1.MapDelete("/visits/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapDelete("/visits/{id:guid}", (Guid id, string? reason, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
-
     var visit = context.Visits.Find(id);
     if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return Results.NotFound();
+    if (!ValidVisitCancellationReason(context, tenant, reason ?? "Visit archived by delete request"))
+        return Error("Choose an active cancellation reason configured in Administration.");
     if (visit.Status == VisitStatus.Completed || visit.Status == VisitStatus.InProgress) return Results.Conflict(new { message = "Started or completed visits require a correction record, not deletion." });
     context.Entry(visit).CurrentValues.SetValues(visit with { Status = VisitStatus.Cancelled });
-    RecordScheduleChange(context, tenant, currentUser, id, "Cancelled", visit, visit with { Status = VisitStatus.Cancelled }, "Visit archived by delete request");
+    RecordScheduleChange(context, tenant, currentUser, id, "Cancelled", visit, visit with { Status = VisitStatus.Cancelled }, reason ?? "Visit archived by delete request");
     AddAudit(context, tenant, currentUser, "visit.cancelled", nameof(Visit), id);
     context.SaveChanges();
     return Results.NoContent();
@@ -1559,6 +1636,9 @@ phase1.MapPost("/admin/users", (CreateAdminUserRequest request, ICareRepository 
     var denied = RequireAdministrator(currentUser);
     if (denied is not null) return denied;
 
+    if (request.Role == UserRole.BackOffice)
+        return Results.BadRequest(new { message = "Platform BackOffice access cannot be granted by an organisation administrator." });
+
     if (!environment.IsDevelopment() && !environment.IsEnvironment("Testing") && !configuration.GetValue<bool>("AccountInvitations:AllowLegacyPasswordProvisioning"))
     {
         return Results.Problem("Direct password provisioning is disabled. Use the account invitation endpoint.", statusCode: StatusCodes.Status410Gone);
@@ -1610,9 +1690,22 @@ phase1.MapPatch("/admin/users/{id:guid}/role", (Guid id, UpdateUserRoleRequest r
 {
     var denied = RequireAdministrator(currentUser);
     if (denied is not null) return denied;
+    if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length is < 10 or > 500)
+        return Results.BadRequest(new { message = "A reason of 10 to 500 characters is required for role changes." });
+    if (!Enum.IsDefined(request.Role))
+        return Results.BadRequest(new { message = "Select a valid role." });
+    if (request.Role == UserRole.BackOffice)
+        return Results.BadRequest(new { message = "Platform BackOffice access cannot be granted by an organisation administrator." });
 
-    var user = repository.UpdateUserRole(id, request.Role);
-    return user is null ? Results.NotFound() : Results.Ok(user);
+    try
+    {
+        var user = repository.UpdateUserRole(id, request.Role, request.Reason.Trim());
+        return user is null ? Results.NotFound() : Results.Ok(user);
+    }
+    catch (InvalidOperationException exception)
+    {
+        return Results.Conflict(new { message = exception.Message });
+    }
 });
 
 phase1.MapGet("/audit-events", (ICareRepository repository, ICurrentUserContext currentUser) =>
@@ -2227,6 +2320,31 @@ app.Run();
 
 static bool Missing(params string[] values) => values.Any(string.IsNullOrWhiteSpace);
 
+static bool InvalidContact(ProfileContactRequest? contact)
+{
+    if (contact is null) return false;
+    var email = contact.Email?.Trim() ?? "";
+    return email.Length > 254 || (email.Length > 0 && !LooksLikeEmail(email))
+        || (contact.MobilePhone?.Length ?? 0) > 40
+        || (contact.Address?.Length ?? 0) > 500
+        || (contact.Postcode?.Length ?? 0) > 16
+        || (contact.EmergencyContactName?.Length ?? 0) > 200
+        || (contact.EmergencyContactRelationship?.Length ?? 0) > 100
+        || (contact.EmergencyContactPhone?.Length ?? 0) > 40
+        || contact.PreferredContactMethod is not (null or "" or "Phone" or "Email" or "Post");
+}
+
+static bool ContactEmailInUse(CareDbContext context, ITenantContext tenant, ProfileContactRequest? contact, string subjectType, Guid? subjectId = null)
+{
+    var email = contact?.Email?.Trim().ToLowerInvariant();
+    if (string.IsNullOrEmpty(email)) return false;
+    var profiles = context.ProfileContactDetails.AsNoTracking()
+        .Where(profile => profile.OrganizationId == tenant.OrganizationId && profile.Email.ToLower() == email);
+    if (subjectId is Guid existingId)
+        profiles = profiles.Where(profile => profile.SubjectType != subjectType || profile.SubjectId != existingId);
+    return profiles.Any();
+}
+
 static IResult Error(string message, int statusCode = StatusCodes.Status400BadRequest) =>
     Results.Json(new { message }, statusCode: statusCode);
 
@@ -2436,8 +2554,22 @@ static IResult? ValidateCareWorkerReference(Guid careWorkerId, CareDbContext con
 
 static IResult? ValidateVisitReferences(Guid serviceUserId, Guid careWorkerId, CareDbContext context, ITenantContext tenant)
 {
-    return ValidateServiceUserReference(serviceUserId, context, tenant)
+    var validation = ValidateServiceUserReference(serviceUserId, context, tenant)
         ?? ValidateCareWorkerReference(careWorkerId, context, tenant);
+    if (validation is not null) return validation;
+    var client = context.ServiceUsers.AsNoTracking().First(item => item.Id == serviceUserId);
+    return new[] { "Archived", "Discharged", "Suspended" }.Contains(client.Status, StringComparer.OrdinalIgnoreCase)
+        ? Error("Visits cannot be scheduled for an archived, discharged, or suspended client.")
+        : null;
+}
+
+static IResult? ValidateAppointmentBranch(Guid serviceUserId, IReadOnlyCollection<Guid> workerIds, CareDbContext context, ITenantContext tenant)
+{
+    var clientBranch = context.ServiceUsers.AsNoTracking().Where(x => x.Id == serviceUserId && x.OrganizationId == tenant.OrganizationId).Select(x => x.BranchId).FirstOrDefault() ?? TenantDefaults.BranchId;
+    var workers = context.CareWorkers.AsNoTracking().Where(x => workerIds.Contains(x.Id) && x.OrganizationId == tenant.OrganizationId).Select(x => new { x.Id, x.BranchId }).ToList();
+    return workers.Count != workerIds.Count || workers.Any(x => (x.BranchId ?? TenantDefaults.BranchId) != clientBranch)
+        ? Error("The service user and all assigned care workers must belong to the same branch.")
+        : null;
 }
 
 static IResult? ValidateCareNoteReferences(Guid visitId, Guid serviceUserId, Guid careWorkerId, CareDbContext context, ITenantContext tenant)
@@ -2453,7 +2585,8 @@ static IResult? ValidateCareNoteReferences(Guid visitId, Guid serviceUserId, Gui
         return Error("Care note visit, service user, and care worker must match.");
     }
 
-    return ValidateVisitReferences(serviceUserId, careWorkerId, context, tenant);
+    return ValidateServiceUserReference(serviceUserId, context, tenant)
+        ?? ValidateCareWorkerReference(careWorkerId, context, tenant);
 }
 
 static List<object> FindVisitConflicts(CareDbContext context, ITenantContext tenant, Guid careWorkerId, DateTimeOffset startsAt, int durationMinutes, Guid? excludeVisitId = null)
@@ -2521,16 +2654,26 @@ static List<object> FindWorkerOperationalConflicts(CareDbContext context, ITenan
 
 static void SyncVisitWorkerAssignments(CareDbContext context, ITenantContext tenant, Guid visitId, Guid primaryWorkerId, IReadOnlyCollection<Guid>? additionalWorkerIds)
 {
+    var branch = context.Visits.AsNoTracking().Where(x => x.Id == visitId && x.OrganizationId == tenant.OrganizationId).Select(x => x.BranchId).FirstOrDefault() ?? tenant.BranchId ?? TenantDefaults.BranchId;
     var connection=context.Database.GetDbConnection();var opened=connection.State!=System.Data.ConnectionState.Open;
-    try{if(opened)connection.Open();using(var delete=connection.CreateCommand()){delete.CommandText="delete from visit_care_worker_assignments where visit_id=@visit and organization_id=@organization";AddParameter(delete,"visit",visitId);AddParameter(delete,"organization",tenant.OrganizationId);delete.ExecuteNonQuery();}foreach(var workerId in VisitWorkerIds(primaryWorkerId,additionalWorkerIds).Where(id=>id!=primaryWorkerId)){using var insert=connection.CreateCommand();insert.CommandText="insert into visit_care_worker_assignments(visit_id,care_worker_id,organization_id,branch_id,assignment_role) values(@visit,@worker,@organization,@branch,'Additional')";AddParameter(insert,"visit",visitId);AddParameter(insert,"worker",workerId);AddParameter(insert,"organization",tenant.OrganizationId);AddParameter(insert,"branch",tenant.BranchId??TenantDefaults.BranchId);insert.ExecuteNonQuery();}}
+    try{if(opened)connection.Open();using(var delete=connection.CreateCommand()){delete.CommandText="delete from visit_care_worker_assignments where visit_id=@visit and organization_id=@organization";AddParameter(delete,"visit",visitId);AddParameter(delete,"organization",tenant.OrganizationId);delete.ExecuteNonQuery();}foreach(var workerId in VisitWorkerIds(primaryWorkerId,additionalWorkerIds).Where(id=>id!=primaryWorkerId)){using var insert=connection.CreateCommand();insert.CommandText="insert into visit_care_worker_assignments(visit_id,care_worker_id,organization_id,branch_id,assignment_role) values(@visit,@worker,@organization,@branch,'Additional')";AddParameter(insert,"visit",visitId);AddParameter(insert,"worker",workerId);AddParameter(insert,"organization",tenant.OrganizationId);AddParameter(insert,"branch",branch);insert.ExecuteNonQuery();}}
     catch(System.Data.Common.DbException){if((additionalWorkerIds?.Count??0)>0)throw;}
     finally{if(opened&&connection.State==System.Data.ConnectionState.Open)connection.Close();}
 }
 
+static bool ValidVisitCancellationReason(CareDbContext context, ITenantContext tenant, string? reason)
+{
+    if (!context.Database.IsNpgsql()) return !string.IsNullOrWhiteSpace(reason);
+    var activeReasons = context.Database.SqlQuery<string>($"""select value as "Value" from care_operation_options where organization_id={tenant.OrganizationId} and kind='CancellationReason' and active=true""").ToArray();
+    if (activeReasons.Length == 0) return !string.IsNullOrWhiteSpace(reason);
+    return activeReasons.Contains(reason?.Trim(), StringComparer.OrdinalIgnoreCase);
+}
+
 static void RecordScheduleChange(CareDbContext context, ITenantContext tenant, ICurrentUserContext user, Guid visitId, string changeType, object? oldValue, object? newValue, string? reason)
 {
+    var branch = context.Visits.AsNoTracking().Where(x => x.Id == visitId && x.OrganizationId == tenant.OrganizationId).Select(x => x.BranchId).FirstOrDefault() ?? tenant.BranchId ?? TenantDefaults.BranchId;
     var connection=context.Database.GetDbConnection();var opened=connection.State!=System.Data.ConnectionState.Open;
-    try{if(opened)connection.Open();using var command=connection.CreateCommand();command.CommandText="insert into schedule_change_history(id,visit_id,organization_id,branch_id,change_type,old_values_json,new_values_json,reason,changed_by) values(@id,@visit,@organization,@branch,@type,@old,@new,@reason,@actor)";AddParameter(command,"id",Guid.NewGuid());AddParameter(command,"visit",visitId);AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"branch",tenant.BranchId??TenantDefaults.BranchId);AddParameter(command,"type",changeType);AddParameter(command,"old",System.Text.Json.JsonSerializer.Serialize(oldValue));AddParameter(command,"new",System.Text.Json.JsonSerializer.Serialize(newValue));AddParameter(command,"reason",string.IsNullOrWhiteSpace(reason)?changeType:reason.Trim());AddParameter(command,"actor",user.UserName);command.ExecuteNonQuery();}
+    try{if(opened)connection.Open();using var command=connection.CreateCommand();command.CommandText="insert into schedule_change_history(id,visit_id,organization_id,branch_id,change_type,old_values_json,new_values_json,reason,changed_by) values(@id,@visit,@organization,@branch,@type,@old,@new,@reason,@actor)";AddParameter(command,"id",Guid.NewGuid());AddParameter(command,"visit",visitId);AddParameter(command,"organization",tenant.OrganizationId);AddParameter(command,"branch",branch);AddParameter(command,"type",changeType);AddParameter(command,"old",System.Text.Json.JsonSerializer.Serialize(oldValue));AddParameter(command,"new",System.Text.Json.JsonSerializer.Serialize(newValue));AddParameter(command,"reason",string.IsNullOrWhiteSpace(reason)?changeType:reason.Trim());AddParameter(command,"actor",user.UserName);command.ExecuteNonQuery();}
     catch(System.Data.Common.DbException){ }
     finally{if(opened&&connection.State==System.Data.ConnectionState.Open)connection.Close();}
 }

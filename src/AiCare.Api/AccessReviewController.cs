@@ -54,7 +54,7 @@ public sealed class AccessReviewController(CareDbContext db, ITenantContext tena
     [HttpPost("{campaignId:guid}/items/{itemId:guid}/decide")]
     public async Task<IActionResult> Decide(Guid campaignId,Guid itemId,DecideAccessReview request,CancellationToken t)
     {
-        if (request.Decision is not ("Retain" or "Reduce" or "Suspend" or "Revoke" or "Escalate") || request.Justification?.Trim().Length < 10) return BadRequest(new { message = "A supported decision and meaningful justification are required." });
+        if (request.Decision is not ("Retain" or "Reduce" or "Suspend" or "Revoke" or "Escalate") || string.IsNullOrWhiteSpace(request.Justification) || request.Justification.Trim().Length < 10) return BadRequest(new { message = "A supported decision and meaningful justification are required." });
         var n=await Exec("update access_review_items i set status='Decided',decision=@decision,justification=@reason,decided_by_user_id=@actorId,decided_by=@actor,decided_at=now() from access_review_campaigns c where i.id=@item and i.campaign_id=@campaign and c.id=i.campaign_id and i.organization_id=@organization and i.status='Pending' and (@wide or c.branch_id=@branch)",c=>{Add(c,"item",itemId);Add(c,"campaign",campaignId);Add(c,"decision",request.Decision);Add(c,"reason",request.Justification!.Trim());},t);
         if(n==0)return NotFound();await Event(campaignId,itemId,"Decided",$"{request.Decision}: {request.Justification}",tenant.BranchId,t);return NoContent();
     }
@@ -63,7 +63,14 @@ public sealed class AccessReviewController(CareDbContext db, ITenantContext tena
     [Authorize(Roles="Administrator")]
     public async Task<IActionResult> Remediate(Guid campaignId,Guid itemId,CancellationToken t)
     {
-        var row=await One("select user_id from access_review_items where id=@item and campaign_id=@campaign and organization_id=@organization and status='Decided' and decision in ('Suspend','Revoke')",c=>{Add(c,"item",itemId);Add(c,"campaign",campaignId);},t); if(row is null)return NotFound();var target=(Guid)row["user_id"]!;if(target==user.UserId)return Conflict(new{message="You cannot remediate your own account."});
+        var row=await One("select i.user_id from access_review_items i join access_review_campaigns c on c.id=i.campaign_id and c.organization_id=i.organization_id where i.id=@item and i.campaign_id=@campaign and i.organization_id=@organization and i.status='Decided' and i.decision in ('Suspend','Revoke') and (@wide or c.branch_id=@branch) and (@wide or i.branch_id=@branch)",c=>{Add(c,"item",itemId);Add(c,"campaign",campaignId);},t);
+        if(row is null)return NotFound();
+        var target=(Guid)row["user_id"]!;
+        if(target==user.UserId)return Conflict(new{message="You cannot remediate your own account."});
+        var account=await db.AppUsers.AsNoTracking().SingleOrDefaultAsync(item=>item.Id==target&&item.OrganizationId==tenant.OrganizationId,t);
+        if(account is null||(!tenant.IsOrganizationWide&&account.BranchId!=tenant.BranchId))return NotFound();
+        if(account.IsActive&&account.Role==UserRole.Administrator&&!await db.AppUsers.AnyAsync(item=>item.OrganizationId==tenant.OrganizationId&&item.Id!=target&&item.IsActive&&item.Role==UserRole.Administrator,t))
+            return Conflict(new{message="The organization must retain an active administrator."});
         await Exec("update \"AppUsers\" set \"IsActive\"=false where \"Id\"=@target and \"OrganizationId\"=@organization",c=>Add(c,"target",target),t);await Exec("update auth_sessions set revoked_at=now(),revoked_by=@actor,revocation_reason='Access review remediation' where user_id=@target and organization_id=@organization and revoked_at is null",c=>Add(c,"target",target),t);await Exec("update auth_refresh_tokens set revoked_at=now() where user_id=@target and revoked_at is null",c=>Add(c,"target",target),t);await Exec("update access_review_items set status='Remediated',remediated_at=now(),remediation_detail='Account suspended and sessions revoked' where id=@item",c=>Add(c,"item",itemId),t);await Event(campaignId,itemId,"Remediated","Account suspended and sessions revoked",tenant.BranchId,t);return NoContent();
     }
 

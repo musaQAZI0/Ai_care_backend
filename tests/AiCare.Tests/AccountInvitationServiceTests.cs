@@ -30,6 +30,14 @@ public sealed class AccountInvitationServiceTests
         await Assert.ThrowsAsync<InvalidOperationException>(()=>service.CreateAsync(Guid.NewGuid(),null,Guid.NewGuid(),"admin",new("family@example.com","family@example.com",UserRole.FamilyMember,null,null),"https://app.example.com",default));
     }
 
+    [Fact]
+    public async Task OrganisationAdministratorCannotInvitePlatformBackOfficeAccount()
+    {
+        var service=new AccountInvitationService(new Store(),new Sender());
+        var error=await Assert.ThrowsAsync<InvalidOperationException>(()=>service.CreateAsync(Guid.NewGuid(),null,Guid.NewGuid(),"admin",new("platform@example.com","platform@example.com",UserRole.BackOffice,null,null),"https://app.example.com",default));
+        Assert.Contains("Platform BackOffice",error.Message);
+    }
+
     private sealed class Store:IAccountInvitationStore
     {
         public string? TokenHash;public bool Failed;
