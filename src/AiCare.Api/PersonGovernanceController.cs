@@ -49,7 +49,13 @@ public sealed class PersonGovernanceController : ControllerBase
         if (!await CanManagePerson(serviceUserId)) return Forbid();
         if (string.IsNullOrWhiteSpace(request.FullName) || string.IsNullOrWhiteSpace(request.ContactType))
             return BadRequest(new { message = "Contact type and full name are required." });
+        if (!await ContactTypeAllowed(request.ContactType))
+            return BadRequest(new { message = "Choose an active contact type configured in Administration." });
 
+        var personBranchId = await _context.ServiceUsers.AsNoTracking()
+            .Where(item => item.Id == serviceUserId && item.OrganizationId == _tenant.OrganizationId)
+            .Select(item => item.BranchId)
+            .SingleAsync();
         var id = Guid.NewGuid();
         await ExecuteAsync(
             """
@@ -64,7 +70,7 @@ public sealed class PersonGovernanceController : ControllerBase
             {
                 AddPersonParameters(command, serviceUserId);
                 Add(command, "id", id);
-                Add(command, "branchId", _tenant.BranchId ?? TenantDefaults.BranchId);
+                Add(command, "branchId", personBranchId ?? TenantDefaults.BranchId);
                 Add(command, "contactType", request.ContactType.Trim());
                 Add(command, "fullName", request.FullName.Trim());
                 Add(command, "relationship", request.Relationship?.Trim() ?? "");
@@ -74,7 +80,7 @@ public sealed class PersonGovernanceController : ControllerBase
                 Add(command, "isPrimary", request.IsPrimary);
                 Add(command, "isEmergency", request.IsEmergency);
             });
-        AddAudit("person_contact.created", "PersonContact", id);
+        AddAudit("person_contact.created", "PersonContact", id, personBranchId);
         await _context.SaveChangesAsync();
         return Created($"/api/phase1/service-users/{serviceUserId}/contacts/{id}", new { id });
     }
@@ -83,6 +89,14 @@ public sealed class PersonGovernanceController : ControllerBase
     public async Task<IActionResult> UpdateContact(Guid serviceUserId, Guid id, UpsertPersonContactRequest request)
     {
         if (!await CanManagePerson(serviceUserId)) return Forbid();
+        if (string.IsNullOrWhiteSpace(request.FullName) || string.IsNullOrWhiteSpace(request.ContactType))
+            return BadRequest(new { message = "Contact type and full name are required." });
+        if (!await ContactTypeAllowed(request.ContactType))
+            return BadRequest(new { message = "Choose an active contact type configured in Administration." });
+        var personBranchId = await _context.ServiceUsers.AsNoTracking()
+            .Where(item => item.Id == serviceUserId && item.OrganizationId == _tenant.OrganizationId)
+            .Select(item => item.BranchId)
+            .SingleAsync();
         var affected = await ExecuteAsync(
             """
             update person_contacts set
@@ -105,7 +119,7 @@ public sealed class PersonGovernanceController : ControllerBase
                 Add(command, "isEmergency", request.IsEmergency);
             });
         if (affected == 0) return NotFound();
-        AddAudit("person_contact.updated", "PersonContact", id);
+        AddAudit("person_contact.updated", "PersonContact", id, personBranchId);
         await _context.SaveChangesAsync();
         return NoContent();
     }
@@ -114,11 +128,15 @@ public sealed class PersonGovernanceController : ControllerBase
     public async Task<IActionResult> DeleteContact(Guid serviceUserId, Guid id)
     {
         if (!await CanManagePerson(serviceUserId)) return Forbid();
+        var personBranchId = await _context.ServiceUsers.AsNoTracking()
+            .Where(item => item.Id == serviceUserId && item.OrganizationId == _tenant.OrganizationId)
+            .Select(item => item.BranchId)
+            .SingleAsync();
         var affected = await ExecuteAsync(
             "delete from person_contacts where id=@id and service_user_id=@serviceUserId and organization_id=@organizationId",
             command => { AddPersonParameters(command, serviceUserId); Add(command, "id", id); });
         if (affected == 0) return NotFound();
-        AddAudit("person_contact.deleted", "PersonContact", id);
+        AddAudit("person_contact.deleted", "PersonContact", id, personBranchId);
         await _context.SaveChangesAsync();
         return NoContent();
     }
@@ -308,8 +326,22 @@ public sealed class PersonGovernanceController : ControllerBase
         return await CanAccessPerson(serviceUserId);
     }
 
-    private void AddAudit(string action, string entityType, Guid entityId) =>
-        _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), action, _currentUser.UserName, entityType, entityId, DateTimeOffset.UtcNow, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId));
+    private async Task<bool> ContactTypeAllowed(string value)
+    {
+        var connection = _context.Database.GetDbConnection();
+        if (connection.State != System.Data.ConnectionState.Open) await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            select not exists(select 1 from care_operation_options where organization_id=@organization and kind='ContactType')
+                or exists(select 1 from care_operation_options where organization_id=@organization and kind='ContactType' and active=true and value=@value)
+            """;
+        Add(command, "organization", _tenant.OrganizationId);
+        Add(command, "value", value.Trim());
+        return (bool)(await command.ExecuteScalarAsync() ?? false);
+    }
+
+    private void AddAudit(string action, string entityType, Guid entityId, Guid? targetBranchId = null) =>
+        _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), action, _currentUser.UserName, entityType, entityId, DateTimeOffset.UtcNow, _tenant.OrganizationId, targetBranchId ?? _tenant.BranchId ?? TenantDefaults.BranchId));
 
     private void AddPersonParameters(DbCommand command, Guid serviceUserId)
     {

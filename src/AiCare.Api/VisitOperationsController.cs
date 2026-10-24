@@ -31,9 +31,9 @@ public sealed class VisitOperationsController(CareDbContext db,ITenantContext te
     [Authorize(Roles="CareCoordinator,CareManager,Administrator")]
     public async Task<IActionResult> Progress(Guid id,ProgressEscalationRequest request,CancellationToken token)
     {
-        var action=request.Action.Trim();if(action is not ("Acknowledge" or "Resolve" or "Close"))return BadRequest(new{message="Action must be Acknowledge, Resolve, or Close."});
+        var action=request.Action?.Trim()??"";if(action is not ("Acknowledge" or "Resolve" or "Close"))return BadRequest(new{message="Action must be Acknowledge, Resolve, or Close."});
         var status=action=="Acknowledge"?"Acknowledged":action=="Resolve"?"Resolved":"Closed";var column=action=="Acknowledge"?"acknowledged_at":action=="Resolve"?"resolved_at":"closed_at";
-        var changed=await Execute($"update visit_exceptions set status=@status,{column}=now(),updated_at=now() where id=@id and organization_id=@organization",c=>{Add(c,"id",id);Add(c,"status",status);},token);
+        var changed=await Execute($"update visit_exceptions set status=@status,{column}=now(),updated_at=now() where id=@id and organization_id=@organization and (@organizationWide or branch_id=@branch)",c=>{Add(c,"id",id);Add(c,"status",status);Add(c,"organizationWide",tenant.IsOrganizationWide);},token);
         if(changed==0)return NotFound();await Event(id,action,request.Detail,token);Audit($"visit_exception.{status.ToLowerInvariant()}",id);await db.SaveChangesAsync(token);return NoContent();
     }
 
@@ -54,6 +54,28 @@ public sealed class VisitOperationsController(CareDbContext db,ITenantContext te
         await using var c=await Command("select (select count(*) from visit_exceptions where organization_id=@organization and status not in ('Resolved','Closed')),(select count(*) from visit_exceptions where organization_id=@organization and status not in ('Resolved','Closed') and escalation_due_at<now()),(select count(*) from visit_handovers h where h.organization_id=@organization and h.urgent and not exists(select 1 from handover_acknowledgements a where a.handover_id=h.id and a.user_id=@userId)),(select count(*) from schedule_change_history where organization_id=@organization and changed_at>now()-interval '7 days')",token);Add(c,"userId",user.UserId);await using var reader=await c.ExecuteReaderAsync(token);await reader.ReadAsync(token);return Ok(new{openExceptions=reader.GetInt64(0),overdueEscalations=reader.GetInt64(1),unacknowledgedUrgentHandovers=reader.GetInt64(2),scheduleChangesLast7Days=reader.GetInt64(3)});
     }
 
+    [HttpGet("alerts")]
+    [Authorize(Roles="CareCoordinator,CareManager,Administrator,BackOffice")]
+    public async Task<IActionResult> Alerts([FromQuery] DateTimeOffset? from,[FromQuery] DateTimeOffset? to,CancellationToken token)
+    {
+        var start=from??DateTimeOffset.UtcNow.AddDays(-7);var end=to??DateTimeOffset.UtcNow.AddDays(1);
+        if(end<=start||end-start>TimeSpan.FromDays(62))return BadRequest(new{message="Choose an alert period of no more than 62 days."});
+        var alerts=await db.Database.SqlQuery<VisitAlertResponse>($"""
+            select e.id as "Id",e.visit_id as "VisitId",e.branch_id as "BranchId",e.exception_type as "Type",
+              e.severity as "Severity",e.reason as "Reason",e.status as "Status",e.follow_up_owner as "FollowUpOwner",
+              e.escalation_due_at as "EscalationDueAt",e.created_at as "CreatedAt",v."StartsAt" as "StartsAt",
+              person."FullName" as "ServiceUserName",worker."FullName" as "CareWorkerName",
+              exists(select 1 from visit_escalation_events event where event.visit_exception_id=e.id and event.action='Overdue') as "Escalated"
+            from visit_exceptions e join "Visits" v on v."Id"=e.visit_id
+              join "ServiceUsers" person on person."Id"=e.service_user_id
+              join "CareWorkers" worker on worker."Id"=v."CareWorkerId"
+            where e.organization_id={tenant.OrganizationId} and ({tenant.IsOrganizationWide} or e.branch_id={tenant.BranchId})
+              and e.created_by='System monitoring' and v."StartsAt">={start} and v."StartsAt"<{end}
+            order by case when e.status in ('Open','Acknowledged') then 0 else 1 end,e.escalation_due_at,e.created_at desc
+            """).ToListAsync(token);
+        return Ok(alerts);
+    }
+
     private async Task<Visit?> Visit(Guid id,CancellationToken t)=>await db.Visits.SingleOrDefaultAsync(v=>v.Id==id&&v.OrganizationId==tenant.OrganizationId,t);
     private async Task<List<VisitExceptionResponse>> Exceptions(Guid visit,CancellationToken t)=>await Query<VisitExceptionResponse>("select id,exception_type,severity,reason,immediate_action,notify_manager,follow_up_owner,escalation_due_at,status,created_by,created_at from visit_exceptions where visit_id=@visit and organization_id=@organization order by created_at desc",visit,r=>new(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetBoolean(5),r.GetString(6),r.GetFieldValue<DateTimeOffset>(7),r.GetString(8),r.GetString(9),r.GetFieldValue<DateTimeOffset>(10)),t);
     private async Task<List<HandoverResponse>> Handovers(Guid visit,CancellationToken t)=>await Query<HandoverResponse>("select h.id,h.summary,h.outstanding_actions,h.urgent,h.attachment_reference,h.created_by,h.created_at,exists(select 1 from handover_acknowledgements a where a.handover_id=h.id and a.user_id=@userId) from visit_handovers h where h.visit_id=@visit and h.organization_id=@organization order by h.created_at desc",visit,r=>new(r.GetGuid(0),r.GetString(1),r.GetString(2),r.GetBoolean(3),r.GetString(4),r.GetString(5),r.GetFieldValue<DateTimeOffset>(6),r.GetBoolean(7)),t,true);
@@ -72,3 +94,4 @@ public sealed record CreateHandoverRequest(string Summary,string OutstandingActi
 public sealed record VisitExceptionResponse(Guid Id,string ExceptionType,string Severity,string Reason,string ImmediateAction,bool NotifyManager,string FollowUpOwner,DateTimeOffset EscalationDueAt,string Status,string CreatedBy,DateTimeOffset CreatedAt);
 public sealed record HandoverResponse(Guid Id,string Summary,string OutstandingActions,bool Urgent,string AttachmentReference,string CreatedBy,DateTimeOffset CreatedAt,bool AcknowledgedByCurrentUser);
 public sealed record ScheduleChangeResponse(Guid Id,string ChangeType,string OldValuesJson,string NewValuesJson,string Reason,string ChangedBy,DateTimeOffset ChangedAt);
+public sealed record VisitAlertResponse(Guid Id,Guid VisitId,Guid BranchId,string Type,string Severity,string Reason,string Status,string FollowUpOwner,DateTimeOffset EscalationDueAt,DateTimeOffset CreatedAt,DateTimeOffset StartsAt,string ServiceUserName,string CareWorkerName,bool Escalated);

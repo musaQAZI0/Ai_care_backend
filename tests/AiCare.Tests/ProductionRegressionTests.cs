@@ -11,6 +11,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Xunit;
 using Npgsql;
 
@@ -308,6 +309,7 @@ public sealed class PostgresRegressionCollection;
 
 public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
+    public string? LastServerException { get; private set; }
     private readonly string databaseName = $"aicare_regression_{Guid.NewGuid():N}";
     private string? isolatedConnectionString;
     private bool databaseCreated;
@@ -364,6 +366,11 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>, 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
+        builder.ConfigureLogging(logging =>
+        {
+            logging.ClearProviders();
+            logging.AddProvider(new RegressionErrorLogProvider(error => LastServerException = error));
+        });
         builder.ConfigureAppConfiguration(configuration => configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["ConnectionStrings:DefaultConnection"] = IsolatedConnectionString,
@@ -397,6 +404,28 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>, 
             var worker = services.SingleOrDefault(descriptor => descriptor.ServiceType == typeof(IHostedService) && descriptor.ImplementationType == typeof(IntegrationJobWorker));
             if (worker is not null) services.Remove(worker);
         });
+    }
+
+    private sealed class RegressionErrorLogProvider(Action<string> capture) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName) => new RegressionErrorLogger(capture);
+        public void Dispose() { }
+    }
+
+    private sealed class RegressionErrorLogger(Action<string> capture) : ILogger
+    {
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => EmptyScope.Instance;
+        public bool IsEnabled(LogLevel level) => level >= LogLevel.Error;
+        public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (level >= LogLevel.Error && exception is not null) capture(exception.ToString());
+        }
+    }
+
+    private sealed class EmptyScope : IDisposable
+    {
+        public static readonly EmptyScope Instance = new();
+        public void Dispose() { }
     }
 
     public async Task EnsureClinicalSeedAsync()

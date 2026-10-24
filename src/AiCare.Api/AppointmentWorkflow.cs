@@ -12,6 +12,8 @@ internal static class AppointmentWorkflow
 
     public static DateOnly UkDate(DateTimeOffset instant) => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(instant, UkZone).DateTime);
 
+    public static DateTimeOffset UkStart(DateOnly day) => new(TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified), UkZone));
+
     private static TimeZoneInfo ResolveUkZone()
     {
         try { return TimeZoneInfo.FindSystemTimeZoneById("Europe/London"); }
@@ -66,15 +68,22 @@ internal static class AppointmentWorkflow
 
     public static object Monitoring(Visit visit, AppointmentMonitoring setting, DateTimeOffset now)
     {
+        var state = MonitoringState(visit, setting, now);
+        return new { state, lateMinutes = setting.LateMinutes, missedMinutes = setting.MissedMinutes, shortenedMinutes = setting.ShortenedMinutes, deviceOptions = setting.DeviceOptions ?? ["Mobile app", "Manual entry"] };
+    }
+
+    public static string MonitoringState(Visit visit, AppointmentMonitoring setting, DateTimeOffset now)
+    {
         var scheduledEnd = visit.StartsAt.AddMinutes(visit.DurationMinutes);
         var state = visit.Status == VisitStatus.Cancelled ? "Cancelled" :
             visit.Status == VisitStatus.Missed ? "Missed visit" :
             visit.CheckedInAt is null && now >= visit.StartsAt.AddMinutes(setting.MissedMinutes) ? "Missed check-in" :
+            visit.CheckedInAt is null && now >= visit.StartsAt.AddMinutes(setting.LateMinutes) ? "Late check-in" :
             visit.CheckedInAt is null ? "Awaiting check-in" :
-            visit.CheckedInAt > visit.StartsAt.AddMinutes(setting.LateMinutes) ? "Late check-in" :
             visit.CheckedOutAt is not null && (visit.CheckedOutAt.Value - visit.CheckedInAt.Value).TotalMinutes < visit.DurationMinutes - setting.ShortenedMinutes ? "Shortened care" :
-            visit.CheckedOutAt is null && now > scheduledEnd.AddMinutes(setting.MissedMinutes) ? "Missing check-out" : "On time";
-        return new { state, lateMinutes = setting.LateMinutes, missedMinutes = setting.MissedMinutes, shortenedMinutes = setting.ShortenedMinutes, deviceOptions = setting.DeviceOptions ?? ["Mobile app", "Manual entry"] };
+            visit.CheckedOutAt is null && now > scheduledEnd.AddMinutes(setting.MissedMinutes) ? "Missing check-out" :
+            visit.CheckedInAt > visit.StartsAt.AddMinutes(setting.LateMinutes) ? "Late check-in" : "On time";
+        return state;
     }
 
     private static void Add(System.Data.Common.DbCommand command, string name, object value)

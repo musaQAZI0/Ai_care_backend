@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using AiCare.Application.Email;
 using Microsoft.Extensions.Configuration;
 
@@ -10,11 +11,28 @@ namespace AiCare.Infrastructure.Email;
 public interface IResendEmailClient
 {
     Task<string> SendAsync(EmailJobV1 job, CancellationToken cancellationToken);
+    Task<string> SendMessageAsync(ResendMessage message, CancellationToken cancellationToken);
 }
+
+public sealed record ResendAttachment(string FileName, byte[] Content);
+public sealed record ResendMessage(string RecipientEmail, string Subject, string Text, string IdempotencyKey,
+    string? RecipientName = null, ResendAttachment? Attachment = null);
 
 public sealed class ResendEmailClient(HttpClient httpClient, IConfiguration configuration) : IResendEmailClient
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
     public async Task<string> SendAsync(EmailJobV1 job, CancellationToken cancellationToken)
+    {
+        return await SendMessageAsync(new ResendMessage(job.RecipientEmail,
+            job.EmailType == "account-invitation" ? $"Activate your AiCare {job.Role} account" : "Activate your AiCare Family Portal account",
+            BuildBody(job), job.IdempotencyKey, job.RecipientName), cancellationToken);
+    }
+
+    public async Task<string> SendMessageAsync(ResendMessage message, CancellationToken cancellationToken)
     {
         var apiKey = Required("Resend:ApiKey");
         var fromAddress = Required("Resend:FromAddress");
@@ -23,15 +41,19 @@ public sealed class ResendEmailClient(HttpClient httpClient, IConfiguration conf
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.resend.com/emails");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        request.Headers.TryAddWithoutValidation("Idempotency-Key", job.IdempotencyKey);
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", message.IdempotencyKey);
         request.Content = JsonContent.Create(new
         {
             from = $"{fromName} <{fromAddress}>",
-            to = new[] { $"{job.RecipientName} <{job.RecipientEmail}>" },
+            to = new[] { string.IsNullOrWhiteSpace(message.RecipientName) ? message.RecipientEmail : $"{message.RecipientName} <{message.RecipientEmail}>" },
             reply_to = string.IsNullOrWhiteSpace(replyTo) ? null : replyTo,
-            subject = job.EmailType == "account-invitation" ? $"Activate your AiCare {job.Role} account" : "Activate your AiCare Family Portal account",
-            text = BuildBody(job)
-        });
+            subject = message.Subject,
+            text = message.Text,
+            attachments = message.Attachment is null ? null : new[]
+            {
+                new { filename = message.Attachment.FileName, content = Convert.ToBase64String(message.Attachment.Content) }
+            }
+        }, options: JsonOptions);
 
         using var response = await httpClient.SendAsync(request, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);

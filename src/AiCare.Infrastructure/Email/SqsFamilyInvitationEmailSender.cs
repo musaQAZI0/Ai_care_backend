@@ -11,21 +11,18 @@ namespace AiCare.Infrastructure.Email;
 public sealed class SqsFamilyInvitationEmailSender(
     IAmazonSQS sqs,
     IConfiguration configuration,
+    IResendEmailClient resend,
     ILogger<SqsFamilyInvitationEmailSender> logger) : IFamilyInvitationEmailSender
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task SendInvitationAsync(FamilyInvitationEmailRequest request, CancellationToken cancellationToken)
     {
-        if (!configuration.GetValue<bool>("EmailQueue:Enabled"))
+        if (!configuration.GetValue<bool>("Email:Enabled"))
         {
-            logger.LogWarning("Family invitation email queue is disabled.");
+            logger.LogWarning("Family invitation email is disabled.");
             return;
         }
-
-        var queueUrl = configuration["EmailQueue:QueueUrl"];
-        if (string.IsNullOrWhiteSpace(queueUrl))
-            throw new InvalidOperationException("EmailQueue:QueueUrl must be configured when the email queue is enabled.");
 
         var job = new EmailJobV1(
             1,
@@ -40,6 +37,16 @@ public sealed class SqsFamilyInvitationEmailSender(
             DateTimeOffset.UtcNow,
             request.InvitationId.ToString("N"));
 
+        if (!configuration.GetValue<bool>("EmailQueue:Enabled"))
+        {
+            var providerId = await resend.SendAsync(job, cancellationToken);
+            logger.LogInformation("Resend accepted family invitation {InvitationId} as {ProviderMessageId}.", request.InvitationId, providerId);
+            return;
+        }
+
+        var queueUrl = configuration["EmailQueue:QueueUrl"];
+        if (string.IsNullOrWhiteSpace(queueUrl))
+            throw new InvalidOperationException("EmailQueue:QueueUrl must be configured when the email queue is enabled.");
         await sqs.SendMessageAsync(new SendMessageRequest
         {
             QueueUrl = queueUrl,

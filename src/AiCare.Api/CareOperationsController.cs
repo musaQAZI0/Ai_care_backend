@@ -19,8 +19,8 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
     public async Task<IActionResult> RosterAvailability([FromQuery] DateOnly day, CancellationToken token)
     {
         if (day == default) return BadRequest(new { message = "Select a roster day." });
-        var start = new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
-        var end = start.AddDays(1);
+        var start = AppointmentWorkflow.UkStart(day);
+        var end = AppointmentWorkflow.UkStart(day.AddDays(1));
         var rules = await Rows("""
             select care_worker_id,start_time,end_time,is_available from worker_availability_rules
             where organization_id=@organization and (@organizationWide or branch_id=@branch)
@@ -55,11 +55,17 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
         var start = from ?? DateTimeOffset.UtcNow.AddDays(-30); var end = to ?? DateTimeOffset.UtcNow.AddDays(30);
         if (end <= start || end - start > TimeSpan.FromDays(366)) return BadRequest(new { message = "Choose a valid diary period of no more than one year." });
         return Ok(await Rows("""
-            select d.id,d.category,d.priority,d.status,d.subject,d.detail,d.event_at,d.service_user_id,d.care_worker_id,
-                   coalesce(s."FullName",'') as service_user_name,coalesce(w."FullName",'') as care_worker_name,d.created_by,d.created_at,d.updated_by,d.updated_at
+            select d.id,d.category,d.priority,d.status,d.subject,d.detail,d.event_at,d.service_user_id,d.care_worker_id,d.owner_id,
+                   coalesce(s."FullName",'') as service_user_name,coalesce(w."FullName",'') as care_worker_name,
+                   coalesce(owner_user."UserName",'') as owner_name,
+                   coalesce((select array_agg(recipient."UserName"::text) from operational_diary_recipients dr
+                     join "AppUsers" recipient on recipient."Id"=dr.recipient_user_id and recipient."OrganizationId"=d.organization_id
+                     where dr.diary_entry_id=d.id and dr.organization_id=d.organization_id),array[]::text[]) as recipient_names,
+                   d.created_by,d.created_at,d.updated_by,d.updated_at
             from operational_diary_entries d
             left join "ServiceUsers" s on s."Id"=d.service_user_id and s."OrganizationId"=d.organization_id
             left join "CareWorkers" w on w."Id"=d.care_worker_id and w."OrganizationId"=d.organization_id
+            left join "AppUsers" owner_user on owner_user."Id"=d.owner_id and owner_user."OrganizationId"=d.organization_id
             where d.organization_id=@organization and (@organizationWide or d.branch_id=@branch)
               and d.event_at>=@from and d.event_at<=@to and (@category='' or d.category=@category) and (@status='' or d.status=@status)
               and (@priority='' or d.priority=@priority) and (@person is null or d.service_user_id=@person)
@@ -114,7 +120,7 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
         var start=from??DateTimeOffset.UtcNow.AddMonths(-1);var end=to??DateTimeOffset.UtcNow.AddMonths(6);
         if(end<=start||end-start>TimeSpan.FromDays(1095))return BadRequest(new{message="Choose a valid training period of no more than three years."});
         return Ok(await Rows("""
-            select b.id,b.course_id,c.code,c.title,c.category,c.provider,b.care_worker_id,w."FullName" as care_worker_name,b.scheduled_at,b.status,b.confirmation_status,b.completed_at,b.expires_at,c.is_mandatory
+            select b.id,b.course_id,c.code,c.title,c.category,c.provider,b.care_worker_id,w."FullName" as care_worker_name,b.scheduled_at,b.status,b.confirmation_status,b.completed_at,b.expires_at,c.is_mandatory,b.booked_by,b.created_at,b.updated_by,b.updated_at
             from worker_training_bookings b join training_catalogue_courses c on c.id=b.course_id join "CareWorkers" w on w."Id"=b.care_worker_id
             where b.organization_id=@organization and (@organizationWide or b.branch_id=@branch) and b.scheduled_at>=@from and b.scheduled_at<=@to
             order by b.scheduled_at,c.title

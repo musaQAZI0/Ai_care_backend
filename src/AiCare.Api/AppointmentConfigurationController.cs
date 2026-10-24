@@ -30,6 +30,7 @@ public sealed record RunRequest(Guid BranchId, string Name, bool Active = true);
 public sealed record BreakRequest(Guid BranchId, Guid CareWorkerId, DateTimeOffset StartsAt, DateTimeOffset EndsAt, string Note);
 public sealed record RunAssignmentRequest(Guid RunId);
 public sealed record RecommendationRequest(Guid BranchId, Guid ServiceUserId, DateTimeOffset StartsAt, int DurationMinutes, string RequiredSkills);
+public sealed record RecommendationAbsence(Guid CareWorkerId, DateTimeOffset StartsAt, DateTimeOffset EndsAt);
 
 internal static class AppointmentConfigurationStore
 {
@@ -199,19 +200,33 @@ public sealed class AppointmentConfigurationController(CareDbContext db, ITenant
     {
         if (!BranchAllowed(request.BranchId)) return NotFound();
         if (request.DurationMinutes is < 1 or > 1440 || request.StartsAt == default) return BadRequest(new { message = "Choose a start time and duration." });
-        if (!db.ServiceUsers.Any(x => x.Id == request.ServiceUserId && x.OrganizationId == tenant.OrganizationId && x.BranchId == request.BranchId)) return NotFound();
+        var client = db.ServiceUsers.AsNoTracking().SingleOrDefault(x => x.Id == request.ServiceUserId && x.OrganizationId == tenant.OrganizationId && x.BranchId == request.BranchId);
+        if (client is null) return NotFound();
         var weights = AppointmentConfigurationStore.Load(db, tenant.OrganizationId, request.BranchId).RecommendationWeights;
         var workers = db.CareWorkers.AsNoTracking().Where(x => x.OrganizationId == tenant.OrganizationId && x.BranchId == request.BranchId).ToList();
+        var travelBuffer = db.Database.SqlQuery<int>($"""select coalesce(travel_buffer_minutes,0) as "Value" from scheduling_policies where organization_id={tenant.OrganizationId} and branch_id={request.BranchId}""").SingleOrDefault();
+        var absences = db.Database.SqlQuery<RecommendationAbsence>($"""
+            select care_worker_id as "CareWorkerId",starts_at as "StartsAt",ends_at as "EndsAt"
+            from worker_absences where organization_id={tenant.OrganizationId} and branch_id={request.BranchId}
+              and status in ('Approved','Confirmed') and starts_at<{request.StartsAt.AddMinutes(request.DurationMinutes)} and ends_at>{request.StartsAt}
+            """).ToList();
         var results = workers.Select(worker =>
         {
             var assigned = AppointmentWorkflow.AssignedVisitIds(db, tenant.OrganizationId, request.BranchId, worker.Id);
             var visits = db.Visits.AsNoTracking().Where(x => x.OrganizationId == tenant.OrganizationId && x.BranchId == request.BranchId && (x.CareWorkerId == worker.Id || assigned.Contains(x.Id)) && x.Status != VisitStatus.Cancelled).ToList();
-            var available = !visits.Any(x => request.StartsAt < x.StartsAt.AddMinutes(x.DurationMinutes) && request.StartsAt.AddMinutes(request.DurationMinutes) > x.StartsAt) && !AppointmentConfigurationStore.HasBreak(db, tenant.OrganizationId, request.BranchId, worker.Id, request.StartsAt, request.DurationMinutes);
+            var scheduledEnd = request.StartsAt.AddMinutes(request.DurationMinutes);
+            var travelReady = !visits.Any(x =>
+                x.ServiceUserId != request.ServiceUserId &&
+                (x.StartsAt.AddMinutes(x.DurationMinutes) <= request.StartsAt && request.StartsAt - x.StartsAt.AddMinutes(x.DurationMinutes) < TimeSpan.FromMinutes(travelBuffer)
+                || x.StartsAt >= scheduledEnd && x.StartsAt - scheduledEnd < TimeSpan.FromMinutes(travelBuffer)));
+            var absent = absences.Any(x => x.CareWorkerId == worker.Id);
+            var available = !absent && travelReady && !visits.Any(x => request.StartsAt < x.StartsAt.AddMinutes(x.DurationMinutes) && scheduledEnd > x.StartsAt) && !AppointmentConfigurationStore.HasBreak(db, tenant.OrganizationId, request.BranchId, worker.Id, request.StartsAt, request.DurationMinutes);
             var skills = string.IsNullOrWhiteSpace(request.RequiredSkills) || request.RequiredSkills.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).All(skill => worker.Specialization.Contains(skill, StringComparison.OrdinalIgnoreCase));
             var continuity = visits.Any(x => x.ServiceUserId == request.ServiceUserId);
+            var preferred = !string.IsNullOrWhiteSpace(client.PreferredCareWorker) && client.PreferredCareWorker.Trim().Equals(worker.FullName, StringComparison.OrdinalIgnoreCase);
             var dailyCount = visits.Count(x => AppointmentWorkflow.UkDate(x.StartsAt) == AppointmentWorkflow.UkDate(request.StartsAt));
-            var score = (available ? weights.Availability : 0) + (skills ? weights.Skills : 0) + (continuity ? weights.Continuity : 0) + (dailyCount == 0 ? weights.Workload : Math.Max(0, weights.Workload - dailyCount * 2));
-            return new { workerId = worker.Id, workerName = worker.FullName, score, available, skillsMatched = skills, continuity, visitsThatDay = dailyCount };
+            var score = (available ? weights.Availability : 0) + (skills ? weights.Skills : 0) + (preferred ? weights.Continuity : continuity ? weights.Continuity / 2 : 0) + (dailyCount == 0 ? weights.Workload : Math.Max(0, weights.Workload - dailyCount * 2));
+            return new { workerId = worker.Id, workerName = worker.FullName, score, available, skillsMatched = skills, continuity, preferred, travelReady, absent, visitsThatDay = dailyCount };
         }).OrderByDescending(x => x.available).ThenByDescending(x => x.score).ToList();
         return Ok(results);
     }

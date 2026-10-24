@@ -1,11 +1,11 @@
 using System.Data;
 using System.Data.Common;
-using System.Net;
 using System.Net.Mail;
 using System.Security.Cryptography;
 using AiCare.Application;
 using AiCare.Domain;
 using AiCare.Infrastructure;
+using AiCare.Infrastructure.Email;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -21,6 +21,7 @@ public sealed class InvoiceDocumentsController(
     ITenantContext tenant,
     ICurrentUserContext user,
     IConfiguration configuration,
+    IResendEmailClient resend,
     ILogger<InvoiceDocumentsController> logger) : ControllerBase
 {
     [HttpGet("invoice-profile")]
@@ -157,18 +158,17 @@ public sealed class InvoiceDocumentsController(
     {
         if(string.IsNullOrWhiteSpace(request.RecipientEmail)||!MailAddress.TryCreate(request.RecipientEmail.Trim(),out var recipient))return BadRequest(new{message="A valid recipient email is required."});
         var document=await Load(id,token);if(document is null)return NotFound();if(document.Status is not ("Issued" or "Part paid" or "Paid" or "Overdue" or "Credited"))return Conflict(new{message="Only an issued invoice can be delivered."});
-        if(!configuration.GetValue<bool>("Email:Enabled"))return StatusCode(StatusCodes.Status503ServiceUnavailable,new{message="Invoice email delivery is not configured."});
+        if(!configuration.GetValue<bool>("Email:Enabled")||string.IsNullOrWhiteSpace(configuration["Resend:ApiKey"])||string.IsNullOrWhiteSpace(configuration["Resend:FromAddress"]))return StatusCode(StatusCodes.Status503ServiceUnavailable,new{message="Invoice email delivery is not configured."});
         var bytes=await GetOrCreatePdf(id,document,token);var deliveryId=Guid.NewGuid();
         try
         {
-            using var message=new MailMessage{From=new MailAddress(Required("Email:FromAddress"),configuration["Email:FromName"]??"AiCare"),Subject=$"Invoice {document.Number}",Body=$"Please find invoice {document.Number} attached. Amount due: {document.Currency} {Math.Max(0,document.Gross-document.Paid-document.Credits):0.00}.",IsBodyHtml=false};message.To.Add(recipient);var replyTo=configuration["Email:ReplyToAddress"];if(!string.IsNullOrWhiteSpace(replyTo))message.ReplyToList.Add(new MailAddress(replyTo));message.Attachments.Add(new Attachment(new MemoryStream(bytes),$"{document.Number}.pdf","application/pdf"));
-            using var smtp=new SmtpClient(Required("Email:SmtpHost"),configuration.GetValue<int?>("Email:SmtpPort")??587){EnableSsl=configuration.GetValue<bool?>("Email:EnableSsl")??true,UseDefaultCredentials=false,Credentials=new NetworkCredential(Required("Email:Username"),Required("Email:Password")),DeliveryMethod=SmtpDeliveryMethod.Network,Timeout=30_000};
-            await smtp.SendMailAsync(message,token);
-            await RecordDelivery(deliveryId,id,recipient.Address,"Delivered","",DateTimeOffset.UtcNow,token);Audit("finance.invoice_delivered",id);await db.SaveChangesAsync(token);logger.LogInformation("Invoice {InvoiceId} delivered to {RecipientDomain}.",id,Domain(recipient.Address));return Accepted(new{id=deliveryId,status="Delivered"});
+            var body=$"Please find invoice {document.Number} attached. Amount due: {document.Currency} {Math.Max(0,document.Gross-document.Paid-document.Credits):0.00}.";
+            var providerId=await resend.SendMessageAsync(new ResendMessage(recipient.Address,$"Invoice {document.Number}",body,$"invoice:{deliveryId:N}",Attachment:new ResendAttachment($"{document.Number}.pdf",bytes)),token);
+            await RecordDelivery(deliveryId,id,recipient.Address,"Accepted",$"Resend message ID: {providerId}",null,token);Audit("finance.invoice_delivery_accepted",id);await db.SaveChangesAsync(token);logger.LogInformation("Resend accepted invoice {InvoiceId} for {RecipientDomain} as {ProviderMessageId}.",id,Domain(recipient.Address),providerId);return Accepted(new{id=deliveryId,status="Accepted"});
         }
         catch(Exception ex)
         {
-            await RecordDelivery(deliveryId,id,recipient.Address,"Failed","SMTP delivery failed.",null,token);Audit("finance.invoice_delivery_failed",id);await db.SaveChangesAsync(token);logger.LogError(ex,"Invoice {InvoiceId} delivery failed.",id);return StatusCode(StatusCodes.Status502BadGateway,new{message="Invoice delivery failed."});
+            await RecordDelivery(deliveryId,id,recipient.Address,"Failed","Resend request failed.",null,token);Audit("finance.invoice_delivery_failed",id);await db.SaveChangesAsync(token);logger.LogError(ex,"Invoice {InvoiceId} delivery failed.",id);return StatusCode(StatusCodes.Status502BadGateway,new{message="Invoice delivery failed."});
         }
     }
 
@@ -239,7 +239,6 @@ public sealed class InvoiceDocumentsController(
     private async Task<DbCommand> Command(string sql,CancellationToken token){var connection=db.Database.GetDbConnection();if(connection.State!=ConnectionState.Open)await connection.OpenAsync(token);var command=connection.CreateCommand();command.Transaction=db.Database.CurrentTransaction?.GetDbTransaction();command.CommandText=sql;Add(command,"organization",tenant.OrganizationId);Add(command,"branch",tenant.BranchId??TenantDefaults.BranchId);Add(command,"actor",user.UserName);return command;}
     private static void Add(DbCommand command,string name,object? value){if(command.Parameters.Contains(name))return;var p=command.CreateParameter();p.ParameterName=name;p.Value=value??DBNull.Value;command.Parameters.Add(p);}
     private void Audit(string action,Guid? id)=>db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),action,user.UserName,"Invoice",id,DateTimeOffset.UtcNow,tenant.OrganizationId,tenant.BranchId??TenantDefaults.BranchId));
-    private string Required(string key)=>string.IsNullOrWhiteSpace(configuration[key])?throw new InvalidOperationException($"{key} is required."):configuration[key]!;
     private static string Domain(string email){var index=email.LastIndexOf('@');return index>=0?email[index..]:"unknown-domain";}
 }
 

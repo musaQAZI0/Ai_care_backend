@@ -23,14 +23,16 @@ public class AuthController : ControllerBase
     private readonly IWebHostEnvironment _environment;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AuthController> _logger;
+    private readonly PasswordResetEmailSender _passwordResetEmail;
 
-    public AuthController(CareDbContext context, IOptions<JwtOptions> jwtOptions, IWebHostEnvironment environment, IConfiguration configuration, ILogger<AuthController> logger)
+    public AuthController(CareDbContext context, IOptions<JwtOptions> jwtOptions, IWebHostEnvironment environment, IConfiguration configuration, ILogger<AuthController> logger, PasswordResetEmailSender passwordResetEmail)
     {
         _context = context;
         _jwtOptions = jwtOptions.Value;
         _environment = environment;
         _configuration = configuration;
         _logger = logger;
+        _passwordResetEmail = passwordResetEmail;
     }
 
     [HttpPost("login")]
@@ -40,7 +42,10 @@ public class AuthController : ControllerBase
         try
         {
             if (user is not null && await IsLockedOut(user.Id, cancellationToken))
+            {
+                await RecordLoginAttempt(user, "Locked", cancellationToken);
                 return StatusCode(423, new { message = "Account temporarily locked after repeated failed sign-in attempts." });
+            }
         }
         catch (AuthenticationStateUnavailableException exception)
         {
@@ -50,7 +55,11 @@ public class AuthController : ControllerBase
 
         if (user is null || !PasswordHasher.VerifyPassword(request.Password, user.PasswordHash))
         {
-            if (user is not null) await RecordFailedLogin(user.Id, cancellationToken);
+            if (user is not null)
+            {
+                await RecordFailedLogin(user.Id, cancellationToken);
+                await RecordLoginAttempt(user, "InvalidPassword", cancellationToken);
+            }
             return Unauthorized(new { message = "Invalid credentials." });
         }
 
@@ -69,13 +78,18 @@ public class AuthController : ControllerBase
         if (mfaRequired)
         {
             await ClearFailedLogins(user.Id, cancellationToken);
+            await RecordLoginAttempt(user, "MfaEnrollmentRequired", cancellationToken);
             return Ok(new { token = CreateJwtToken(user, true), refreshToken = "", expiresInMinutes = 10, mfaEnrollmentRequired = true });
         }
         if (mfa.Enabled && mfa.LockedUntil > DateTimeOffset.UtcNow)
+        {
+            await RecordLoginAttempt(user, "MfaLocked", cancellationToken);
             return StatusCode(423, new { message = "MFA verification is temporarily locked." });
+        }
         if (mfa.Enabled && !VerifyTotp(mfa.Secret, request.MfaCode) && !await ConsumeRecoveryCode(user.Id, request.MfaCode, cancellationToken))
         {
             await RecordFailedMfa(user, cancellationToken);
+            await RecordLoginAttempt(user, "MfaFailed", cancellationToken);
             return Unauthorized(new { message = "A valid authenticator or recovery code is required.", mfaRequired = true });
         }
 
@@ -85,6 +99,7 @@ public class AuthController : ControllerBase
         var refreshToken = CreateOpaqueToken();
         await StoreRefreshToken(user.Id, refreshToken, null, cancellationToken, sessionId, familyId, null);
         var token = CreateJwtToken(user, false, sessionId);
+        await RecordLoginAttempt(user, "Succeeded", cancellationToken);
         return Ok(new { token, refreshToken, expiresInMinutes = _jwtOptions.TokenLifetimeMinutes, sessionId });
     }
 
@@ -200,16 +215,30 @@ public class AuthController : ControllerBase
     [HttpPost("forgot-password")]
     public async Task<IActionResult> ForgotPassword(ForgotPasswordRequest request, CancellationToken cancellationToken)
     {
+        var local = _environment.IsDevelopment() || _environment.IsEnvironment("Testing");
+        if (!local && !_passwordResetEmail.IsConfigured)
+            return StatusCode(503, new { message = "Password reset email is not configured. Contact your administrator." });
         var user = await _context.AppUsers.SingleOrDefaultAsync(u => u.Email == request.Email && u.IsActive, cancellationToken);
         string? developmentToken = null;
         if (user is not null)
         {
             var resetToken = CreateOpaqueToken();
-            if (await StorePasswordResetToken(user.Id, resetToken, cancellationToken) && (_environment.IsDevelopment() || _environment.IsEnvironment("Testing"))) developmentToken = resetToken;
+            if (await StorePasswordResetToken(user.Id, resetToken, cancellationToken))
+            {
+                if (local) developmentToken = resetToken;
+                else
+                {
+                    try { await _passwordResetEmail.SendAsync(user.Email, resetToken, cancellationToken); }
+                    catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or FormatException or System.Text.Json.JsonException)
+                    {
+                        _logger.LogError(exception, "Password reset email delivery failed for account {AccountId}.", user.Id);
+                    }
+                }
+            }
             _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "auth.password_reset_requested", user.UserName, nameof(AppUser), user.Id, DateTimeOffset.UtcNow, user.OrganizationId, user.BranchId));
             await _context.SaveChangesAsync(cancellationToken);
         }
-        return Accepted(new { message = "If the email exists, a password reset request has been created.", developmentResetToken = developmentToken });
+        return Accepted(new { message = "If the account exists and email delivery is available, a reset link will be sent.", developmentResetToken = developmentToken });
     }
 
     [HttpPost("reset-password")]
@@ -257,6 +286,26 @@ public class AuthController : ControllerBase
 
     private async Task<bool> IsLockedOut(Guid userId,CancellationToken ct){try{var row=await QuerySecurity(userId,ct);return row.LockoutUntil>DateTimeOffset.UtcNow;}catch(Exception ex){throw new AuthenticationStateUnavailableException("Lockout state unavailable.",ex);}}
     private async Task RecordFailedLogin(Guid userId,CancellationToken ct){try{await Execute("insert into auth_user_security(user_id,failed_attempts,updated_at) values(@id,1,now()) on conflict(user_id) do update set failed_attempts=auth_user_security.failed_attempts+1,lockout_until=case when auth_user_security.failed_attempts+1>=5 then now()+interval '15 minutes' else auth_user_security.lockout_until end,updated_at=now()",c=>Add(c,"id",userId),ct);}catch{}}
+    private async Task RecordLoginAttempt(AppUser user, string outcome, CancellationToken ct)
+    {
+        if (!_context.Database.IsNpgsql()) return;
+        try
+        {
+            await Execute("insert into auth_login_attempts(id,organization_id,user_id,branch_id,outcome,ip_address) values(@id,@organization,@user,@branch,@outcome,@ip)", command =>
+            {
+                Add(command, "id", Guid.NewGuid());
+                Add(command, "organization", user.OrganizationId ?? TenantDefaults.OrganizationId);
+                Add(command, "user", user.Id);
+                Add(command, "branch", user.BranchId);
+                Add(command, "outcome", outcome);
+                Add(command, "ip", HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+            }, ct);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Login attempt history could not be recorded for account {AccountId}.", user.Id);
+        }
+    }
     private async Task ClearFailedLogins(Guid userId,CancellationToken ct){try{await Execute("insert into auth_user_security(user_id,failed_attempts,lockout_until,updated_at) values(@id,0,null,now()) on conflict(user_id) do update set failed_attempts=0,lockout_until=null,updated_at=now()",c=>Add(c,"id",userId),ct);}catch{}}
     private async Task<(bool Enabled,string Secret,DateTimeOffset? LockedUntil)> GetMfaState(Guid userId,CancellationToken ct){try{var x=await QuerySecurity(userId,ct);return(x.MfaEnabled,string.IsNullOrWhiteSpace(x.MfaSecret)?"":MfaSecurity.Unprotect(x.MfaSecret,_jwtOptions.SigningKey),x.MfaLockedUntil);}catch(Exception ex){throw new AuthenticationStateUnavailableException("MFA state unavailable.",ex);}}
     private async Task<(int FailedAttempts,DateTimeOffset? LockoutUntil,string? MfaSecret,bool MfaEnabled,DateTimeOffset? MfaLockedUntil)> QuerySecurity(Guid id,CancellationToken ct){if(!_context.Database.IsNpgsql() && _configuration.GetValue<bool>("Authentication:AllowLegacyProviderFallback"))return(0,null,null,false,null);var connection=_context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(ct);try{await using var cmd=connection.CreateCommand();cmd.CommandText="select failed_attempts,lockout_until,mfa_secret,mfa_enabled,mfa_locked_until from auth_user_security where user_id=@id";Add(cmd,"id",id);await using var r=await cmd.ExecuteReaderAsync(ct);if(!await r.ReadAsync(ct))return(0,null,null,false,null);return(r.GetInt32(0),r.IsDBNull(1)?null:new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(1),DateTimeKind.Utc)),r.IsDBNull(2)?null:r.GetString(2),r.GetBoolean(3),r.IsDBNull(4)?null:new DateTimeOffset(DateTime.SpecifyKind(r.GetDateTime(4),DateTimeKind.Utc)));}finally{if(opened)await connection.CloseAsync();}}

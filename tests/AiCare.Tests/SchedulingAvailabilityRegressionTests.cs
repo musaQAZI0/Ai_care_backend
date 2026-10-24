@@ -64,6 +64,44 @@ public sealed class SchedulingAvailabilityRegressionTests : IClassFixture<Postgr
     }
 
     [Fact]
+    public async Task CancelledVisitsReleaseTheSlotButCreateCannotUseAnExcludedVisitIdToBypassConflicts()
+    {
+        await _factory.EnsureClinicalSeedAsync();
+        var workerId = Guid.NewGuid();
+        var personId = Guid.NewGuid();
+        var cancelledId = Guid.NewGuid();
+        var activeId = Guid.NewGuid();
+        var userName = $"scheduling.cancelled.{Guid.NewGuid():N}";
+        var startsAt = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(42).AddHours(10), TimeSpan.Zero);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.CareWorkers.Add(new CareWorker(workerId, "Cancelled Slot Worker", "Personal care", "Flexible", 0, 0, "Valid", "Compliant", "10 miles", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.ServiceUsers.Add(new ServiceUser(personId, "Cancelled Slot Person", new DateOnly(1970, 1, 1), "+10000000009", "Personal care", "Regression contact", "", RiskLevel.Low, "Onboarded", "Regression address", "None", "None", "Private", "Regression", "", "Independent", "Independent", "Verbal", "None", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.AppUsers.Add(new AppUser(Guid.NewGuid(), userName, $"{userName}@aicare.local", PasswordHasher.HashPassword("Admin123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, null, null));
+            db.Visits.Add(new Visit(cancelledId, personId, workerId, startsAt, "Cancelled care", 30, "Personal care", VisitStatus.Cancelled, null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.Visits.Add(new Visit(activeId, personId, workerId, startsAt.AddHours(2), "Active care", 30, "Personal care", VisitStatus.Scheduled, null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password = "Admin123!", mfaCode = (string?)null });
+        login.EnsureSuccessStatusCode();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await login.Content.ReadFromJsonAsync<LoginResponse>())!.Token);
+
+        object Request(DateTimeOffset start, Guid? excluded = null) => new { serviceUserId = personId, careWorkerId = workerId, startsAt = start, visitType = "Personal care", durationMinutes = 30, requiredSkills = "Personal care", excludeVisitId = excluded };
+        var available = await client.PostAsJsonAsync("/api/phase1/visits/conflicts", Request(startsAt));
+        Assert.Equal(HttpStatusCode.OK, available.StatusCode);
+        Assert.Contains("\"hasConflicts\":false", await available.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Created, (await client.PostAsJsonAsync("/api/phase1/visits", Request(startsAt))).StatusCode);
+
+        var bypass = await client.PostAsJsonAsync("/api/phase1/visits", Request(startsAt.AddHours(2), activeId));
+        Assert.Equal(HttpStatusCode.BadRequest, bypass.StatusCode);
+        Assert.Contains("conflicting visit", await bypass.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task StructuredAvailabilityIsExplainedAndEnforcedForVisitCreation()
     {
         await _factory.EnsureClinicalSeedAsync();

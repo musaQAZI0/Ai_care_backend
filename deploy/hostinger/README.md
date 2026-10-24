@@ -1,12 +1,12 @@
 # AiCare Hostinger VPS production runbook
 
-This package is designed for a Hostinger VPS with Docker Compose. It keeps PostgreSQL private on the Docker network, serves the React app and API behind Nginx, uses Supabase for private care-document storage, and supports authenticated SMTP such as Hostinger Email.
+This package is designed for a Hostinger VPS with Docker Compose. It keeps PostgreSQL private on the Docker network, serves the React app and API behind Nginx, uses Supabase for private care-document storage, and sends transactional email through the Resend HTTPS API.
 
 ## 1. Prerequisites
 
 - Hostinger VPS with Docker Engine and Docker Compose plugin
 - DNS A records for the app domain and API subdomain pointing to the VPS
-- Hostinger Email mailbox (for example `no-reply@care.example.com`) or another authenticated SMTP account
+- Verified sending domain and send-only API key in Resend
 - Existing Supabase private `care-documents` bucket and service-role credentials
 - Firewall allowing only SSH, HTTP 80 and HTTPS 443 from the public internet
 
@@ -122,9 +122,9 @@ A restore is deliberately guarded:
 
 Run restore drills on a non-production database first. After a restore, verify both health endpoints and the critical UAT flows before reopening traffic.
 
-## 8. SMTP validation
+## 8. Resend email validation
 
-Production startup fails closed unless SMTP is enabled and configured. Send a real Family Portal invitation to an approved test mailbox and confirm:
+Production startup fails closed unless Resend API email is enabled and configured. Set `Email__Enabled=true`, `Resend__ApiKey`, `Resend__FromAddress`, and `FamilyPortal__FrontendBaseUrl` in the backend environment. Allow backend HTTPS traffic to `api.resend.com`. Send a real Family Portal invitation, password reset, and invoice PDF to approved test mailboxes and confirm:
 
 - sender/domain authentication is valid (SPF, DKIM and DMARC at DNS level)
 - the activation link uses the production HTTPS domain
@@ -181,7 +181,7 @@ Do not call the release production-complete until all of these are true:
 - Playwright critical journeys green
 - database migration completed successfully
 - `/health/live` and `/health/ready` green on the VPS
-- SMTP invitation delivered and activated
+- Resend invitation delivered and activated
 - Supabase private upload/download/delete verified from the VPS
 - all four role UAT checklists pass
 - negative tenant/permission tests pass

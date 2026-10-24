@@ -29,10 +29,8 @@ public sealed class ProductionConfigurationValidationTests
         {
             ["Email:RequiredInProduction"] = "false",
             ["Email:Enabled"] = "false",
-            ["Email:SmtpHost"] = "",
-            ["Email:Username"] = "",
-            ["Email:Password"] = "",
-            ["Email:FromAddress"] = ""
+            ["Resend:ApiKey"] = "",
+            ["Resend:FromAddress"] = ""
         });
         ProductionConfigurationValidator.Validate(configuration, "Production");
     }
@@ -44,14 +42,14 @@ public sealed class ProductionConfigurationValidationTests
         {
             ["Supabase:ServiceRoleKey"] = "",
             ["FamilyPortal:FrontendBaseUrl"] = "",
-            ["Email:Password"] = ""
+            ["Resend:ApiKey"] = ""
         });
         var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains("Supabase:ServiceRoleKey is required", exception.Message);
         Assert.Contains("FamilyPortal:FrontendBaseUrl is required", exception.Message);
-        Assert.Contains("Email:Password is required", exception.Message);
+        Assert.Contains("Resend:ApiKey is required", exception.Message);
         Assert.DoesNotContain(ValidSigningKey, exception.Message);
-        Assert.DoesNotContain(ValidEmailPassword, exception.Message);
+        Assert.DoesNotContain(ValidResendApiKey, exception.Message);
     }
 
     [Fact]
@@ -106,32 +104,29 @@ public sealed class ProductionConfigurationValidationTests
     }
 
     [Theory]
-    [InlineData("false", "smtp.hostinger.com", "587", "true")]
-    [InlineData("true", "", "587", "true")]
-    [InlineData("true", "smtp.hostinger.com", "0", "true")]
-    [InlineData("true", "smtp.hostinger.com", "587", "false")]
-    public void InvalidRequiredProductionEmailConfigurationFails(string enabled, string host, string port, string enableSsl)
+    [InlineData("false", "resend-test-only-key")]
+    [InlineData("true", "")]
+    [InlineData("true", "CHANGE_ME_RESEND_API_KEY")]
+    public void InvalidRequiredProductionEmailConfigurationFails(string enabled, string apiKey)
     {
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
             ["Email:Enabled"] = enabled,
-            ["Email:SmtpHost"] = host,
-            ["Email:SmtpPort"] = port,
-            ["Email:EnableSsl"] = enableSsl
+            ["Resend:ApiKey"] = apiKey
         });
         var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
-        Assert.Contains("Email:", exception.Message);
+        Assert.Contains(enabled == "false" ? "Email:Enabled" : "Resend:ApiKey", exception.Message);
     }
 
     [Theory]
-    [InlineData("not-an-email", "client@example.com", "Email:FromAddress")]
-    [InlineData("notifications@example.com", "not-an-email", "Email:ReplyToAddress")]
+    [InlineData("not-an-email", "client@example.com", "Resend:FromAddress")]
+    [InlineData("notifications@example.com", "not-an-email", "Resend:ReplyToAddress")]
     public void InvalidProductionEmailAddressesFail(string fromAddress, string replyToAddress, string expectedKey)
     {
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
-            ["Email:FromAddress"] = fromAddress,
-            ["Email:ReplyToAddress"] = replyToAddress
+            ["Resend:FromAddress"] = fromAddress,
+            ["Resend:ReplyToAddress"] = replyToAddress
         });
         var exception = Assert.Throws<InvalidOperationException>(() => ProductionConfigurationValidator.Validate(configuration, "Production"));
         Assert.Contains(expectedKey, exception.Message);
@@ -185,7 +180,7 @@ public sealed class ProductionConfigurationValidationTests
         Assert.Contains("MedicationSafety:PilotBranchId must identify the approved pilot branch", exception.Message);
     }
     private const string ValidSigningKey = "prod-test-signing-key-2026-very-long-and-random-value";
-    private const string ValidEmailPassword = "smtp-test-only-secret-value";
+    private const string ValidResendApiKey = "resend-test-only-secret-value";
 
     private static IConfiguration BuildConfiguration(Dictionary<string, string?>? overrides = null)
     {
@@ -204,14 +199,10 @@ public sealed class ProductionConfigurationValidationTests
             ["FamilyPortal:FrontendBaseUrl"] = "https://care.example.com",
             ["Email:RequiredInProduction"] = "true",
             ["Email:Enabled"] = "true",
-            ["Email:SmtpHost"] = "smtp.resend.com",
-            ["Email:SmtpPort"] = "587",
-            ["Email:Username"] = "resend",
-            ["Email:Password"] = ValidEmailPassword,
-            ["Email:FromAddress"] = "notifications@care.example.com",
-            ["Email:FromName"] = "AiCare",
-            ["Email:ReplyToAddress"] = "client@care.example.com",
-            ["Email:EnableSsl"] = "true",
+            ["Resend:ApiKey"] = ValidResendApiKey,
+            ["Resend:FromAddress"] = "notifications@care.example.com",
+            ["Resend:FromName"] = "AiCare",
+            ["Resend:ReplyToAddress"] = "client@care.example.com",
             ["Demo:Enabled"] = "false",
             ["Monitoring:Enabled"] = "true",
             ["Monitoring:Provider"] = "Render logs + uptime monitor",

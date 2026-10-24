@@ -58,10 +58,10 @@ public static class DependencyInjection
         services.AddScoped<IFamilyPortalService, FamilyPortalService>();
         services.AddScoped<IFamilyPortalQueryStore, FamilyPortalQueryStore>();
         services.AddScoped<IFamilyPortalQueryService, FamilyPortalQueryService>();
-        services.AddSingleton<IFamilyInvitationEmailSender, SqsFamilyInvitationEmailSender>();
+        services.AddScoped<IFamilyInvitationEmailSender, SqsFamilyInvitationEmailSender>();
         services.AddScoped<IAccountInvitationStore, AccountInvitationStore>();
         services.AddScoped<IAccountInvitationService, AccountInvitationService>();
-        services.AddSingleton<IAccountInvitationEmailSender, SqsAccountInvitationEmailSender>();
+        services.AddScoped<IAccountInvitationEmailSender, SqsAccountInvitationEmailSender>();
         return services;
     }
 }

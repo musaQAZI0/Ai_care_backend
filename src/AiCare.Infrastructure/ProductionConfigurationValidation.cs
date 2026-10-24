@@ -90,25 +90,11 @@ public static class ProductionConfigurationValidator
             {
                 errors.Add("Email:Enabled must be true when Email:RequiredInProduction is enabled.");
             }
-            Require(configuration["Email:SmtpHost"], "Email:SmtpHost", errors);
-            var smtpPort = configuration.GetValue<int?>("Email:SmtpPort");
-            if (smtpPort is null or < 1 or > 65535)
-            {
-                errors.Add("Email:SmtpPort must be a valid TCP port when production email is required.");
-            }
-            Require(configuration["Email:Username"], "Email:Username", errors);
-            var emailPassword = configuration["Email:Password"];
-            Require(emailPassword, "Email:Password", errors);
-            if (LooksLikePlaceholder(emailPassword))
-            {
-                errors.Add("Email:Password must not use a placeholder/default value.");
-            }
-            ValidateEmailAddress(configuration["Email:FromAddress"], "Email:FromAddress", true, errors);
-            ValidateEmailAddress(configuration["Email:ReplyToAddress"], "Email:ReplyToAddress", false, errors);
-            if (!configuration.GetValue<bool>("Email:EnableSsl"))
-            {
-                errors.Add("Email:EnableSsl must be true when production email is required.");
-            }
+            var resendKey = configuration["Resend:ApiKey"];
+            Require(resendKey, "Resend:ApiKey", errors);
+            if (LooksLikePlaceholder(resendKey)) errors.Add("Resend:ApiKey must not use a placeholder/default value.");
+            ValidateEmailAddress(configuration["Resend:FromAddress"], "Resend:FromAddress", true, errors);
+            ValidateEmailAddress(configuration["Resend:ReplyToAddress"], "Resend:ReplyToAddress", false, errors);
         }
 
         if (string.Equals(configuration["Demo:Enabled"], "true", StringComparison.OrdinalIgnoreCase))
@@ -196,6 +182,7 @@ public static class ProductionConfigurationValidator
 
         var normalized = value.Trim().ToLowerInvariant();
         return normalized.Contains("change-me", StringComparison.Ordinal) ||
+               normalized.Contains("change_me", StringComparison.Ordinal) ||
                normalized.Contains("changeme", StringComparison.Ordinal) ||
                normalized.Contains("your_", StringComparison.Ordinal) ||
                normalized.Contains("placeholder", StringComparison.Ordinal) ||

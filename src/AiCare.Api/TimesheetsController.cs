@@ -45,7 +45,16 @@ public sealed class TimesheetsController(CareDbContext db,ITenantContext tenant,
  public async Task<IActionResult> Detail(Guid id,CancellationToken t)
  {
   if(!Staff&&!user.IsCareWorker)return Forbid();var period=await Period(id,t);if(period is null)return NotFound();
-  var entries=await Rows("select e.*,w.\"FullName\" as worker_name,v.\"StartsAt\" as visit_starts_at from timesheet_entries e join \"CareWorkers\" w on w.\"Id\"=e.care_worker_id join \"Visits\" v on v.\"Id\"=e.visit_id where e.period_id=@id and e.organization_id=@org and (@staff or e.care_worker_id=@worker) order by v.\"StartsAt\",e.id",c=>{Add(c,"id",id);Add(c,"staff",Staff);Add(c,"worker",user.CareWorkerId??Guid.Empty);},t);
+  var entries=await Rows("""
+   select e.*,w."FullName" as worker_name,v."StartsAt" as visit_starts_at,
+     exists(select 1 from admin_bank_holidays h where h.organization_id=e.organization_id
+       and h.holiday_date=(v."StartsAt" at time zone 'Europe/London')::date
+       and (h.branch_id is null or h.branch_id=e.branch_id)) as is_bank_holiday
+   from timesheet_entries e join "CareWorkers" w on w."Id"=e.care_worker_id
+   join "Visits" v on v."Id"=e.visit_id
+   where e.period_id=@id and e.organization_id=@org and (@staff or e.care_worker_id=@worker)
+   order by v."StartsAt",e.id
+   """,c=>{Add(c,"id",id);Add(c,"staff",Staff);Add(c,"worker",user.CareWorkerId??Guid.Empty);},t);
   return Ok(new{period,entries});
  }
  [HttpPost("periods/{id:guid}/import"),Authorize(Roles="CareCoordinator,CareManager,Administrator,BackOffice")]

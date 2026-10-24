@@ -18,9 +18,14 @@ public sealed class ContextualAuthorizationService(
         if (user.HasAnyRole(UserRole.Administrator, UserRole.BackOffice, UserRole.CareManager, UserRole.CareCoordinator)) return true;
 
         if (user.IsCareWorker && user.CareWorkerId is Guid workerId)
-            return await db.Visits.AsNoTracking().AnyAsync(visit =>
-                visit.ServiceUserId == serviceUserId && visit.CareWorkerId == workerId &&
-                visit.OrganizationId == tenant.OrganizationId, cancellationToken);
+        {
+            var additionalVisitIds = PublishedRotaAccess.AdditionalVisitIds(db, tenant, workerId);
+            var visits = await db.Visits.AsNoTracking().Where(visit =>
+                visit.ServiceUserId == serviceUserId && (visit.CareWorkerId == workerId || additionalVisitIds.Contains(visit.Id)) &&
+                visit.OrganizationId == tenant.OrganizationId).ToListAsync(cancellationToken);
+            var published = PublishedRotaAccess.CurrentVisitIds(db, tenant, workerId);
+            return visits.Any(visit => visit.Status != VisitStatus.Scheduled || visit.StartsAt <= DateTimeOffset.UtcNow || published.Contains(visit.Id));
+        }
 
         if (user.IsFamilyMember && user.FamilyMemberId is Guid familyMemberId)
             return await db.FamilyMembers.AsNoTracking().AnyAsync(member =>
@@ -42,7 +47,9 @@ public sealed class ContextualAuthorizationService(
         var visit = await db.Visits.AsNoTracking().SingleOrDefaultAsync(item => item.Id == visitId, cancellationToken);
         if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return false;
         if (user.HasAnyRole(UserRole.Administrator, UserRole.BackOffice, UserRole.CareManager, UserRole.CareCoordinator)) return true;
-        if (user.IsCareWorker && user.CareWorkerId is Guid workerId) return visit.CareWorkerId == workerId || await IsAdditionalVisitWorkerAsync(visit.Id, workerId, cancellationToken);
+        if (user.IsCareWorker && user.CareWorkerId is Guid workerId)
+            return (visit.CareWorkerId == workerId || await IsAdditionalVisitWorkerAsync(visit.Id, workerId, cancellationToken))
+                && PublishedRotaAccess.IsVisibleToWorker(db, tenant, visit, workerId);
         return await CanReadServiceUserAsync(visit.ServiceUserId, cancellationToken);
     }
 
@@ -52,7 +59,8 @@ public sealed class ContextualAuthorizationService(
         if (visit is null || !tenant.CanAccess(visit.OrganizationId, visit.BranchId)) return false;
         if (user.HasAnyRole(UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator)) return true;
         return user.IsCareWorker && user.CareWorkerId is Guid workerId &&
-            (visit.CareWorkerId == workerId || await IsAdditionalVisitWorkerAsync(visit.Id, workerId, cancellationToken));
+            (visit.CareWorkerId == workerId || await IsAdditionalVisitWorkerAsync(visit.Id, workerId, cancellationToken))
+            && PublishedRotaAccess.IsVisibleToWorker(db, tenant, visit, workerId);
     }
 
     private async Task<bool> IsAdditionalVisitWorkerAsync(Guid visitId, Guid workerId, CancellationToken cancellationToken)

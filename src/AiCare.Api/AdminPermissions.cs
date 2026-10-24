@@ -71,6 +71,9 @@ public sealed class AdminPermissionGateMiddleware(RequestDelegate next)
         if (path.StartsWith("/api/phase1/care-operations/options", StringComparison.Ordinal) && method != "GET")
             return "settings.manage";
         if (path == "/api/phase1/admin/appointment-start-variance" && method == "PUT") return "settings.manage";
+        if (path.StartsWith("/api/phase1/admin/bank-holidays", StringComparison.Ordinal) && method != "GET") return "settings.manage";
+        if (path.StartsWith("/api/phase1/admin/regions", StringComparison.Ordinal) && method != "GET") return "settings.manage";
+        if (path.StartsWith("/api/phase1/admin/login-attempts", StringComparison.Ordinal)) return "users.read";
         if (path.StartsWith("/api/phase1/admin/appointment-configuration/visits/", StringComparison.Ordinal) && method == "PUT") return "visits.schedule";
         if (path.StartsWith("/api/phase1/admin/appointment-configuration/breaks", StringComparison.Ordinal) && method != "GET") return "visits.schedule";
         if (path == "/api/phase1/admin/appointment-configuration/recommendations" && method == "POST") return "visits.schedule";
@@ -88,6 +91,9 @@ public sealed class AdminPermissionGateMiddleware(RequestDelegate next)
             return "reports.export";
         if (method == "POST" && (path is "/api/phase1/reports/generate" or "/api/phase1/reports/builder" or "/api/phase1/reporting-compliance/report-runs")) return "reports.export";
         if (method == "POST" && path == "/api/phase1/service-users") return "clients.manage";
+        if (method == "POST" && path.StartsWith("/api/phase1/service-users/", StringComparison.Ordinal) &&
+            (path.EndsWith("/respite-episodes", StringComparison.Ordinal) || path.EndsWith("/cancel", StringComparison.Ordinal)) &&
+            path.Contains("/respite-episodes", StringComparison.Ordinal)) return "clients.manage";
         if (method == "PUT" && IsEntityPath(path, "/api/phase1/service-users/")) return "clients.manage";
         if (method == "PUT" && path.EndsWith("/person-record", StringComparison.Ordinal) && IsEntityPath(path[..^"/person-record".Length], "/api/phase1/service-users/")) return "clients.manage";
         if (method == "DELETE" && IsEntityPath(path, "/api/phase1/service-users/")) return "clients.manage";
