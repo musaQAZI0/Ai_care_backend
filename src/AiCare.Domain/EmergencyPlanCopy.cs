@@ -23,8 +23,8 @@ public static class EmergencyPlanCopy
             .Append("<br>Generated (UTC): ").Append(generatedAt.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss"))
             .Append("<br>Plan review due: ").Append(reviewDueAt.ToUniversalTime().ToString("yyyy-MM-dd"))
             .Append("<br>Copy reference: ").Append(copyId).Append("</p><p>This copy contains the designated sections of the plan active when generated. Check the live record for later changes and the full clinical record.</p>");
-        foreach (var (key, title) in Sections)
-            if (selectedContent.TryGetValue(key, out var text)) html.Append("<section><h2>").Append(Encode(title)).Append("</h2><p>").Append(Encode(text)).Append("</p></section>");
+        foreach (var (key, sectionTitle) in Sections)
+            if (selectedContent.TryGetValue(key, out var text)) html.Append("<section><h2>").Append(Encode(sectionTitle)).Append("</h2><p>").Append(Encode(text)).Append("</p></section>");
         return html.Append("</main></body></html>").ToString().Replace("Selected care-plan sections for hospital handover", Encode(title));
     }
 }
