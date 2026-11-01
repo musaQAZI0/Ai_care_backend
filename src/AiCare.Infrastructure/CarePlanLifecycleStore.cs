@@ -3,6 +3,7 @@ using System.Data.Common;
 using AiCare.Application.CarePlans;
 using AiCare.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -60,6 +61,33 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
 
         await ExecuteTransactionAsync(async () =>
         {
+            if (targetStatus == CarePlanLifecycleStatus.InReview)
+            {
+                await using var goalOwners = context.Database.GetDbConnection().CreateCommand();
+                goalOwners.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+                goalOwners.CommandText = """
+                    select count(*) from care_plan_measurable_goals g where g.care_plan_id=@plan and g.organization_id=@organization
+                      and not exists(select 1 from care_plan_measurable_goals n where n.supersedes_goal_id=g.id)
+                      and not exists(select 1 from "AppUsers" u where u."Id"=g.owner_user_id and u."OrganizationId"=g.organization_id and u."IsActive"
+                        and (u."BranchId"=g.branch_id or (u."BranchId" is null and u."Role"='Administrator'))
+                        and u."Role" in ('Administrator','CareManager','CareCoordinator','CareWorker'))
+                    """;
+                AddUuid(goalOwners, "plan", carePlanId); AddUuid(goalOwners, "organization", actor.OrganizationId);
+                if (Convert.ToInt64(await goalOwners.ExecuteScalarAsync(cancellationToken)) > 0)
+                    throw new InvalidOperationException("Review measurable goal ownership before submitting the care plan. Replace goals whose owners are no longer eligible.");
+                await using var needOwners = context.Database.GetDbConnection().CreateCommand();
+                needOwners.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+                needOwners.CommandText = """
+                    select count(*) from care_plan_needs n where n.care_plan_id=@plan and n.organization_id=@organization and n.status='Active'
+                      and not exists(select 1 from care_plan_needs newer where newer.supersedes_need_id=n.id)
+                      and not exists(select 1 from "AppUsers" u where u."Id"=n.owner_user_id and u."OrganizationId"=n.organization_id and u."IsActive"
+                        and (u."BranchId"=n.branch_id or (u."BranchId" is null and u."Role"='Administrator'))
+                        and u."Role" in ('Administrator','CareManager','CareCoordinator','CareWorker'))
+                    """;
+                AddUuid(needOwners, "plan", carePlanId); AddUuid(needOwners, "organization", actor.OrganizationId);
+                if (Convert.ToInt64(await needOwners.ExecuteScalarAsync(cancellationToken)) > 0)
+                    throw new InvalidOperationException("Review structured need ownership before submitting the care plan. Correct active needs whose owners are no longer eligible.");
+            }
             await UpdateStatusAsync(snapshot.Version, targetStatus, expectedRevision, cancellationToken);
             await InsertEventAsync(snapshot.Version.CarePlanId, snapshot.Version.Status, targetStatus, reason, comment, actor, cancellationToken);
             context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), $"care_plan.{targetStatus.ToString().ToLowerInvariant()}", actor.UserName, nameof(CarePlan), carePlanId, DateTimeOffset.UtcNow, actor.OrganizationId, actor.BranchId));
@@ -244,6 +272,94 @@ public sealed class CarePlanLifecycleStore(CareDbContext context) : ICarePlanLif
                 AddUuid(tasks, "newplan", newPlanId);
                 AddUuid(tasks, "oldplan", carePlanId);
                 await tasks.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var goals = context.Database.GetDbConnection().CreateCommand())
+            {
+                goals.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+                goals.CommandText = """
+                    insert into care_plan_measurable_goals(id,root_goal_id,care_plan_id,service_user_id,organization_id,branch_id,
+                        source_goal_id,title,baseline_value,target_value,unit,baseline_date,review_due_date,target_date,
+                        owner_user_id,owner_name,planned_actions,change_reason,created_by,request_snapshot)
+                    select gen_random_uuid(),g.root_goal_id,@newplan,g.service_user_id,g.organization_id,g.branch_id,
+                        g.id,g.title,g.baseline_value,g.target_value,g.unit,g.baseline_date,g.review_due_date,g.target_date,
+                        g.owner_user_id,g.owner_name,g.planned_actions,@reason,@actor,
+                        jsonb_build_object('sourceGoalId',g.id,'reason',@reason)
+                    from care_plan_measurable_goals g where g.care_plan_id=@oldplan and g.organization_id=@organization
+                      and not exists(select 1 from care_plan_measurable_goals n where n.supersedes_goal_id=g.id)
+                    """;
+                AddUuid(goals, "newplan", newPlanId); AddUuid(goals, "oldplan", carePlanId); AddUuid(goals, "organization", actor.OrganizationId);
+                AddUuid(goals, "actor", actor.UserId ?? throw new InvalidOperationException("A named author is required to revise care goals."));
+                AddText(goals, "reason", command.ChangeReason);
+                await goals.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var emergency = context.Database.GetDbConnection().CreateCommand())
+            {
+                emergency.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+                emergency.CommandText = """
+                    insert into care_plan_emergency_selections(id,care_plan_id,organization_id,branch_id,selection_version,
+                      sections_json,source_selection_id,reason,created_by,request_snapshot)
+                    select gen_random_uuid(),@newplan,organization_id,branch_id,1,sections_json,id,@reason,@actor,jsonb_build_object('copiedFrom',id)
+                    from care_plan_emergency_selections where care_plan_id=@oldplan and organization_id=@organization
+                    order by selection_version desc limit 1
+                    """;
+                AddUuid(emergency, "newplan", newPlanId); AddUuid(emergency, "oldplan", carePlanId); AddUuid(emergency, "organization", actor.OrganizationId);
+                AddUuid(emergency, "actor", actor.UserId ?? throw new InvalidOperationException("A named author is required to copy emergency sections."));
+                AddText(emergency, "reason", command.ChangeReason); await emergency.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var needs = context.Database.GetDbConnection().CreateCommand())
+            {
+                needs.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+                needs.CommandText = """
+                    insert into care_plan_needs(id,root_need_id,care_plan_id,service_user_id,organization_id,branch_id,source_need_id,
+                      section,identified_need,level_of_need,planned_outcomes,actions,owner_user_id,owner_name,status,change_reason,created_by,request_snapshot)
+                    select gen_random_uuid(),root_need_id,@newplan,service_user_id,organization_id,branch_id,id,
+                      section,identified_need,level_of_need,planned_outcomes,actions,owner_user_id,owner_name,status,@reason,@actor,jsonb_build_object('copiedFrom',id)
+                    from care_plan_needs n where n.care_plan_id=@oldplan and n.organization_id=@organization
+                      and not exists(select 1 from care_plan_needs newer where newer.supersedes_need_id=n.id)
+                    """;
+                AddUuid(needs, "newplan", newPlanId); AddUuid(needs, "oldplan", carePlanId); AddUuid(needs, "organization", actor.OrganizationId);
+                AddUuid(needs, "actor", actor.UserId ?? throw new InvalidOperationException("A named author is required to copy care needs."));
+                AddText(needs, "reason", command.ChangeReason); await needs.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var evidence = context.Database.GetDbConnection().CreateCommand())
+            {
+                evidence.Transaction = context.Database.CurrentTransaction?.GetDbTransaction();
+                evidence.CommandText = """
+                    insert into care_plan_evidence(id,care_plan_id,organization_id,branch_id,service_user_id,
+                      source_kind,source_id,source_snapshot,section,rationale,copied_from_id,created_by,request_snapshot)
+                    select gen_random_uuid(),@newplan,organization_id,branch_id,service_user_id,
+                      source_kind,source_id,source_snapshot,section,rationale,id,@actor,jsonb_build_object('copiedFrom',id)
+                    from care_plan_evidence e where care_plan_id=@oldplan and organization_id=@organization
+                      and not exists(select 1 from care_plan_evidence_withdrawals w where w.evidence_id=e.id)
+                    """;
+                AddUuid(evidence, "newplan", newPlanId); AddUuid(evidence, "oldplan", carePlanId);
+                AddUuid(evidence, "organization", actor.OrganizationId);
+                AddUuid(evidence, "actor", actor.UserId ?? throw new InvalidOperationException("A named author is required to copy evidence."));
+                await evidence.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var authorities = context.Database.GetDbConnection().CreateCommand())
+            {
+                authorities.CommandText = """
+                    insert into care_plan_medication_authorities(
+                        care_plan_id,medication_id,service_user_id,organization_id,branch_id,
+                        support_type,instructions,review_due_at,family_medicine_applies,
+                        family_recording_method,family_responsible_person,family_escalation_route,
+                        prior_dose_check,updated_by_user_id,updated_at)
+                    select @newplan,medication_id,service_user_id,organization_id,branch_id,
+                        support_type,instructions,review_due_at,family_medicine_applies,
+                        family_recording_method,family_responsible_person,family_escalation_route,
+                        prior_dose_check,@actor,now()
+                    from care_plan_medication_authorities where care_plan_id=@oldplan
+                    """;
+                AddUuid(authorities, "newplan", newPlanId);
+                AddUuid(authorities, "oldplan", carePlanId);
+                AddUuid(authorities, "actor", actor.UserId ?? throw new InvalidOperationException("A named user is required to revise medication authority."));
+                await authorities.ExecuteNonQueryAsync(cancellationToken);
             }
 
             await InsertEventAsync(newPlanId, CarePlanLifecycleStatus.Draft, CarePlanLifecycleStatus.Draft, command.ChangeReason, "Revision created from previous care plan version", actor, cancellationToken);

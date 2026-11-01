@@ -1,6 +1,8 @@
 using System.Text;
 using System.Net.Http.Json;
 using System.Diagnostics;
+using System.Globalization;
+using System.Text.Json;
 using System.Threading.RateLimiting;
 using AiCare.Application;
 using AiCare.Api;
@@ -100,7 +102,13 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy("Phase1User", policy => policy.RequireRole("ServiceUser", "FamilyMember", "CareWorker", "CareCoordinator", "CareManager", "Administrator", "BackOffice"));
+    options.AddPolicy("Phase1User", policy => policy
+        .RequireRole("ServiceUser", "FamilyMember", "CareWorker", "CareCoordinator", "CareManager", "Administrator", "BackOffice")
+        .RequireAssertion(context =>
+            Guid.TryParse(context.User.FindFirst("organization_id")?.Value, out var organizationId) &&
+            organizationId != Guid.Empty &&
+            (context.User.IsInRole("Administrator") || context.User.IsInRole("BackOffice") ||
+             Guid.TryParse(context.User.FindFirst("branch_id")?.Value, out var branchId) && branchId != Guid.Empty)));
 });
 
 builder.Services.Configure<RouteHandlerOptions>(options =>
@@ -258,6 +266,7 @@ app.UseMiddleware<PrivilegedAccessMiddleware>();
 app.UseMiddleware<AdminPermissionGateMiddleware>();
 if (!app.Environment.IsEnvironment("Testing")) app.UseMiddleware<SensitiveOperationStepUpMiddleware>();
 app.UseAuthorization();
+app.UseMiddleware<SubscriptionEntitlementMiddleware>();
 
 app.MapControllers();
 
@@ -1732,10 +1741,13 @@ phase1.MapGet("/mar/{id:guid}", (Guid id, CareDbContext context, ITenantContext 
     var record = context.MedicationAdministrationRecords.AsNoTracking().FirstOrDefault(item => item.Id == id);
     return record is null || !tenant.CanAccess(record.OrganizationId, record.BranchId) ? Results.NotFound() : Results.Ok(record);
 });
-phase1.MapPost("/mar", (CreateMedicationAdministrationRecordRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapPost("/mar", async (CreateMedicationAdministrationRecordRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, CancellationToken cancellationToken) =>
+await context.Database.CreateExecutionStrategy().ExecuteAsync<IResult>(async () =>
 {
     var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareCoordinator, UserRole.CareManager);
     if (denied is not null) return denied;
+
+    await using var scheduleTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
 
     var discontinued = context.Database.SqlQueryRaw<int>(
         "select 1 as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} and reconciliation_status='Discontinued' limit 1",
@@ -1745,6 +1757,14 @@ phase1.MapPost("/mar", (CreateMedicationAdministrationRecordRequest request, Car
     var validation = ValidateMedicationAdministrationReferences(request.MedicationId, request.VisitId, request.CareWorkerId, context, tenant);
     if (validation is not null) return validation;
 
+    var personId = context.Medications.AsNoTracking().Where(item => item.Id == request.MedicationId)
+        .Select(item => item.ServiceUserId).Single();
+    if (!await MedicationSupportAuthority.AllowsAdministrationAsync(context, tenant.OrganizationId,
+            tenant.BranchId ?? TenantDefaults.BranchId, personId, request.MedicationId,
+            request.ScheduledAt > DateTimeOffset.UtcNow ? request.ScheduledAt : DateTimeOffset.UtcNow,
+            cancellationToken))
+        return Results.Conflict(new { message = MedicationSupportAuthority.MissingMessage });
+
     var pendingEffectiveChange = context.Database.SqlQueryRaw<int>(
         "select 1 as \"Value\" from medication_change_requests where medication_id={0} and organization_id={1} and branch_id={2} and status in ('Pending','Approved') and effective_at<={3} limit 1",
         request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId, request.ScheduledAt).Any();
@@ -1752,6 +1772,27 @@ phase1.MapPost("/mar", (CreateMedicationAdministrationRecordRequest request, Car
     var profileVersion = context.Database.SqlQueryRaw<int?>(
         "select profile_version as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} limit 1",
         request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).SingleOrDefault();
+    var scheduledTimesJson = context.Database.SqlQueryRaw<string>(
+        "select scheduled_local_times::text as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} limit 1",
+        request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).SingleOrDefault();
+    var fixedTimes = scheduledTimesJson is null ? [] : JsonSerializer.Deserialize<string[]>(scheduledTimesJson) ?? [];
+    var scheduledMedication = context.Medications.AsNoTracking().Single(item => item.Id == request.MedicationId);
+    DateTimeOffset[] slotInstants = [request.ScheduledAt];
+    if (!scheduledMedication.IsPrn && fixedTimes.Length > 0)
+    {
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+        var local = TimeZoneInfo.ConvertTime(request.ScheduledAt, zone);
+        if (local.Ticks % TimeSpan.TicksPerMinute != 0 ||
+            !fixedTimes.Contains(local.ToString("HH:mm", CultureInfo.InvariantCulture), StringComparer.Ordinal))
+            return Results.Conflict(new { message = "Scheduled time must match an approved fixed daily UK dose time." });
+        if (zone.IsAmbiguousTime(local.DateTime))
+            slotInstants = zone.GetAmbiguousTimeOffsets(local.DateTime)
+                .Select(offset => new DateTimeOffset(local.DateTime, offset).ToUniversalTime()).Order().ToArray();
+    }
+    var outsideActiveDates = context.Database.SqlQueryRaw<int>(
+        "select 1 as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} and (start_date>{3} or end_date<{3}) limit 1",
+        request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId, request.ScheduledAt).Any();
+    if (outsideActiveDates) return Results.Conflict(new { message = "The scheduled dose is outside the prescribed active dates." });
     var orderSnapshot = context.Database.SqlQueryRaw<string>("""
         select json_build_object(
           'medicationName',m."Name",'dosage',m."Dosage",'route',m."Route",'schedule',m."Schedule",
@@ -1759,18 +1800,40 @@ phase1.MapPost("/mar", (CreateMedicationAdministrationRecordRequest request, Car
           'prnIndication',coalesce(p.prn_indication,''),'doseWindowMinutes',coalesce(p.dose_window_minutes,60),
           'requiresWitness',coalesce(p.requires_witness,false),'indication',coalesce(p.indication,''),
           'doseUnit',coalesce(p.dose_unit,''),'frequency',coalesce(p.frequency,''),
-          'administrationInstructions',coalesce(p.administration_instructions,'')
+          'administrationInstructions',coalesce(p.administration_instructions,''),
+          'scheduledLocalTimes',coalesce(p.scheduled_local_times,'[]'::jsonb)
         )::text as "Value"
         from "Medications" m left join medication_safety_profiles p
           on p.medication_id=m."Id" and p.organization_id=m."OrganizationId" and p.branch_id=m."BranchId"
         where m."Id"={0} and m."OrganizationId"={1} and m."BranchId"={2}
         """, request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).Single();
+    if (context.Database.ProviderName?.Contains("Npgsql", StringComparison.Ordinal) == true)
+    {
+        var lockKey = $"emar-slot:{tenant.OrganizationId}:{request.MedicationId}:{slotInstants[0].UtcTicks}";
+        await context.Database.ExecuteSqlInterpolatedAsync($"select pg_advisory_xact_lock(hashtextextended({lockKey},0))", cancellationToken);
+        await context.Database.ExecuteSqlInterpolatedAsync($"select 1 from medication_safety_profiles where medication_id={request.MedicationId} and organization_id={tenant.OrganizationId} and branch_id={tenant.BranchId ?? TenantDefaults.BranchId} for share", cancellationToken);
+        var lockedVersion = context.Database.SqlQueryRaw<int?>(
+            "select profile_version as \"Value\" from medication_safety_profiles where medication_id={0} and organization_id={1} and branch_id={2} limit 1",
+            request.MedicationId, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId).SingleOrDefault();
+        if (lockedVersion != profileVersion)
+            return Results.Conflict(new { message = "The medication instruction changed while scheduling. Reload the current order." });
+    }
+    var sameTime = await context.MedicationAdministrationRecords.AsNoTracking().Where(item =>
+        item.MedicationId == request.MedicationId && slotInstants.Contains(item.ScheduledAt) &&
+        item.OrganizationId == tenant.OrganizationId && item.BranchId == (tenant.BranchId ?? TenantDefaults.BranchId)).ToListAsync(cancellationToken);
+    var existing = sameTime.FirstOrDefault(item => item.MedicationProfileVersion == profileVersion);
+    if (existing is not null)
+        return existing.ScheduledAt == request.ScheduledAt && existing.VisitId == request.VisitId && existing.CareWorkerId == request.CareWorkerId
+            ? Results.Ok(existing) : Results.Conflict(new { message = "This medication already has a MAR dose at the selected time. Review the existing assignment." });
+    if (sameTime.Any(item => item.Outcome is "Scheduled" or "Administered"))
+        return Results.Conflict(new { message = "An earlier order already has a pending or administered dose at this time. Review its history and close any pending dose with an appropriate non-administration outcome before rescheduling." });
     var record = new MedicationAdministrationRecord(Guid.NewGuid(), request.MedicationId, request.VisitId, request.CareWorkerId, request.ScheduledAt, null, "Scheduled", request.Notes, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId, profileVersion, orderSnapshot);
     context.MedicationAdministrationRecords.Add(record);
     context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), "emar.scheduled", currentUser.UserName, nameof(MedicationAdministrationRecord), record.Id, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId));
     context.SaveChanges();
+    await scheduleTransaction.CommitAsync(cancellationToken);
     return Results.Created($"/api/phase1/mar/{record.Id}", record);
-});
+}));
 phase1.MapPost("/mar/{id:guid}/administer", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) =>
     CompleteMedicationAdministration(id, "Administered", request, context, tenant, currentUser, configuration));
 phase1.MapPost("/mar/{id:guid}/skip", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) =>
@@ -3528,6 +3591,11 @@ static IResult? ValidateMedicationAdministrationReferences(Guid medicationId, Gu
         return Error("Visit does not exist or is not accessible.");
     }
 
+    if (visit.Status == VisitStatus.Cancelled)
+    {
+        return Results.Conflict(new { message = "A cancelled visit cannot be used to schedule a MAR dose." });
+    }
+
     if (visit.CareWorkerId != careWorkerId)
     {
         return Error("Medication record care worker must match the visit.");
@@ -3549,7 +3617,8 @@ static IResult? ValidateMedicationAdministrationReferences(Guid medicationId, Gu
 
 static IResult CompleteMedicationAdministration(Guid id, string outcome, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration)
 {
-    if (!EmarPilotGate.IsEnabledForBranch(configuration, tenant.BranchId ?? TenantDefaults.BranchId)) return Results.Json(new { message = "eMAR administration is disabled for this branch until the medication clinical-safety gate is approved." }, statusCode: StatusCodes.Status423Locked);
+    var emarBranchId = tenant.BranchId ?? (tenant.IsOrganizationWide ? TenantDefaults.BranchId : Guid.Empty);
+    if (!EmarPilotGate.IsEnabledForBranch(configuration, emarBranchId)) return Results.Json(new { message = "eMAR administration is disabled for this branch until the medication clinical-safety gate is approved." }, statusCode: StatusCodes.Status423Locked);
     var record = context.MedicationAdministrationRecords.Find(id);
     if (record is null || !tenant.CanAccess(record.OrganizationId, record.BranchId)) return Results.NotFound();
 

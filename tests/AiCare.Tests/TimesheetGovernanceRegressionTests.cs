@@ -66,10 +66,10 @@ public sealed class TimesheetGovernanceRegressionTests(PostgresRegressionFactory
   var history=await manager.GetFromJsonAsync<JsonElement>(eurl+"/history");Assert.Equal(4,history.GetArrayLength());
   Assert.Equal(45m,history[1].GetProperty("snapshot").GetProperty("actual_minutes").GetDecimal());
   var export=$"/api/phase1/payroll-runs/{run}/export";
-  Assert.Equal(HttpStatusCode.Conflict,(await finance.GetAsync(export)).StatusCode);
+  Assert.Equal(HttpStatusCode.Gone,(await finance.GetAsync(export)).StatusCode);
   (await finance.PostAsync($"/api/phase1/payroll-runs/{run}/approve",null)).EnsureSuccessStatusCode();
   await StepUpTestGrants.GrantAsync(factory,finance,"export");
-  Assert.Contains("23.67",await finance.GetStringAsync(export));
+  Assert.Equal(HttpStatusCode.Gone,(await finance.GetAsync(export)).StatusCode);
   using var verify=factory.Services.CreateScope();var verifyDb=verify.ServiceProvider.GetRequiredService<CareDbContext>();
   Assert.Equal(1,await verifyDb.AuditEvents.CountAsync(x=>x.EntityId==run&&x.Action=="finance.payroll_batch_generated"));
   await Assert.ThrowsAsync<Npgsql.PostgresException>(()=>verifyDb.Database.ExecuteSqlRawAsync("update timesheet_entries set payable_minutes=1 where id={0}",entryId));

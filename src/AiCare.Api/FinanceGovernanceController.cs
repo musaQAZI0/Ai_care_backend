@@ -16,14 +16,26 @@ namespace AiCare.Api;
 public sealed class FinanceGovernanceController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user):ControllerBase
 {
     [HttpGet("dashboard")]
-    public async Task<IActionResult> Dashboard(CancellationToken t)=>Ok(new{
-        invoiceCount=await Scalar("select count(*) from \"Invoices\" where \"OrganizationId\"=@organization",t),
-        generatedInvoices=await Scalar("select count(*) from \"Invoices\" where \"OrganizationId\"=@organization and \"Status\"='Generated'",t),
-        approvedInvoices=await Scalar("select count(*) from \"Invoices\" where \"OrganizationId\"=@organization and \"Status\"='Approved'",t),
-        paidInvoices=await Scalar("select count(*) from \"Invoices\" where \"OrganizationId\"=@organization and \"Status\"='Paid'",t),
-        invoiceTotal=await Money("select coalesce(sum(\"Amount\"),0) from \"Invoices\" where \"OrganizationId\"=@organization and \"Status\"<>'Void'",t),
-        paymentsReceived=await Money("select coalesce((select sum(amount) from finance_payments where organization_id=@organization),0)+coalesce((select sum(amount) from finance_payment_allocations where organization_id=@organization and reversed_at is null),0)",t),
-        openReconciliations=await Scalar("select count(*) from finance_funding_reconciliations where organization_id=@organization and status='Open'",t)});
+    public async Task<IActionResult> Dashboard(CancellationToken t)
+    {
+        var currencies=await Query("""
+          select currency,sum(gross_amount) filter(where is_issued) invoice_total,
+            coalesce(sum(net_cash) filter(where is_issued),0) payments_received,
+            coalesce(sum(credits) filter(where is_issued),0) credits,
+            coalesce(sum(refunds) filter(where is_issued),0) refunds,
+            coalesce(sum(outstanding) filter(where is_issued),0) outstanding,
+            coalesce(sum(customer_credit) filter(where is_issued),0) customer_credit
+          from finance_invoice_ledger where organization_id=@organization and (@wide or branch_id=@branch) and status<>'Void' group by currency order by currency
+          """,_=>{},r=>new{currency=r.GetString(0),invoiceTotal=r.IsDBNull(1)?0:r.GetDecimal(1),paymentsReceived=r.GetDecimal(2),credits=r.GetDecimal(3),refunds=r.GetDecimal(4),outstanding=r.GetDecimal(5),customerCredit=r.GetDecimal(6)},t);
+        var counts=await Query("select status,count(*)::int from finance_invoice_ledger where organization_id=@organization and (@wide or branch_id=@branch) group by status",_=>{},r=>new{status=r.GetString(0),count=r.GetInt32(1)},t);
+        return Ok(new{
+          invoiceCount=counts.Sum(x=>x.count),generatedInvoices=counts.Where(x=>x.status=="Generated").Sum(x=>x.count),approvedInvoices=counts.Where(x=>x.status=="Approved").Sum(x=>x.count),paidInvoices=counts.Where(x=>x.status=="Paid").Sum(x=>x.count),
+          currencyTotals=currencies,invoiceTotal=currencies.Count==1?(decimal?)currencies[0].invoiceTotal:null,paymentsReceived=currencies.Count==1?(decimal?)currencies[0].paymentsReceived:null,
+          openReconciliations=await Scalar("select count(*) from finance_funding_reconciliations where organization_id=@organization and (@wide or branch_id=@branch) and status='Exception'",t),
+          openBillingExceptions=await Scalar("select count(*) from finance_billing_exceptions where organization_id=@organization and (@wide or branch_id=@branch) and status='Open'",t),
+          basis="Issued invoice gross, credits and net allocated cash; currencies are never combined."
+        });
+    }
 
     [HttpPost("invoice-batches")]
     public IActionResult GenerateInvoiceBatch(GenerateFinanceBatchRequest request,CancellationToken t) => StatusCode(StatusCodes.Status410Gone,new{message="Legacy raw-visit invoice generation is retired. Generate and approve billable events, then use an invoice run."});
@@ -57,7 +69,49 @@ public sealed class FinanceGovernanceController(CareDbContext db,ITenantContext 
 
     [HttpPost("funding-reconciliations")]
     public Task<IActionResult> ReconcileFunding(FundingReconciliationRequest request,CancellationToken t) => InTransaction(()=>ReconcileFundingCore(request,t),t);
-    private async Task<IActionResult> ReconcileFundingCore(FundingReconciliationRequest request,CancellationToken t){if(request.ServiceUserId==Guid.Empty||request.PeriodStart>=request.PeriodEnd)return BadRequest(new{message="Service user and valid period are required."});var person=await db.ServiceUsers.AsNoTracking().SingleOrDefaultAsync(x=>x.Id==request.ServiceUserId&&x.OrganizationId==tenant.OrganizationId,t);if(person is null)return NotFound();var funding=await Funding(request.ServiceUserId,t);var delivered=await Money("select coalesce(sum(\"DurationMinutes\"),0)/60.0 from \"Visits\" where \"ServiceUserId\"=@person and \"OrganizationId\"=@organization and \"Status\"='Completed' and \"StartsAt\">=@start and \"StartsAt\"<@end",t,c=>{Add(c,"person",request.ServiceUserId);Add(c,"start",request.PeriodStart);Add(c,"end",request.PeriodEnd);});var invoiced=await Money("select coalesce(sum(\"Amount\"),0) from \"Invoices\" where \"ServiceUserId\"=@person and \"OrganizationId\"=@organization and \"IssuedAt\">=@start and \"IssuedAt\"<@end and \"Status\"<>'Void'",t,c=>{Add(c,"person",request.ServiceUserId);Add(c,"start",request.PeriodStart);Add(c,"end",request.PeriodEnd);});var authorized=Math.Round((funding?.AuthorizedHoursPerWeek??0)*(decimal)(request.PeriodEnd-request.PeriodStart).TotalDays/7m,2);var variance=Math.Round(delivered-authorized,2);var status=Math.Abs(variance)>request.AllowedVarianceHours?"Exception":"Matched";var id=Guid.NewGuid();await Exec("insert into finance_funding_reconciliations(id,service_user_id,organization_id,branch_id,period_start,period_end,authorized_hours,delivered_hours,invoiced_amount,variance_hours,status,notes,created_by) values(@id,@person,@organization,@branch,@start,@end,@authorized,@delivered,@invoiced,@variance,@status,@notes,@actor)",c=>{Add(c,"id",id);Add(c,"person",request.ServiceUserId);Add(c,"start",request.PeriodStart);Add(c,"end",request.PeriodEnd);Add(c,"authorized",authorized);Add(c,"delivered",delivered);Add(c,"invoiced",invoiced);Add(c,"variance",variance);Add(c,"status",status);Add(c,"notes",request.Notes??"");},t);Audit("finance.funding_reconciled","FundingReconciliation",id);await db.SaveChangesAsync(t);return Created($"/api/phase1/finance/funding-reconciliations/{id}",new{id,status,authorizedHours=authorized,deliveredHours=delivered,invoicedAmount=invoiced,varianceHours=variance});}
+    private async Task<IActionResult> ReconcileFundingCore(FundingReconciliationRequest request,CancellationToken t)
+    {
+      if(request.ServiceFrom is DateOnly serviceFrom && request.ServiceTo is DateOnly serviceTo)
+      {
+        try{var bounds=FinanceServicePeriod.FromInclusiveDates(serviceFrom,serviceTo);request=request with{PeriodStart=bounds.Start,PeriodEnd=bounds.End};}
+        catch(ArgumentException e){return BadRequest(new{message=e.Message});}
+      }
+      if(request.ServiceUserId==Guid.Empty||request.PeriodStart>=request.PeriodEnd||request.AllowedVarianceHours<0)return BadRequest(new{message="Service user, half-open period and nonnegative variance are required."});
+      var person=await db.ServiceUsers.AsNoTracking().SingleOrDefaultAsync(x=>x.Id==request.ServiceUserId&&x.OrganizationId==tenant.OrganizationId&&(tenant.IsOrganizationWide||x.BranchId==tenant.BranchId),t);if(person is null)return NotFound();
+      var funding=await Query("""
+        select a.authorized_hours_per_week,a.valid_from,a.valid_to,trim(f.currency)
+        from funding_arrangements a join finance_funders f on f.id=a.funder_id and f.organization_id=a.organization_id
+        where a.organization_id=@organization and a.branch_id=@target and a.service_user_id=@person and a.status='Active' and a.allocation_rule='Primary'
+          and a.valid_from<@end and (a.valid_to is null or a.valid_to>=@start)
+        order by a.valid_from
+        """,c=>{Add(c,"target",person.BranchId);Add(c,"person",person.Id);Add(c,"start",request.PeriodStart);Add(c,"end",request.PeriodEnd);},r=>new{hours=r.GetDecimal(0),from=r.GetFieldValue<DateTimeOffset>(1),to=r.IsDBNull(2)?(DateTimeOffset?)null:r.GetFieldValue<DateTimeOffset>(2),currency=r.GetString(3)},t);
+      if(funding.Count!=1||funding[0].from>request.PeriodStart||(funding[0].to is DateTimeOffset end&&end<request.PeriodEnd))return Conflict(new{message="Reconciliation requires one primary funding authorisation covering the complete period. Split or changing authorisations require separate reconciliations."});
+      var currency=funding[0].currency;
+      var delivered=await Money("""
+        select coalesce(sum(e.actual_minutes),0)/60 from timesheet_entries e join "Visits" v on v."Id"=e.visit_id and v."OrganizationId"=e.organization_id and v."BranchId"=e.branch_id
+        where e.organization_id=@organization and e.branch_id=@target and v."ServiceUserId"=@person and v."StartsAt">=@start and v."StartsAt"<@end
+          and e.status='Approved' and e.approved_by is not null and v."Status"='Completed'
+        """,t,c=>{Add(c,"target",person.BranchId);Add(c,"person",person.Id);Add(c,"start",request.PeriodStart);Add(c,"end",request.PeriodEnd);});
+      var amounts=await Query("""
+        select ledger.currency,sum(line.amount) from finance_invoice_lines line join finance_invoice_ledger ledger on ledger.invoice_id=line.invoice_id and ledger.organization_id=line.organization_id
+        join finance_billable_events e on e.id=line.billable_event_id and e.organization_id=line.organization_id
+        join "Visits" v on v."Id"=e.visit_id and v."OrganizationId"=e.organization_id
+        where line.organization_id=@organization and line.branch_id=@target and line.service_user_id=@person and ledger.is_issued
+          and v."StartsAt">=@start and v."StartsAt"<@end group by ledger.currency
+        """,c=>{Add(c,"target",person.BranchId);Add(c,"person",person.Id);Add(c,"start",request.PeriodStart);Add(c,"end",request.PeriodEnd);},r=>new{currency=r.GetString(0),amount=r.GetDecimal(1)},t);
+      if(amounts.Any(x=>x.currency!=currency))return Conflict(new{message="Reconcile invoice currencies separately; source currency differs from the funding authorisation."});
+      var invoiced=amounts.Sum(x=>x.amount);
+      var zone=TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+      var startDate=DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(request.PeriodStart,zone).DateTime);var endDate=DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(request.PeriodEnd,zone).DateTime);
+      if(TimeZoneInfo.ConvertTime(request.PeriodStart,zone).TimeOfDay!=TimeSpan.Zero||TimeZoneInfo.ConvertTime(request.PeriodEnd,zone).TimeOfDay!=TimeSpan.Zero)return BadRequest(new{message="Use UK midnight boundaries for a whole-calendar-day reconciliation."});
+      var authorised=Math.Round(funding[0].hours*(endDate.DayNumber-startDate.DayNumber)/7m,2,MidpointRounding.AwayFromZero);var variance=delivered-authorised;var status=Math.Abs(variance)>request.AllowedVarianceHours?"Exception":"Matched";var id=Guid.NewGuid();
+      await Exec("""
+        insert into finance_funding_reconciliations(id,service_user_id,organization_id,branch_id,period_start,period_end,authorized_hours,delivered_hours,invoiced_amount,variance_hours,status,notes,created_by)
+        values(@id,@person,@organization,@target,@start,@end,@authorised,@delivered,@invoiced,@variance,@status,@notes,@actor)
+        """,c=>{Add(c,"id",id);Add(c,"person",person.Id);Add(c,"target",person.BranchId);Add(c,"start",request.PeriodStart);Add(c,"end",request.PeriodEnd);Add(c,"authorised",authorised);Add(c,"delivered",delivered);Add(c,"invoiced",invoiced);Add(c,"variance",variance);Add(c,"status",status);Add(c,"notes",request.Notes??"");},t);
+      db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"finance.funding_reconciled",user.UserName,"FundingReconciliation",id,DateTimeOffset.UtcNow,tenant.OrganizationId,person.BranchId));await db.SaveChangesAsync(t);
+      return Created($"/api/phase1/finance/funding-reconciliations/{id}",new{id,status,currency,authorizedHours=authorised,deliveredHours=delivered,invoicedAmount=invoiced,varianceHours=variance,basis="Approved actual attendance; service-line net before credits; weekly authorisation prorated over UK calendar days."});
+    }
 
     private async Task<IActionResult> InTransaction(Func<Task<IActionResult>> operation,CancellationToken t)
     {
@@ -83,11 +137,11 @@ public sealed class FinanceGovernanceController(CareDbContext db,ITenantContext 
     private async Task<int> Scalar(string sql,CancellationToken t,Action<DbCommand>? bind=null){await using var c=await Command(sql,t);bind?.Invoke(c);return Convert.ToInt32(await c.ExecuteScalarAsync(t));}
     private async Task<decimal> Money(string sql,CancellationToken t,Action<DbCommand>? bind=null){await using var c=await Command(sql,t);bind?.Invoke(c);return Convert.ToDecimal(await c.ExecuteScalarAsync(t));}
     private async Task<int> Exec(string sql,Action<DbCommand> bind,CancellationToken t){await using var c=await Command(sql,t);bind(c);return await c.ExecuteNonQueryAsync(t);}private async Task<List<T>> Query<T>(string sql,Action<DbCommand> bind,Func<DbDataReader,T> map,CancellationToken t){var a=new List<T>();await using var c=await Command(sql,t);bind(c);await using var r=await c.ExecuteReaderAsync(t);while(await r.ReadAsync(t))a.Add(map(r));return a;}
-    private async Task<DbCommand> Command(string sql,CancellationToken t){var cn=db.Database.GetDbConnection();if(cn.State!=System.Data.ConnectionState.Open)await cn.OpenAsync(t);var c=cn.CreateCommand();c.Transaction=db.Database.CurrentTransaction?.GetDbTransaction();c.CommandText=sql;Add(c,"organization",tenant.OrganizationId);Add(c,"branch",tenant.BranchId??TenantDefaults.BranchId);Add(c,"actor",user.UserName);return c;}private static void Add(DbCommand c,string n,object? v){if(c.Parameters.Contains(n))return;var p=c.CreateParameter();p.ParameterName=n;p.Value=v??DBNull.Value;c.Parameters.Add(p);}private void Audit(string action,string entity,Guid? id)=>db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),action,user.UserName,entity,id,DateTimeOffset.UtcNow,tenant.OrganizationId,tenant.BranchId??TenantDefaults.BranchId));
+    private async Task<DbCommand> Command(string sql,CancellationToken t){var cn=db.Database.GetDbConnection();if(cn.State!=System.Data.ConnectionState.Open)await cn.OpenAsync(t);var c=cn.CreateCommand();c.Transaction=db.Database.CurrentTransaction?.GetDbTransaction();c.CommandText=sql;Add(c,"organization",tenant.OrganizationId);Add(c,"branch",tenant.BranchId??TenantDefaults.BranchId);Add(c,"actor",user.UserName);Add(c,"wide",tenant.IsOrganizationWide);return c;}private static void Add(DbCommand c,string n,object? v){if(c.Parameters.Contains(n))return;var p=c.CreateParameter();p.ParameterName=n;p.Value=v??DBNull.Value;c.Parameters.Add(p);}private void Audit(string action,string entity,Guid? id)=>db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),action,user.UserName,entity,id,DateTimeOffset.UtcNow,tenant.OrganizationId,tenant.BranchId??TenantDefaults.BranchId));
 }
 public sealed record GenerateFinanceBatchRequest(DateTimeOffset PeriodStart,DateTimeOffset PeriodEnd,decimal DefaultHourlyRate,decimal MileageRate);
 public sealed record RecordFinancePaymentRequest(decimal Amount,string Reference,DateTimeOffset? ReceivedAt);
-public sealed record FundingReconciliationRequest(Guid ServiceUserId,DateTimeOffset PeriodStart,DateTimeOffset PeriodEnd,decimal AllowedVarianceHours,string? Notes);
+public sealed record FundingReconciliationRequest(Guid ServiceUserId,DateTimeOffset PeriodStart,DateTimeOffset PeriodEnd,decimal AllowedVarianceHours,string? Notes,DateOnly? ServiceFrom=null,DateOnly? ServiceTo=null);
 public sealed record Funding(string FundingSource,string FunderName,decimal AuthorizedHoursPerWeek,decimal HourlyRate);
 public sealed record BillingProfile(string ProviderName,string ProviderAddress,string ProviderEmail,string ProviderPhone,string CompanyNumber,string VatNumber,string Remittance,int TermsDays,decimal VatRate,string Exemption);
 public sealed record InvoiceLineResponse(Guid Id,Guid InvoiceId,Guid? VisitId,Guid ServiceUserId,string Description,decimal Quantity,decimal UnitRate,decimal Amount,string FundingSource,DateTimeOffset CreatedAt);

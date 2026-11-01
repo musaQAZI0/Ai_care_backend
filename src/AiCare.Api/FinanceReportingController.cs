@@ -12,39 +12,46 @@ namespace AiCare.Api;
 [ApiController]
 [Authorize(Roles = "Administrator,BackOffice,CareManager")]
 [Route("api/phase1/finance/reports")]
-public sealed class FinanceReportingController(CareDbContext db, ITenantContext tenant) : ControllerBase
+public sealed partial class FinanceReportingController(CareDbContext db, ITenantContext tenant) : ControllerBase
 {
     private Guid Branch => tenant.BranchId ?? AiCare.Domain.TenantDefaults.BranchId;
 
     [HttpGet("operational-performance")]
     public async Task<IActionResult> Performance([FromQuery] DateOnly from, [FromQuery] DateOnly to, CancellationToken token)
     {
-        if (from > to) return BadRequest(new { message = "Invalid report period." });
-
-        var revenue = await Money("""select coalesce(sum(d.net_amount),0) from finance_invoice_details d join "Invoices" i on i."Id"=d.invoice_id where d.organization_id=@org and (@wide or d.branch_id=@branch) and d.invoice_date between @from and @to and i."Status"<>'Void'""", from, to, token);
-        var workforce = await Money("select coalesce(sum(l.gross_pay),0) from finance_payroll_lines l where l.organization_id=@org and (@wide or l.branch_id=@branch) and l.created_at::date between @from and @to", from, to, token);
-        var claims = await Money("select coalesce(sum(amount),0) from finance_workforce_claims where organization_id=@org and (@wide or branch_id=@branch) and claim_date between @from and @to and status in ('Approved','Paid')", from, to, token);
-        var outstanding = await Money("""
-            select coalesce(sum(i."Amount"-coalesce(p.paid,0)-coalesce(a.allocated,0)-coalesce(c.credited,0)+coalesce(r.refunded,0)),0)
-            from "Invoices" i
-            left join lateral(select sum(amount) paid from finance_payments where invoice_id=i."Id") p on true
-            left join lateral(select sum(amount) allocated from finance_payment_allocations where invoice_id=i."Id" and reversed_at is null) a on true
-            left join lateral(select sum(amount) credited from finance_credit_notes where invoice_id=i."Id" and status='Issued') c on true
-            left join lateral(select sum(amount) refunded from finance_refunds where invoice_id=i."Id") r on true
-            where i."OrganizationId"=@org and (@wide or i."BranchId"=@branch) and i."Status" not in ('Void','Credited')
-            """, from, to, token);
-
-        return Ok(new
+        if (from==default || from>to || to==DateOnly.MaxValue) return BadRequest(new{message="Valid inclusive UK service dates are required."});
+        var rows=new List<object>();
+        await using var command=await Command("""
+          with charges as (
+           select l.currency,sum(line.net_amount) billed,count(distinct l.invoice_id)::int invoice_count
+           from finance_invoice_ledger l join finance_invoice_service_lines line on line.invoice_id=l.invoice_id and line.organization_id=l.organization_id
+           where l.organization_id=@org and (@wide or l.branch_id=@branch) and l.is_issued and line.service_date>=@from and line.service_date<@end group by l.currency
+          ), credits as (
+           select l.currency,-sum(c.net_amount) net_credits,-sum(c.tax_amount) tax_credits from finance_revenue_sources c
+           join finance_invoice_ledger l on l.invoice_id=c.invoice_id and l.organization_id=c.organization_id
+           where l.organization_id=@org and (@wide or l.branch_id=@branch) and l.is_issued and c.record_kind<>'InvoiceLine' and c.service_date>=@from and c.service_date<@end group by l.currency
+          )
+          select coalesce(charges.currency,credits.currency),coalesce(charges.billed,0),coalesce(charges.invoice_count,0),coalesce(credits.net_credits,0),coalesce(credits.tax_credits,0),coalesce(charges.billed,0)-coalesce(credits.net_credits,0)
+          from charges full join credits on credits.currency=charges.currency order by 1
+          """,token);
+        Add(command,"from",from);Add(command,"end",to.AddDays(1));
+        await using(var reader=await command.ExecuteReaderAsync(token))
         {
-            from,
-            to,
-            revenue,
-            directWorkforceCost = workforce,
-            approvedClaims = claims,
-            contribution = revenue - workforce - claims,
-            outstanding,
-            warning = "Operational management figures; not statutory accounts."
-        });
+          while(await reader.ReadAsync(token))rows.Add(new{currency=reader.GetString(0),billedServiceNet=reader.GetDecimal(1),invoiceCount=reader.GetInt32(2),attributedNetCredits=reader.GetDecimal(3),attributedTaxCredits=reader.GetDecimal(4),netServiceRevenue=reader.GetDecimal(5)});
+        }
+        var balances=await Rows("""
+          select currency,sum(outstanding) outstanding,sum(customer_credit) customer_credit,sum(credits) issued_gross_credits,sum(refunds) refunds,sum(net_cash) net_cash,sum(write_offs) write_offs
+          from finance_invoice_ledger where organization_id=@org and (@wide or branch_id=@branch) and is_issued group by currency order by currency
+          """,token);
+        var unattributed=await Rows("""
+          select l.invoice_id,l.invoice_number,l.currency,l.credits gross_credits,
+            case when exists(select 1 from finance_credit_reporting c where c.invoice_id=l.invoice_id and c.organization_id=l.organization_id and c.status='Issued' and (c.net_amount is null or c.tax_amount is null or c.service_date is null)) then 'CREDIT_SERVICE_ATTRIBUTION_REQUIRED' else 'MISSING_SERVICE_LINEAGE' end exception
+          from finance_invoice_ledger l where l.organization_id=@org and (@wide or l.branch_id=@branch) and l.is_issued
+          and (exists(select 1 from finance_credit_reporting c where c.invoice_id=l.invoice_id and c.organization_id=l.organization_id and c.status='Issued' and (c.net_amount is null or c.tax_amount is null or c.service_date is null)) or not exists(select 1 from finance_invoice_lines line where line.invoice_id=l.invoice_id and line.organization_id=l.organization_id) or exists(select 1 from finance_invoice_lines line where line.invoice_id=l.invoice_id and line.organization_id=l.organization_id and line.billable_event_id is null and line.recharge_id is null and line.correction_line_id is null))
+          order by l.invoice_id
+          """,token);
+        return Ok(new{from,to,serviceCurrencyTotals=rows,ledgerCurrencyTotals=balances,attributionExceptions=unattributed,
+          contribution=(decimal?)null,warning="Net service revenue subtracts explicitly attributed credit net amounts. Unattributed legacy records are listed separately. Write-offs, refunds and current balances are separate from revenue. Workforce cost allocations remain incomplete; contribution is unavailable."});
     }
 
     [HttpGet("sync-health")]

@@ -77,7 +77,7 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     {
         var client = _factory.CreateClient();
         await Login(client, "manager", "ManagerPassword123!");
-        var startsAt = TestIds.VisitStartsAt.AddDays(40);
+        var startsAt = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(40).AddHours(9), TimeSpan.Zero);
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/phase1/visits");
         request.Headers.Add("Idempotency-Key", $"manager-rota-{Guid.NewGuid():N}");
         request.Content = JsonContent.Create(new
@@ -587,7 +587,7 @@ public sealed class PermissionTests : IClassFixture<AiCareApiFactory>
     {
         var client = _factory.CreateClient();
         await Login(client, "admin", "AdminPassword123!");
-        var startsAt = TestIds.VisitStartsAt.AddDays(3);
+        var startsAt = new DateTimeOffset(DateTime.UtcNow.Date.AddDays(3).AddHours(9), TimeSpan.Zero);
 
         var create = await client.PostAsJsonAsync("/api/phase1/visits/recurring", new
         {
@@ -644,6 +644,7 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
                 ["Authentication:AllowLegacyProviderFallback"] = "true",
                 ["RateLimiting:AuthPermitLimit"] = "1000",
                 ["MedicationSafety:EmarProductionEnabled"] = "true",
+                ["MedicationSafety:PilotBranchId"] = TenantDefaults.BranchId.ToString(),
                 ["MedicationSafety:ClinicalSafetyOfficer"] = "Permission regression CSO",
                 ["MedicationSafety:MedicationSafetyLead"] = "Permission regression medication lead",
                 ["MedicationSafety:ClinicalSafetyCaseReference"] = "PERMISSION-REG-EMAR-SAFETY",
@@ -673,6 +674,7 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             var context = scope.ServiceProvider.GetRequiredService<CareDbContext>();
             context.Database.EnsureCreated();
             CreateGovernedFinanceSchema(context);
+            CreateRecurringVisitSchema(context);
             Seed(context);
         });
     }
@@ -700,6 +702,30 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
                 id text primary key, invoice_id text not null, organization_id text not null, branch_id text not null,
                 credit_number text not null, amount numeric not null, reason text not null,
                 status text not null default 'Issued', issued_by text not null
+            );
+            -- SQLite permission fixtures use a projection equivalent to the
+            -- balance fields read by InvoiceBalance. PostgreSQL migrations and
+            -- financial integrity are exercised by the finance workflow suites.
+            create view if not exists finance_invoice_ledger as
+            select i."Id" invoice_id, i."OrganizationId" organization_id,
+              coalesce((select sum(p.amount) from finance_payments p where p.invoice_id=i."Id" and p.organization_id=i."OrganizationId"),0) direct_payments,
+              0 receipt_allocations,
+              coalesce((select sum(r.amount) from finance_refunds r where r.invoice_id=i."Id" and r.organization_id=i."OrganizationId"),0) refunds,
+              coalesce((select sum(c.amount) from finance_credit_notes c where c.invoice_id=i."Id" and c.organization_id=i."OrganizationId" and c.status='Issued'),0) credits,
+              0 write_offs
+            from "Invoices" i;
+            """);
+    }
+    private static void CreateRecurringVisitSchema(CareDbContext context)
+    {
+        context.Database.ExecuteSqlRaw("""
+            create table if not exists recurring_visit_series (
+                id text primary key, organization_id text not null, branch_id text not null,
+                service_user_id text not null, frequency text not null, created_by text not null
+            );
+            create table if not exists recurring_visit_members (
+                series_id text not null, visit_id text not null unique, ordinal integer not null,
+                primary key (series_id, visit_id), unique (series_id, ordinal)
             );
             """);
     }
@@ -831,9 +857,9 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             new AppUser(Guid.NewGuid(), "admin", "admin@test.local", PasswordHasher.HashPassword("AdminPassword123!"), UserRole.Administrator, true, TenantDefaults.OrganizationId),
             new AppUser(Guid.NewGuid(), "manager", "manager@test.local", PasswordHasher.HashPassword("ManagerPassword123!"), UserRole.CareManager, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId),
             new AppUser(Guid.NewGuid(), "backoffice", "backoffice@test.local", PasswordHasher.HashPassword("BackOfficePassword123!"), UserRole.BackOffice, true, TenantDefaults.OrganizationId),
-            new AppUser(Guid.NewGuid(), "worker", "worker@test.local", PasswordHasher.HashPassword("WorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.WorkerId),
-            new AppUser(Guid.NewGuid(), "other-worker", "other@test.local", PasswordHasher.HashPassword("OtherWorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, null, TestIds.OtherWorkerId),
-            new AppUser(Guid.NewGuid(), "family", "family@test.local", PasswordHasher.HashPassword("FamilyPassword123!"), UserRole.FamilyMember, true, TenantDefaults.OrganizationId, null, null, TestIds.FamilyMemberId));
+            new AppUser(Guid.NewGuid(), "worker", "worker@test.local", PasswordHasher.HashPassword("WorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, TestIds.WorkerId),
+            new AppUser(Guid.NewGuid(), "other-worker", "other@test.local", PasswordHasher.HashPassword("OtherWorkerPassword123!"), UserRole.CareWorker, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, TestIds.OtherWorkerId),
+            new AppUser(Guid.NewGuid(), "family", "family@test.local", PasswordHasher.HashPassword("FamilyPassword123!"), UserRole.FamilyMember, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, null, TestIds.FamilyMemberId));
         context.SaveChanges();
     }
 }

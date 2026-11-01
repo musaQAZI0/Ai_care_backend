@@ -63,6 +63,17 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Invalid credentials." });
         }
 
+        if (user.OrganizationId is null || user.OrganizationId == Guid.Empty)
+        {
+            await RecordLoginAttempt(user, "MissingOrganization", cancellationToken);
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Account is not assigned to an organization." });
+        }
+        if (NeedsBranch(user.Role) && (user.BranchId is null || user.BranchId == Guid.Empty))
+        {
+            await RecordLoginAttempt(user, "MissingBranch", cancellationToken);
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Account is not assigned to a branch." });
+        }
+
         (bool Enabled, string Secret, DateTimeOffset? LockedUntil) mfa;
         bool mfaRequired;
         try
@@ -111,7 +122,7 @@ public class AuthController : ControllerBase
             new(JwtRegisteredClaimNames.UniqueName, user.UserName),
             new(ClaimTypes.Role, user.Role.ToString()),
             new(ClaimTypes.Email, user.Email),
-            new("organization_id", (user.OrganizationId ?? TenantDefaults.OrganizationId).ToString()),
+            new("organization_id", (user.OrganizationId ?? Guid.Empty).ToString()),
             new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
         };
         if (user.BranchId is not null) claims.Add(new Claim("branch_id", user.BranchId.Value.ToString()));
@@ -179,7 +190,9 @@ public class AuthController : ControllerBase
         if (!Guid.TryParse(subject, out var userId)) return Unauthorized();
         var user = _context.AppUsers.SingleOrDefault(item => item.Id == userId && item.IsActive);
         if (user is null) return Unauthorized();
-        var organizationId = user.OrganizationId ?? TenantDefaults.OrganizationId;
+        if (user.OrganizationId is null || user.OrganizationId == Guid.Empty) return Forbid();
+        if (NeedsBranch(user.Role) && (user.BranchId is null || user.BranchId == Guid.Empty)) return Forbid();
+        var organizationId = user.OrganizationId.Value;
         var organizationStatus = _context.Organizations.AsNoTracking().Where(item => item.Id == organizationId).Select(item => item.Status).FirstOrDefault() ?? "Active";
         return Ok(new { id = user.Id, userName = user.UserName, email = user.Email, role = user.Role.ToString(), organizationId, organizationStatus, branchId = user.BranchId, familyMemberId = user.FamilyMemberId, careWorkerId = user.CareWorkerId });
     }
@@ -195,6 +208,8 @@ public class AuthController : ControllerBase
         if (record.RevokedAt is not null || record.SessionId is null || !await SessionActive(record.SessionId.Value,cancellationToken)) return Unauthorized(new { message = "Refresh token is invalid or expired." });
         var user = await _context.AppUsers.SingleOrDefaultAsync(u => u.Id == record.UserId && u.IsActive, cancellationToken);
         if (user is null) return Unauthorized(new { message = "Invalid refresh request." });
+        if (user.OrganizationId is null || user.OrganizationId == Guid.Empty) return Forbid();
+        if (NeedsBranch(user.Role) && (user.BranchId is null || user.BranchId == Guid.Empty)) return Forbid();
         var replacement = CreateOpaqueToken(); var replacementHash = HashToken(replacement);
         if(await ConsumeRefreshToken(record.Id,replacementHash,cancellationToken)==0){await MarkSessionCompromised(record,cancellationToken);return Unauthorized(new { message = "Refresh token is invalid or expired." });}
         await StoreRefreshToken(user.Id, replacement, null, cancellationToken, record.SessionId, record.FamilyId, record.Id);
@@ -203,6 +218,8 @@ public class AuthController : ControllerBase
         await _context.SaveChangesAsync(cancellationToken);
         return Ok(new { token = CreateJwtToken(user,false,record.SessionId), refreshToken = replacement, expiresInMinutes = _jwtOptions.TokenLifetimeMinutes, sessionId=record.SessionId });
     }
+
+    private static bool NeedsBranch(UserRole role) => role is not (UserRole.Administrator or UserRole.BackOffice);
 
     [Authorize]
     [HttpPost("logout")]

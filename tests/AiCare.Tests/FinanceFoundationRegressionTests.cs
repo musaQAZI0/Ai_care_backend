@@ -39,6 +39,9 @@ public sealed class FinanceFoundationRegressionTests(PostgresRegressionFactory f
 
         var arrangement=await finance.PostAsJsonAsync("/api/phase1/finance/funding-arrangements",new{serviceUserId=personId,funderId=funder.Id,rateCardId=card.Id,startDate="2040-04-01T00:00:00Z",endDate="2041-03-31T23:59:59Z",invoiceFrequency="Monthly",allocationRule="Primary",billingReference="PO-2040",serviceType="Personal care",authorizedHoursPerWeek=7m,notes="Regression"});
         Assert.Equal(HttpStatusCode.Created,arrangement.StatusCode);
+        // Two concurrent overlapping creates must both be rejected after the first authorisation exists.
+        var competing=await Task.WhenAll(finance.PostAsJsonAsync("/api/phase1/finance/funding-arrangements",new{serviceUserId=personId,funderId=funder.Id,rateCardId=card.Id,startDate="2040-06-01T00:00:00Z",invoiceFrequency="Monthly",allocationRule="Primary",authorizedHoursPerWeek=2m}),finance.PostAsJsonAsync("/api/phase1/finance/funding-arrangements",new{serviceUserId=personId,funderId=funder.Id,rateCardId=card.Id,startDate="2040-07-01T00:00:00Z",invoiceFrequency="Monthly",allocationRule="Primary",authorizedHoursPerWeek=2m}));
+        Assert.All(competing,response=>Assert.Equal(HttpStatusCode.Conflict,response.StatusCode));
         Assert.Equal(HttpStatusCode.Conflict,(await finance.PostAsJsonAsync("/api/phase1/finance/funding-arrangements",new{serviceUserId=personId,funderId=funder.Id,rateCardId=card.Id,startDate="2040-05-01T00:00:00Z",endDate=(string?)null,invoiceFrequency="Monthly",allocationRule="Primary",authorizedHoursPerWeek=2m})).StatusCode);
         Assert.Contains("Foundation Council",await manager.GetStringAsync($"/api/phase1/finance/funding-arrangements?serviceUserId={personId}"));
 
@@ -46,6 +49,37 @@ public sealed class FinanceFoundationRegressionTests(PostgresRegressionFactory f
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="FUNDER_CREATED"&&x.EntityId==funder.Id));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="RATE_CHANGED"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="FUNDING_ARRANGEMENT_CREATED"));
+    }
+
+    [Fact]
+    public async Task FundingUsesRecipientBranchAndRejectsWrongCurrencyAndConcurrentOverlap()
+    {
+        await factory.EnsureClinicalSeedAsync();var branch=Guid.NewGuid();var person=Guid.NewGuid();var name=$"funding.scope.{Guid.NewGuid():N}";
+        using(var scope=factory.Services.CreateScope())
+        {
+            var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();db.Branches.Add(new Branch(branch,TenantDefaults.OrganizationId,"Funding target","Test","Active"));
+            db.ServiceUsers.Add(new ServiceUser(person,"Target recipient",new DateOnly(1955,1,1),"1","Care","Contact","",RiskLevel.Low,"Active","Address","None","None","Private","","","Independent","Independent","Verbal","Routine","Standard",TenantDefaults.OrganizationId,branch));
+            // This scenario deliberately manages a recipient in another branch;
+            // use an organization administrator rather than branch finance access.
+            db.AppUsers.Add(User(name,UserRole.Administrator));
+            db.AppUsers.Add(User(name+".branch",UserRole.BackOffice));await db.SaveChangesAsync();
+        }
+        var client=await Client(name);
+        var funderResponse=await client.PostAsJsonAsync("/api/phase1/finance/funders",new{name=$"Shared payer {Guid.NewGuid()}",funderType="Private",paymentTermsDays=30,defaultInvoiceFrequency="Monthly",currency="GBP",organizationWide=true});funderResponse.EnsureSuccessStatusCode();var funder=(await funderResponse.Content.ReadFromJsonAsync<Identifier>())!.Id;
+        var cardResponse=await client.PostAsJsonAsync("/api/phase1/finance/rate-cards",new{name=$"EUR card {Guid.NewGuid()}",serviceType="Care",currency="EUR",organizationWide=true});cardResponse.EnsureSuccessStatusCode();var card=(await cardResponse.Content.ReadFromJsonAsync<Identifier>())!.Id;
+        var wrongCurrency=new{serviceUserId=person,funderId=funder,rateCardId=card,startDate="2051-01-01T00:00:00Z",invoiceFrequency="Monthly",allocationRule="Primary",authorizedHoursPerWeek=1m};
+        var branchClient=await Client(name+".branch");
+        Assert.Equal(HttpStatusCode.NotFound,(await branchClient.PostAsJsonAsync("/api/phase1/finance/funding-arrangements",wrongCurrency)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync("/api/phase1/finance/funding-arrangements",wrongCurrency)).StatusCode);
+        var request=new{serviceUserId=person,funderId=funder,startDate="2051-01-01T00:00:00Z",endDate="2051-01-31T23:59:59Z",invoiceFrequency="Monthly",allocationRule="Primary",authorizedHoursPerWeek=1m};
+        var attempts=await Task.WhenAll(client.PostAsJsonAsync("/api/phase1/finance/funding-arrangements",request),client.PostAsJsonAsync("/api/phase1/finance/funding-arrangements",request));
+        Assert.Equal(1,attempts.Count(r=>r.StatusCode==HttpStatusCode.Created));Assert.Equal(1,attempts.Count(r=>r.StatusCode==HttpStatusCode.Conflict));
+        var id=(await attempts.Single(r=>r.StatusCode==HttpStatusCode.Created).Content.ReadFromJsonAsync<Identifier>())!.Id;
+        using var verify=factory.Services.CreateScope();var verifyDb=verify.ServiceProvider.GetRequiredService<CareDbContext>();
+        Assert.Equal(branch,await verifyDb.Database.SqlQueryRaw<Guid>("select branch_id as \"Value\" from funding_arrangements where id={0}",id).SingleAsync());
+        Assert.True(await verifyDb.AuditEvents.AnyAsync(e=>e.EntityId==id&&e.BranchId==branch));
+        await Assert.ThrowsAnyAsync<Exception>(()=>verifyDb.Database.ExecuteSqlRawAsync("update funding_arrangements set branch_id={0} where id={1}",TenantDefaults.BranchId,id));
+        Assert.DoesNotContain(id.ToString(),await client.GetStringAsync("/api/phase1/finance/integrity-findings"));
     }
 
     private static AppUser User(string name,UserRole role)=>new(Guid.NewGuid(),name,$"{name}@aicare.local",PasswordHasher.HashPassword("Admin123!"),role,true,TenantDefaults.OrganizationId,TenantDefaults.BranchId,null,null);

@@ -6,7 +6,8 @@ public static class EmarPilotGate
     {
         if (!configuration.GetValue<bool>("MedicationSafety:EmarProductionEnabled")) return false;
         var configured = configuration["MedicationSafety:PilotBranchId"];
-        return string.IsNullOrWhiteSpace(configured) ||
-               Guid.TryParse(configured, out var pilotBranchId) && pilotBranchId == branchId;
+        return Guid.TryParse(configured, out var pilotBranchId) &&
+               pilotBranchId != Guid.Empty &&
+               pilotBranchId == branchId;
     }
 }

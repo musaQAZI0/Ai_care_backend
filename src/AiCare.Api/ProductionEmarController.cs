@@ -30,6 +30,36 @@ public sealed class ProductionEmarController(CareDbContext db,ITenantContext ten
  [HttpGet("mar/{marId:guid}/history")]
  public async Task<IActionResult> History(Guid marId,CancellationToken token){var mar=await Mar(marId,token);if(mar is null)return NotFound();if(!CanRecord(mar.Value.Worker))return Forbid();return Ok(new{entries=await Ledger(marId,token),escalations=await Escalations(marId,token)});}
 
+ [HttpGet("mar/{marId:guid}/medication-authority")]
+ public async Task<IActionResult> MedicationAuthority(Guid marId,CancellationToken token)
+ {
+  var mar=await Mar(marId,token);if(mar is null)return NotFound();if(!CanRecord(mar.Value.Worker))return Forbid();
+  await using var command=await Command("""
+   select authority.instructions,authority.family_medicine_applies,
+     authority.family_recording_method,authority.family_responsible_person,
+     authority.family_escalation_route,authority.prior_dose_check
+   from care_plan_medication_authorities authority
+   join care_plan_versions version on version.care_plan_id=authority.care_plan_id
+   join "CarePlans" plan on plan."Id"=authority.care_plan_id
+   where authority.organization_id=@organization and authority.branch_id=@branch
+     and authority.service_user_id=@person and authority.medication_id=@medication
+     and authority.support_type='Administer' and authority.review_due_at>now()
+     and version.status='Active' and version.organization_id=@organization
+     and version.branch_id=@branch and version.service_user_id=@person
+     and plan."ServiceUserId"=@person and plan."OrganizationId"=@organization
+     and plan."BranchId"=@branch and plan."Status"='Active' and plan."ReviewDueAt">now()
+   limit 1
+   """,token);
+  Add(command,"person",mar.Value.Person);Add(command,"medication",mar.Value.Medication);
+  await using var reader=await command.ExecuteReaderAsync(token);
+  if(!await reader.ReadAsync(token))return Conflict(new{message=MedicationSupportAuthority.MissingMessage});
+  return Ok(new{
+   instructions=reader.GetString(0),familyMedicineApplies=reader.GetBoolean(1),
+   familyRecordingMethod=reader.GetString(2),familyResponsiblePerson=reader.GetString(3),
+   familyEscalationRoute=reader.GetString(4),priorDoseCheck=reader.GetString(5)
+  });
+ }
+
  [HttpPost("mar/{marId:guid}/record")]
  public async Task<IActionResult> Record(Guid marId,EmarRecordRequest request,CancellationToken token)
  {
@@ -51,6 +81,8 @@ public sealed class ProductionEmarController(CareDbContext db,ITenantContext ten
   if(await TryGetIdempotentLedger("POST /api/phase1/emar-safety/mar/record",idempotencyKey,token) is { } replay){await AuditNow("emar.idempotent_replay",marId,token);return Ok(replay);}
   var mar=await Mar(marId,token);if(mar is null)return NotFound();if(!CanRecord(mar.Value.Worker)){await AuditNow("emar.unauthorized_role_attempt",marId,token);return Forbid();}var medicationAuthorization=request.Outcome?.Trim()=="Administered"?await MedicationAuthorization(mar.Value.Worker,mar.Value.Route,token):null;if(medicationAuthorization is not null)return await ConflictBlock(marId,medicationAuthorization.Contains("competency",StringComparison.OrdinalIgnoreCase)?"emar.competency_block":"emar.worker_authorization_block",medicationAuthorization,token);if(mar.Value.Outcome!="Scheduled")return await ConflictBlock(marId,"emar.failed_submission","A terminal MAR outcome already exists.",token);
   var outcome=request.Outcome?.Trim();if(outcome is not("Administered" or "Omitted" or "Refused" or "Held" or "NotRequired"))return BadRequest(new{message="Outcome must be Administered, Omitted, Refused, Held, or NotRequired."});var serverNow=DateTimeOffset.UtcNow;var occurred=request.OccurredAt??serverNow;if(occurred>serverNow.AddMinutes(5))return Conflict(new{message="Dose occurrence time cannot be in the future; server time is authoritative."});
+  if(outcome=="Administered"&&!await MedicationSupportAuthority.AllowsAdministrationAsync(db,tenant.OrganizationId,tenant.BranchId??TenantDefaults.BranchId,mar.Value.Person,mar.Value.Medication,serverNow,token))return await ConflictBlock(marId,"emar.care_plan_authority_block",MedicationSupportAuthority.MissingMessage,token);
+  if(outcome=="Administered"&&!await CurrentVisitAssignment(marId,mar.Value.Person,mar.Value.Worker,token))return await ConflictBlock(marId,"emar.visit_assignment_block","The assigned worker or person on this MAR no longer matches an active visit. Review the assignment before administration.",token);
   var profile=await Profile(mar.Value.Medication,token);if(profile is null||Missing(profile.Value.Indication,profile.Value.Prescriber,profile.Value.ReconciledBy)||profile.Value.ReconciledAt is null)return await ConflictBlock(marId,"emar.blocked_unverified_medication","A complete reconciled medication safety profile is required.",token);if(outcome=="Administered"&&profile.Value.ReconciliationStatus!="Verified")return await ConflictBlock(marId,"emar.blocked_unverified_medication",$"Medication reconciliation status must be Verified before administration. Current status: {profile.Value.ReconciliationStatus}.",token);
   if(outcome=="Administered")
   {
@@ -82,12 +114,26 @@ public sealed class ProductionEmarController(CareDbContext db,ITenantContext ten
   return CreatedAtAction(nameof(History),new{marId},new{id,outcome,stockAfter=after,serverRecordedAt=serverNow});
  }
 
- private bool EmarProductionEnabled()=>EmarPilotGate.IsEnabledForBranch(configuration,tenant.BranchId??TenantDefaults.BranchId);
+ private bool EmarProductionEnabled()=>EmarPilotGate.IsEnabledForBranch(configuration,tenant.BranchId??(tenant.IsOrganizationWide?TenantDefaults.BranchId:Guid.Empty));
  private async Task<IActionResult> ConflictBlock(Guid id,string action,string message,CancellationToken token)=>await Block(id,action,message,StatusCodes.Status409Conflict,token);
  private async Task<IActionResult> Block(Guid id,string action,string message,int status,CancellationToken token){await AuditNow(action,id,token);return StatusCode(status,new{message});}
  private async Task AuditNow(string action,Guid id,CancellationToken token){Audit(action,id);await db.SaveChangesAsync(token);}
  private async Task CreateEscalation(Guid mar,Guid ledger,string type,string severity,string message,CancellationToken token,DateTimeOffset? dueAt=null)=>await Exec("insert into emar_escalations(id,mar_record_id,ledger_id,organization_id,branch_id,escalation_type,severity,message,owner,due_at) values(@id,@mar,@ledger,@organization,@branch,@type,@severity,@message,'Medication lead',@due)",c=>{Add(c,"id",Guid.NewGuid());Add(c,"mar",mar);Add(c,"ledger",ledger);Add(c,"type",type);Add(c,"severity",severity);Add(c,"message",message);Add(c,"due",dueAt);},token);
  private bool CanRecord(Guid worker)=>user.IsAdministrator||user.IsCareManager||user.IsCareCoordinator||(user.IsCareWorker&&user.CareWorkerId==worker);
+ private async Task<bool> CurrentVisitAssignment(Guid marId,Guid person,Guid worker,CancellationToken token)
+ {
+  await using var command=await Command("""
+   select exists(
+    select 1 from "MedicationAdministrationRecords" mar
+    join "Visits" visit on visit."Id"=mar."VisitId"
+    where mar."Id"=@mar and mar."OrganizationId"=@organization and mar."BranchId"=@branch
+      and visit."OrganizationId"=@organization and visit."BranchId"=@branch
+      and visit."ServiceUserId"=@person and visit."CareWorkerId"=@worker
+      and visit."Status"<>'Cancelled')
+   """,token);
+  Add(command,"mar",marId);Add(command,"person",person);Add(command,"worker",worker);
+  return Convert.ToBoolean(await command.ExecuteScalarAsync(token));
+ }
  private async Task<string?> MedicationAuthorization(Guid worker,string route,CancellationToken t){await using var c=await Command("select status,expires_at from worker_medication_authorizations where care_worker_id=@worker and organization_id=@organization and branch_id=@branch order by created_at desc limit 1",t);Add(c,"worker",worker);await using var r=await c.ExecuteReaderAsync(t);if(await r.ReadAsync(t)){var status=r.GetString(0);var expires=Date(r,1);if(status!="Authorized"||expires is not null&&expires<=DateTimeOffset.UtcNow)return "The assigned worker does not have current medication authorization.";}await r.DisposeAsync();await using var restriction=await Command("select exists(select 1 from worker_assignment_restrictions where care_worker_id=@worker and organization_id=@organization and status='Active' and restriction_type='Medication' and starts_at<=now() and (ends_at is null or ends_at>now()))",t);Add(restriction,"worker",worker);if(Convert.ToBoolean(await restriction.ExecuteScalarAsync(t)))return "The assigned worker has an active medication restriction.";await using var competency=await Command("select exists(select 1 from worker_competency_records where care_worker_id=@worker and organization_id=@organization and branch_id=@branch and status='Valid' and (expires_at is null or expires_at>now()) and (lower(competency)=lower('Medication administration') or lower(competency)=lower(@routeSkill) or lower(competency)=lower(@routeSkillAlt)))",t);Add(competency,"worker",worker);Add(competency,"routeSkill",$"Medication administration - {route}");Add(competency,"routeSkillAlt",$"{route} medication administration");return Convert.ToBoolean(await competency.ExecuteScalarAsync(t))?null:$"Current route-specific medication competency is required for {route} administration.";}
  private async Task<(Guid Medication,Guid Person,Guid Worker,DateTimeOffset Scheduled,string Outcome,bool IsPrn,string Route,int? ProfileVersion)?> Mar(Guid id,CancellationToken t){await using var c=await Command("select r.\"MedicationId\",m.\"ServiceUserId\",r.\"CareWorkerId\",r.\"ScheduledAt\",r.\"Outcome\",m.\"IsPrn\",m.\"Route\",r.\"MedicationProfileVersion\" from \"MedicationAdministrationRecords\" r join \"Medications\" m on m.\"Id\"=r.\"MedicationId\" where r.\"Id\"=@id and r.\"OrganizationId\"=@organization and r.\"BranchId\"=@branch",t);Add(c,"id",id);await using var r=await c.ExecuteReaderAsync(t);return await r.ReadAsync(t)?(r.GetGuid(0),r.GetGuid(1),r.GetGuid(2),r.GetFieldValue<DateTimeOffset>(3),r.GetString(4),r.GetBoolean(5),r.GetString(6),Int(r,7)):null;}
  private async Task<(string Indication,string Prescriber,DateTimeOffset? Start,DateTimeOffset? End,int Window,int? MaxPrn,int? MinInterval,int? EffectReview,decimal? Stock,bool Witness,DateTimeOffset? ReconciledAt,string ReconciledBy,string ReconciliationStatus,int Version)?> Profile(Guid id,CancellationToken t){await using var c=await Command("select indication,prescriber,start_date,end_date,dose_window_minutes,max_prn_doses_24h,min_prn_interval_minutes,prn_effect_review_minutes,stock_on_hand,requires_witness,last_reconciled_at,reconciled_by,reconciliation_status,profile_version from medication_safety_profiles where medication_id=@id and organization_id=@organization and branch_id=@branch for update",t);Add(c,"id",id);await using var r=await c.ExecuteReaderAsync(t);return await r.ReadAsync(t)?(r.GetString(0),r.GetString(1),Date(r,2),Date(r,3),r.GetInt32(4),Int(r,5),Int(r,6),Int(r,7),Decimal(r,8),r.GetBoolean(9),Date(r,10),r.GetString(11),r.GetString(12),r.GetInt32(13)):null;}

@@ -84,6 +84,14 @@ public sealed class EmarMonitoringRegressionTests(PostgresRegressionFactory fact
         }
         var alerts=await admin.GetStringAsync($"/api/phase1/emar-safety/medications/{medicationId}/alerts");
         Assert.Contains("ReviewDue",alerts); Assert.Contains("EndDateApproaching",alerts);
+        var queue = await admin.GetFromJsonAsync<JsonElement>($"/api/phase1/emar-safety/exceptions?personId={RegressionIds.ServiceUserId}&status=Open");
+        Assert.True(queue.GetArrayLength() >= 2);
+        Assert.Contains(queue.EnumerateArray(), item =>
+            item.GetProperty("marId").GetGuid() == overdueId && item.GetProperty("type").GetString() == "OverdueDose");
+        Assert.Contains(queue.EnumerateArray(), item =>
+            item.GetProperty("marId").GetGuid() == upcomingId && item.GetProperty("type").GetString() == "PRNEffectReview");
+        var otherPerson = await admin.GetFromJsonAsync<JsonElement>($"/api/phase1/emar-safety/exceptions?personId={Guid.NewGuid()}&status=Open");
+        Assert.Equal(0, otherPerson.GetArrayLength());
         using var alertJson=JsonDocument.Parse(alerts);
         var alertId=alertJson.RootElement[0].GetProperty("id").GetGuid();
         foreach(var action in new[]{"Acknowledge","Start","Resolve","Reopen"})

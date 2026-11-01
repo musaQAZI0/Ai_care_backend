@@ -132,6 +132,7 @@ public sealed class MedicationChangeRegressionTests : IClassFixture<PostgresRegr
             sourceReference = "RX-STOP-BASE", changeReason = "Initial review"
         });
         Assert.True(baseline.StatusCode == HttpStatusCode.OK, await baseline.Content.ReadAsStringAsync());
+        await MedicationAuthorityTestHelper.SeedAsync(factory, RegressionIds.ServiceUserId, medicationId);
 
         var beforeEffective = DateTimeOffset.UtcNow.AddHours(1);
         await StepUpTestGrants.GrantAsync(factory, requester, "medication");
@@ -198,6 +199,11 @@ public sealed class MedicationChangeRegressionTests : IClassFixture<PostgresRegr
             await Task.Delay(500);
         }
         Assert.True(applied, "The due approved stop was not activated by the background worker.");
+        var exceptions = await requester.GetFromJsonAsync<JsonElement>($"/api/phase1/emar-safety/exceptions?personId={RegressionIds.ServiceUserId}&status=Open");
+        Assert.Contains(exceptions.EnumerateArray(), item =>
+            item.GetProperty("marId").GetGuid() == firstMarId && item.GetProperty("type").GetString() == "OrderChanged");
+        Assert.Contains(exceptions.EnumerateArray(), item =>
+            item.GetProperty("marId").GetGuid() == secondMarId && item.GetProperty("type").GetString() == "OrderChanged");
         var activationEvents = await reviewer.GetStringAsync($"/api/phase1/medication-safety/medications/{medicationId}/changes/{changeId}/events");
         Assert.Contains("system:medication-change-activation", activationEvents);
         var oldMar = await requester.GetStringAsync($"/api/phase1/mar/{firstMarId}");

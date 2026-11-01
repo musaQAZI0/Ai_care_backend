@@ -68,6 +68,16 @@ public sealed class AuthorizationBoundaryRegressionTests(PostgresRegressionFacto
     }
 
     [Fact]
+    public async Task MissingBranchClaimCannotReadCareData()
+    {
+        await factory.EnsureClinicalSeedAsync();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Token(UserRole.CareManager, TenantDefaults.OrganizationId, null));
+        var response = await client.GetAsync($"/api/phase1/service-users/{RegressionIds.ServiceUserId}/complete-record");
+        Assert.True(response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
     public async Task InvalidBranchClaimCannotReadCareData()
     {
         await factory.EnsureClinicalSeedAsync();

@@ -129,13 +129,10 @@ public sealed class InvoiceDocumentsController(
     public async Task<IActionResult> List(string? status,CancellationToken token)
     {
         await MarkOverdue(token);var rows=new List<object>();await using var command=await Command("""
-            select d.invoice_id,d.invoice_number,d.invoice_date,d.due_date,d.customer_name,d.funder_name,d.currency,d.net_amount,d.vat_amount,d.gross_amount,i."Status",d.gross_amount-coalesce(p.paid,0)-coalesce(c.credited,0)+coalesce(r.refunded,0) balance
-            from finance_invoice_details d join "Invoices" i on i."Id"=d.invoice_id
-            left join (select invoice_id,sum(amount) paid from (select invoice_id,amount from finance_payments union all select invoice_id,amount from finance_payment_allocations where reversed_at is null) received group by invoice_id)p on p.invoice_id=d.invoice_id
-            left join (select invoice_id,sum(amount) credited from finance_credit_notes where status='Issued' group by invoice_id)c on c.invoice_id=d.invoice_id
-            left join (select invoice_id,sum(amount) refunded from finance_refunds group by invoice_id)r on r.invoice_id=d.invoice_id
-            where d.organization_id=@organization and (@organizationWide or d.branch_id=@branch) and (@status='' or i."Status"=@status) order by d.invoice_date desc,d.invoice_number desc limit 500
-            """,token);Add(command,"organizationWide",tenant.IsOrganizationWide);Add(command,"status",status?.Trim()??"");await using var reader=await command.ExecuteReaderAsync(token);while(await reader.ReadAsync(token))rows.Add(new{id=reader.GetGuid(0),invoiceNumber=reader.GetString(1),invoiceDate=reader.GetFieldValue<DateOnly>(2),dueDate=reader.GetFieldValue<DateOnly>(3),customer=reader.GetString(4),funder=reader.GetString(5),currency=reader.GetString(6),netAmount=reader.GetDecimal(7),vatAmount=reader.GetDecimal(8),grossAmount=reader.GetDecimal(9),status=reader.GetString(10),balance=reader.GetDecimal(11)});return Ok(rows);
+            select d.invoice_id,d.invoice_number,d.invoice_date,d.due_date,d.customer_name,d.funder_name,d.currency,d.net_amount,d.vat_amount,d.gross_amount,l.status,l.balance,d.care_recipient_name
+            from finance_invoice_ledger l join finance_invoice_details d on d.invoice_id=l.invoice_id and d.organization_id=l.organization_id
+            where l.organization_id=@organization and (@organizationWide or l.branch_id=@branch) and (@status='' or l.status=@status) order by d.invoice_date desc,d.invoice_number desc limit 500
+            """,token);Add(command,"organizationWide",tenant.IsOrganizationWide);Add(command,"status",status?.Trim()??"");await using var reader=await command.ExecuteReaderAsync(token);while(await reader.ReadAsync(token))rows.Add(new{id=reader.GetGuid(0),invoiceNumber=reader.GetString(1),invoiceDate=reader.GetFieldValue<DateOnly>(2),dueDate=reader.GetFieldValue<DateOnly>(3),customer=reader.GetString(4),funder=reader.GetString(5),currency=reader.GetString(6),netAmount=reader.GetDecimal(7),vatAmount=reader.GetDecimal(8),grossAmount=reader.GetDecimal(9),status=reader.GetString(10),balance=reader.GetDecimal(11),careRecipient=reader.IsDBNull(12)?null:reader.GetString(12)});return Ok(rows);
     }
     [HttpGet("invoices/{id:guid}")]
     public async Task<IActionResult> Detail(Guid id,CancellationToken token)
@@ -149,20 +146,28 @@ public sealed class InvoiceDocumentsController(
     {
         await MarkOverdue(token);var document=await Load(id,token);if(document is null)return NotFound();
         if(document.Status is "Generated" or "Reviewed" or "Approved")return Conflict(new{message="Issue the invoice before downloading its final PDF."});
+        if(!await CanExportDocument(id,token))return Forbid();
+        byte[] bytes;
+        try { bytes=await GetOrCreatePdf(id,document,token); }
+        catch(FinancePdfTextException ex) { return Conflict(new{code="invoice_pdf_text_unsupported",message=ex.Message}); }
         Audit("finance.invoice_pdf_downloaded",id);await db.SaveChangesAsync(token);
-        return File(await GetOrCreatePdf(id,document,token),"application/pdf",$"{document.Number}.pdf");
+        return File(bytes,"application/pdf",$"{document.Number}.pdf");
     }
 
     [HttpPost("invoices/{id:guid}/deliver")]
     public async Task<IActionResult> Deliver(Guid id,InvoiceDeliveryRequest request,CancellationToken token)
     {
         if(string.IsNullOrWhiteSpace(request.RecipientEmail)||!MailAddress.TryCreate(request.RecipientEmail.Trim(),out var recipient))return BadRequest(new{message="A valid recipient email is required."});
-        var document=await Load(id,token);if(document is null)return NotFound();if(document.Status is not ("Issued" or "Part paid" or "Paid" or "Overdue" or "Credited"))return Conflict(new{message="Only an issued invoice can be delivered."});
+        var document=await Load(id,token);if(document is null)return NotFound();if(document.Status is not ("Issued" or "Part paid" or "Paid" or "Overdue" or "Credited" or "Written off"))return Conflict(new{message="Only an issued invoice can be delivered."});
         if(!configuration.GetValue<bool>("Email:Enabled")||string.IsNullOrWhiteSpace(configuration["Resend:ApiKey"])||string.IsNullOrWhiteSpace(configuration["Resend:FromAddress"]))return StatusCode(StatusCodes.Status503ServiceUnavailable,new{message="Invoice email delivery is not configured."});
-        var bytes=await GetOrCreatePdf(id,document,token);var deliveryId=Guid.NewGuid();
+        if(!await CanExportDocument(id,token))return Forbid();
+        byte[] bytes;
+        try { bytes=await GetOrCreatePdf(id,document,token); }
+        catch(FinancePdfTextException ex) { return Conflict(new{code="invoice_pdf_text_unsupported",message=ex.Message}); }
+        var deliveryId=Guid.NewGuid();
         try
         {
-            var body=$"Please find invoice {document.Number} attached. Amount due: {document.Currency} {Math.Max(0,document.Gross-document.Paid-document.Credits):0.00}.";
+            var body=$"Please find invoice {document.Number} attached. Amount due: {document.Currency} {Math.Max(0,document.Gross-document.Paid-document.Credits-document.WriteOffs):0.00}.";
             var providerId=await resend.SendMessageAsync(new ResendMessage(recipient.Address,$"Invoice {document.Number}",body,$"invoice:{deliveryId:N}",Attachment:new ResendAttachment($"{document.Number}.pdf",bytes)),token);
             await RecordDelivery(deliveryId,id,recipient.Address,"Accepted",$"Resend message ID: {providerId}",null,token);Audit("finance.invoice_delivery_accepted",id);await db.SaveChangesAsync(token);logger.LogInformation("Resend accepted invoice {InvoiceId} for {RecipientDomain} as {ProviderMessageId}.",id,Domain(recipient.Address),providerId);return Accepted(new{id=deliveryId,status="Accepted"});
         }
@@ -175,15 +180,23 @@ public sealed class InvoiceDocumentsController(
     [HttpGet("aged-receivables")]
     public async Task<IActionResult> AgedReceivables(CancellationToken token)
     {
-        await MarkOverdue(token);var rows=new List<object>();await using var command=await Command("""
-            select d.invoice_id,d.invoice_number,d.customer_name,d.funder_name,d.invoice_date,d.due_date,i."Status",d.gross_amount-coalesce(p.paid,0)-coalesce(c.credited,0)+coalesce(r.refunded,0) balance,greatest(current_date-d.due_date,0) age
-            from finance_invoice_details d join "Invoices" i on i."Id"=d.invoice_id
-            left join (select invoice_id,sum(amount) paid from (select invoice_id,amount from finance_payments union all select invoice_id,amount from finance_payment_allocations where reversed_at is null) received group by invoice_id)p on p.invoice_id=d.invoice_id
-            left join (select invoice_id,sum(amount) credited from finance_credit_notes where status='Issued' group by invoice_id)c on c.invoice_id=d.invoice_id
-            left join (select invoice_id,sum(amount) refunded from finance_refunds group by invoice_id)r on r.invoice_id=d.invoice_id
-            where d.organization_id=@organization and (@organizationWide or d.branch_id=@branch) and i."Status" not in ('Generated','Approved','Void') and d.gross_amount-coalesce(p.paid,0)-coalesce(c.credited,0)+coalesce(r.refunded,0)>0 order by d.due_date
-            """,token);Add(command,"organizationWide",tenant.IsOrganizationWide);await using var reader=await command.ExecuteReaderAsync(token);decimal current=0,d30=0,d60=0,d90=0,older=0;while(await reader.ReadAsync(token)){var balance=reader.GetDecimal(7);var age=reader.GetInt32(8);if(age==0)current+=balance;else if(age<=30)d30+=balance;else if(age<=60)d60+=balance;else if(age<=90)d90+=balance;else older+=balance;rows.Add(new{id=reader.GetGuid(0),invoiceNumber=reader.GetString(1),customer=reader.GetString(2),funder=reader.GetString(3),invoiceDate=reader.GetDateTime(4),dueDate=reader.GetDateTime(5),status=reader.GetString(6),balance,ageDays=age});}
-        return Ok(new{asOf=DateOnly.FromDateTime(DateTime.UtcNow),totals=new{current,days1To30=d30,days31To60=d60,days61To90=d90,over90=older,total=current+d30+d60+d90+older},invoices=rows});
+        await MarkOverdue(token);var rows=new List<object>();var buckets=new Dictionary<string,decimal[]>();
+        await using var command=await Command("""
+          select l.invoice_id,l.invoice_number,d.customer_name,d.funder_name,l.invoice_date,l.due_date,l.status,l.outstanding,
+            greatest((now() at time zone 'Europe/London')::date-l.due_date,0),l.currency
+          from finance_invoice_ledger l join finance_invoice_details d on d.invoice_id=l.invoice_id and d.organization_id=l.organization_id
+          where l.organization_id=@organization and (@organizationWide or l.branch_id=@branch) and l.is_issued and l.outstanding>0 order by l.due_date,l.invoice_id
+          """,token);Add(command,"organizationWide",tenant.IsOrganizationWide);
+        await using var reader=await command.ExecuteReaderAsync(token);
+        while(await reader.ReadAsync(token))
+        {
+          var balance=reader.GetDecimal(7);var age=reader.GetInt32(8);var currency=reader.GetString(9);
+          if(!buckets.TryGetValue(currency,out var amounts)){amounts=new decimal[5];buckets[currency]=amounts;}
+          amounts[age==0?0:age<=30?1:age<=60?2:age<=90?3:4]+=balance;
+          rows.Add(new{id=reader.GetGuid(0),invoiceNumber=reader.GetString(1),customer=reader.GetString(2),funder=reader.GetString(3),invoiceDate=reader.GetFieldValue<DateOnly>(4),dueDate=reader.GetFieldValue<DateOnly>(5),status=reader.GetString(6),balance,ageDays=age,currency});
+        }
+        var totals=buckets.OrderBy(x=>x.Key).Select(x=>new{currency=x.Key,current=x.Value[0],days1To30=x.Value[1],days31To60=x.Value[2],days61To90=x.Value[3],over90=x.Value[4],total=x.Value.Sum()}).ToArray();
+        return Ok(new{asOf=DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTimeOffset.UtcNow,"Europe/London").DateTime),currencyTotals=totals,totals=totals.Length==1?totals[0]:null,invoices=rows});
     }
 
     private async Task<byte[]> GetOrCreatePdf(Guid id,InvoicePdfData document,CancellationToken token)
@@ -205,17 +218,21 @@ public sealed class InvoiceDocumentsController(
         return await Read()??throw new InvalidOperationException("The issued invoice document could not be archived.");
     }
 
+    private async Task<bool> CanExportDocument(Guid id,CancellationToken token)
+    {
+        await using var c=await Command("select p.id from finance_export_permissions p join \"Invoices\" i on i.\"OrganizationId\"=p.organization_id and i.\"BranchId\"=p.branch_id where i.\"Id\"=@invoice and p.organization_id=@organization and p.user_id=@exportUser and p.export_kind='InvoiceDocuments' and p.allow_identifiers and p.allow_rates and p.approved_by is not null and (now() at time zone 'Europe/London')::date between p.valid_from and p.valid_to order by p.id limit 1",token);Add(c,"invoice",id);Add(c,"exportUser",user.UserId??Guid.Empty);if(await c.ExecuteScalarAsync(token) is not Guid grant)return false;Audit($"finance.invoice_document_export_authority:{grant}",id);return true;
+    }
     private async Task<InvoicePdfData?> Load(Guid id,CancellationToken token)
     {
         await using var command=await Command("""
-            select d.invoice_number,d.invoice_date,d.due_date,i."Status",d.provider_name,d.provider_address,d.provider_email,d.provider_phone,d.company_number,d.vat_number,d.customer_name,d.customer_address,d.funder_name,d.payment_terms,d.remittance_details,d.currency,d.net_amount,d.vat_rate,d.vat_amount,d.gross_amount,d.vat_exemption_reason,coalesce((select sum(amount) from finance_payments where invoice_id=i."Id"),0)+coalesce((select sum(amount) from finance_payment_allocations where invoice_id=i."Id" and reversed_at is null),0)-coalesce((select sum(amount) from finance_refunds where invoice_id=i."Id"),0),coalesce((select sum(amount) from finance_credit_notes where invoice_id=i."Id" and status='Issued'),0)
+            select d.invoice_number,d.invoice_date,d.due_date,i."Status",d.provider_name,d.provider_address,d.provider_email,d.provider_phone,d.company_number,d.vat_number,d.customer_name,d.customer_address,d.funder_name,d.payment_terms,d.remittance_details,d.currency,d.net_amount,d.vat_rate,d.vat_amount,d.gross_amount,d.vat_exemption_reason,coalesce((select sum(amount) from finance_payments where invoice_id=i."Id" and organization_id=i."OrganizationId"),0)+coalesce((select sum(amount) from finance_payment_allocations where invoice_id=i."Id" and organization_id=i."OrganizationId" and reversed_at is null),0)-coalesce((select sum(amount) from finance_refunds where invoice_id=i."Id" and organization_id=i."OrganizationId"),0),coalesce((select sum(amount) from finance_credit_notes where invoice_id=i."Id" and organization_id=i."OrganizationId" and status='Issued'),0),d.care_recipient_name,coalesce((select sum(amount) from finance_write_offs where invoice_id=i."Id" and organization_id=i."OrganizationId"),0)
             from "Invoices" i join finance_invoice_details d on d.invoice_id=i."Id" where i."Id"=@invoice and i."OrganizationId"=@organization and (@organizationWide or i."BranchId"=@branch)
-            """,token);Add(command,"invoice",id);Add(command,"organizationWide",tenant.IsOrganizationWide);await using var reader=await command.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))return null;var values=new object[23];reader.GetValues(values);await reader.DisposeAsync();var lines=new List<InvoicePdfLine>();await using var lineCommand=await Command("select description,quantity,unit_rate,amount from finance_invoice_lines where invoice_id=@invoice and organization_id=@organization order by created_at",token);Add(lineCommand,"invoice",id);await using var lr=await lineCommand.ExecuteReaderAsync(token);while(await lr.ReadAsync(token))lines.Add(new(lr.GetString(0),lr.GetDecimal(1),lr.GetDecimal(2),lr.GetDecimal(3)));
+            """,token);Add(command,"invoice",id);Add(command,"organizationWide",tenant.IsOrganizationWide);await using var reader=await command.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))return null;var values=new object[25];reader.GetValues(values);await reader.DisposeAsync();var lines=new List<InvoicePdfLine>();await using var lineCommand=await Command("select description,quantity,unit_rate,amount,vat_treatment,vat_rate,vat_amount from finance_invoice_lines where invoice_id=@invoice and organization_id=@organization order by created_at",token);Add(lineCommand,"invoice",id);await using var lr=await lineCommand.ExecuteReaderAsync(token);while(await lr.ReadAsync(token))lines.Add(new(lr.GetString(0),lr.GetDecimal(1),lr.GetDecimal(2),lr.GetDecimal(3),lr.IsDBNull(4)?null:lr.GetString(4),lr.IsDBNull(5)?null:lr.GetDecimal(5),lr.IsDBNull(6)?null:lr.GetDecimal(6)));
         static DateOnly Date(object value)=>value is DateOnly date?date:DateOnly.FromDateTime((DateTime)value);
-        return new((string)values[0],Date(values[1]),Date(values[2]),(string)values[3],(string)values[4],(string)values[5],(string)values[6],(string)values[7],(string)values[8],(string)values[9],(string)values[10],(string)values[11],(string)values[12],(string)values[13],(string)values[14],(string)values[15],(decimal)values[16],(decimal)values[17],(decimal)values[18],(decimal)values[19],(decimal)values[21],(decimal)values[22],(string)values[20],lines);
+        return new((string)values[0],Date(values[1]),Date(values[2]),(string)values[3],(string)values[4],(string)values[5],(string)values[6],(string)values[7],(string)values[8],(string)values[9],(string)values[10],(string)values[11],(string)values[12],(string)values[13],(string)values[14],(string)values[15],(decimal)values[16],(decimal)values[17],(decimal)values[18],(decimal)values[19],(decimal)values[21],(decimal)values[22],(string)values[20],lines,values[23] is string recipient ? recipient : null,(decimal)values[24]);
     }
 
-    private async Task MarkOverdue(CancellationToken token){await using var command=await Command("update \"Invoices\" i set \"Status\"='Overdue' from finance_invoice_details d where d.invoice_id=i.\"Id\" and i.\"OrganizationId\"=@organization and (@organizationWide or i.\"BranchId\"=@branch) and i.\"Status\"='Issued' and d.due_date<current_date",token);Add(command,"organizationWide",tenant.IsOrganizationWide);await command.ExecuteNonQueryAsync(token);}
+    private async Task MarkOverdue(CancellationToken token){await using var command=await Command("update \"Invoices\" i set \"Status\"='Overdue' from finance_invoice_details d where d.invoice_id=i.\"Id\" and i.\"OrganizationId\"=@organization and (@organizationWide or i.\"BranchId\"=@branch) and i.\"Status\"='Issued' and d.due_date<(now() at time zone 'Europe/London')::date",token);Add(command,"organizationWide",tenant.IsOrganizationWide);await command.ExecuteNonQueryAsync(token);}
     private async Task AppendProfileVersion(CancellationToken token)
     {
         await using var version=await Command("""

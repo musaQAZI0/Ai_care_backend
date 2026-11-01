@@ -100,6 +100,10 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
             var member = await _db.FamilyMembers.AsNoTracking()
                 .FirstOrDefaultAsync(x => x.OrganizationId == organizationId && x.Id == familyMemberId, cancellationToken)
                 ?? throw new InvalidOperationException("Family member was not found.");
+            if (member.BranchId is not Guid memberBranchId || memberBranchId == Guid.Empty)
+                throw new InvalidOperationException("Family member must be assigned to a branch before invitation.");
+            if (branchId is not null && branchId != memberBranchId)
+                throw new InvalidOperationException("Family member belongs to a different branch.");
 
             await _db.Database.ExecuteSqlInterpolatedAsync($"""
                 update family_portal_invitations set status = 'Revoked', revoked_at = now()
@@ -111,10 +115,10 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
             await _db.Database.ExecuteSqlInterpolatedAsync($"""
                 insert into family_portal_invitations
                     (id, family_member_id, token_hash, email, status, expires_at, created_at, created_by_user_id, created_by, organization_id, branch_id)
-                values ({id}, {familyMemberId}, {tokenHash}, {member.Email}, {sentStatus}, {expiresAt}, now(), {actorUserId}, {actorName}, {organizationId}, {branchId})
+                values ({id}, {familyMemberId}, {tokenHash}, {member.Email}, {sentStatus}, {expiresAt}, now(), {actorUserId}, {actorName}, {organizationId}, {memberBranchId})
                 """, cancellationToken);
 
-            AddAudit(organizationId, branchId, actorName, "family.invited", "FamilyMember", familyMemberId);
+            AddAudit(organizationId, memberBranchId, actorName, "family.invited", "FamilyMember", familyMemberId);
             await _db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return new FamilyInvitationResult(id, sentStatus, expiresAt, null);
@@ -168,9 +172,11 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
             await using (var command = CreateCommand(connection))
             {
                 command.CommandText = """
-                    select i.id, i.family_member_id, i.organization_id, i.branch_id, i.email, f."FullName", i.status, i.expires_at
+                    select i.id, i.family_member_id, i.organization_id,
+                           case when i.branch_id is null or i.branch_id = f."BranchId" then f."BranchId" else null end,
+                           i.email, f."FullName", i.status, i.expires_at
                     from family_portal_invitations i
-                    join "FamilyMembers" f on f."Id" = i.family_member_id
+                    join "FamilyMembers" f on f."Id" = i.family_member_id and f."OrganizationId" = i.organization_id
                     where i.token_hash = @token
                     for update
                     """;
@@ -189,6 +195,8 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
 
             if (expiresAt <= now) throw new InvalidOperationException("Invitation has expired.");
             if (status is not ("Pending" or "Sent")) throw new InvalidOperationException("Invitation has already been used or revoked.");
+            if (branchId is null || branchId == Guid.Empty)
+                throw new InvalidOperationException("Family member must be assigned to a branch before activation.");
 
             var grant = await ReadGrantAsync(organizationId, familyMemberId, cancellationToken);
             if (grant is null || !string.Equals(grant.Value.VerificationStatus, "Verified", StringComparison.OrdinalIgnoreCase))
@@ -203,7 +211,7 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
             if (existingUser is null)
                 _db.AppUsers.Add(new AppUser(Guid.NewGuid(), email, email, passwordHash, UserRole.FamilyMember, true, organizationId, branchId, null, familyMemberId));
             else
-                _db.Entry(existingUser).CurrentValues.SetValues(existingUser with { UserName = email, Email = email, PasswordHash = passwordHash, IsActive = true });
+                _db.Entry(existingUser).CurrentValues.SetValues(existingUser with { UserName = email, Email = email, PasswordHash = passwordHash, IsActive = true, BranchId = branchId });
             await _db.SaveChangesAsync(cancellationToken);
 
             await _db.Database.ExecuteSqlInterpolatedAsync($"update family_portal_invitations set status = 'Accepted', accepted_at = {now}, accepted_terms_at = {now} where id = {invitationId}", cancellationToken);

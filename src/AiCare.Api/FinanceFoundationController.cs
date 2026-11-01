@@ -73,8 +73,8 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
                 """,c=>BindFunder(c,id,request),token);
             if(changed==0)return NotFound();
         }
-        catch(Npgsql.PostgresException e) when(e.SqlState==Npgsql.PostgresErrorCodes.UniqueViolation)
-        {return Conflict(new{message="An active funder with this name already exists."});}
+        catch(Npgsql.PostgresException e) when(e.SqlState is "23505" or "23514")
+        {return Conflict(new{message="The funder name conflicts or its referenced scope/currency cannot change."});}
         Audit("FUNDER_UPDATED","Funder",id);await db.SaveChangesAsync(token);return NoContent();
     }
 
@@ -109,8 +109,16 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
         if(!CanManage)return Forbid();
         if(request.ServiceUserId==Guid.Empty||request.FunderId==Guid.Empty||request.StartDate==default||request.EndDate<request.StartDate||request.AuthorizedHoursPerWeek<0)return BadRequest(new{message="Service user, funder, valid effective dates, and non-negative authorized hours are required."});
         if(!new[]{"Weekly","FourWeekly","Monthly","AdHoc"}.Contains(request.InvoiceFrequency)||!new[]{"Primary","Percentage","FixedAmount","Remainder"}.Contains(request.AllocationRule))return BadRequest(new{message="Invoice frequency or allocation rule is invalid."});
+        try { return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async()=>
+        {
+        await using var transaction=await db.Database.BeginTransactionAsync(token);
+        await Exec("select pg_advisory_xact_lock(hashtextextended(@fundingLock,0))",c=>Add(c,"fundingLock",$"funding:{tenant.OrganizationId}:{request.ServiceUserId}"),token);
+        var personRow=await Query("select \"BranchId\" from \"ServiceUsers\" where \"Id\"=@person and \"OrganizationId\"=@organization and (@wide or \"BranchId\"=@branch) for update",c=>Add(c,"person",request.ServiceUserId),r=>r.GetGuid(0),token);
+        if(personRow.Count!=1)return NotFound();
+        var targetBranch=personRow[0];
         var person=await db.ServiceUsers.AsNoTracking().AnyAsync(x=>x.Id==request.ServiceUserId&&x.OrganizationId==tenant.OrganizationId&&(tenant.IsOrganizationWide||x.BranchId==tenant.BranchId),token);if(!person)return NotFound();
-        var funder=await Scalar("select count(*) from finance_funders where id=@funder and organization_id=@organization and active and (@wide or branch_id is null or branch_id=@branch)",c=>Add(c,"funder",request.FunderId),token);if(funder==0)return BadRequest(new{message="Active funder was not found in this scope."});
+        var funder=await Scalar("select count(*) from finance_funders where id=@funder and organization_id=@organization and active and (branch_id is null or branch_id=@targetBranch)",c=>{Add(c,"funder",request.FunderId);Add(c,"targetBranch",targetBranch);},token);if(funder==0)return BadRequest(new{message="Active funder was not found in this scope."});
+        if(request.RateCardId is Guid card && await Scalar("select count(*) from finance_rate_cards c join finance_funders f on f.id=@funder and f.organization_id=c.organization_id where c.id=@card and c.organization_id=@organization and c.active and (c.branch_id is null or c.branch_id=@target) and c.currency=f.currency and (coalesce(@service,'')='' or lower(c.service_type)=lower(@service))",c=>{Add(c,"funder",request.FunderId);Add(c,"card",card);Add(c,"target",targetBranch);Add(c,"service",request.ServiceType);},token)!=1)return BadRequest(new{message="Rate card must match the recipient branch, funder currency and service type."});
         var overlap=await Scalar("""
           select count(*) from funding_arrangements where service_user_id=@person and organization_id=@organization and status='Active'
           and allocation_rule='Primary' and @allocation='Primary' and valid_from<=coalesce(@endDate,'infinity'::timestamptz) and coalesce(valid_to,'infinity'::timestamptz)>=@startDate
@@ -118,9 +126,18 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
         var id=Guid.NewGuid();
         await Exec("""
           insert into funding_arrangements(id,service_user_id,organization_id,branch_id,funding_source,funder_name,contract_reference,care_package_type,authorized_hours_per_week,hourly_rate,valid_from,valid_to,status,notes,created_at,updated_at,funder_id,rate_card_id,invoice_frequency,allocation_rule,purchase_order_reference,created_by)
-          select @id,@person,@organization,@branch,f.funder_type,f.name,@billingReference,@serviceType,@hours,0,@startDate,@endDate,'Active',@notes,now(),now(),f.id,@rateCard,@frequency,@allocation,@purchaseOrder,@actor from finance_funders f where f.id=@funder and f.organization_id=@organization
-        """,c=>{Add(c,"id",id);Add(c,"person",request.ServiceUserId);Add(c,"funder",request.FunderId);Add(c,"rateCard",request.RateCardId);Add(c,"billingReference",request.BillingReference??"");Add(c,"serviceType",request.ServiceType??"");Add(c,"hours",request.AuthorizedHoursPerWeek);Add(c,"startDate",request.StartDate);Add(c,"endDate",request.EndDate);Add(c,"frequency",request.InvoiceFrequency);Add(c,"allocation",request.AllocationRule);Add(c,"purchaseOrder",request.PurchaseOrderReference??"");Add(c,"notes",request.Notes??"");},token);
-        Audit("FUNDING_ARRANGEMENT_CREATED","FundingArrangement",id);await db.SaveChangesAsync(token);return Created($"/api/phase1/finance/funding-arrangements/{id}",new{id});
+          select @id,@person,@organization,@targetBranch,f.funder_type,f.name,@billingReference,@serviceType,@hours,0,@startDate,@endDate,'Active',@notes,now(),now(),f.id,@rateCard,@frequency,@allocation,@purchaseOrder,@actor from finance_funders f where f.id=@funder and f.organization_id=@organization
+        """,c=>{Add(c,"id",id);Add(c,"targetBranch",targetBranch);Add(c,"person",request.ServiceUserId);Add(c,"funder",request.FunderId);Add(c,"rateCard",request.RateCardId);Add(c,"billingReference",request.BillingReference??"");Add(c,"serviceType",request.ServiceType??"");Add(c,"hours",request.AuthorizedHoursPerWeek);Add(c,"startDate",request.StartDate);Add(c,"endDate",request.EndDate);Add(c,"frequency",request.InvoiceFrequency);Add(c,"allocation",request.AllocationRule);Add(c,"purchaseOrder",request.PurchaseOrderReference??"");Add(c,"notes",request.Notes??"");},token);
+        db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"FUNDING_ARRANGEMENT_CREATED",user.UserName,"FundingArrangement",id,DateTimeOffset.UtcNow,tenant.OrganizationId,targetBranch));await db.SaveChangesAsync(token);await transaction.CommitAsync(token);return Created($"/api/phase1/finance/funding-arrangements/{id}",new{id});
+        }); }
+        catch(Npgsql.PostgresException e) when(e.SqlState is "23514" or "23P01" or "23505"){return Conflict(new{message="Funding references or effective dates changed. Reload configuration before retrying."});}
+    }
+
+    [HttpGet("integrity-findings")]
+    public async Task<IActionResult> IntegrityFindings(CancellationToken token)
+    {
+        if(!CanManage)return Forbid();
+        return Ok(await Query("select id,code,branch_id from finance_funding_integrity_findings where organization_id=@organization and (@wide or branch_id=@branch) order by code,id",_=>{},r=>new{id=r.GetGuid(0),code=r.GetString(1),branchId=r.GetGuid(2)},token));
     }
 
     [HttpGet("rate-cards")]
@@ -142,25 +159,28 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
     [HttpPost("rate-cards/{rateCardId:guid}/versions")]
     public async Task<IActionResult> CreateRateVersion(Guid rateCardId,RateVersionRequest request,CancellationToken token)
     {
-        if(!CanManage)return Forbid();if(request.EffectiveFrom==default||request.EffectiveTo<request.EffectiveFrom||request.Rules.Count==0||request.Rules.Any(x=>x.UnitRate<0||!new[]{"Hour","Visit","Mile","Item"}.Contains(x.Unit)))return BadRequest(new{message="Valid effective dates and at least one valid rate rule are required."});
+        if(!CanManage)return Forbid();if(request.EffectiveFrom==default||request.EffectiveTo<request.EffectiveFrom||request.Rules.Count==0||request.Rules.Any(x=>x.MinimumMinutes<0||x.MaximumMinutes<=0||(x.MinimumMinutes.HasValue&&x.MaximumMinutes.HasValue&&x.MinimumMinutes>=x.MaximumMinutes)||(x.StaffLevel is not null&&string.IsNullOrWhiteSpace(x.StaffLevel))||(x.LocationCode is not null&&string.IsNullOrWhiteSpace(x.LocationCode))||x.UnitRate<0||decimal.Round(x.UnitRate,4)!=x.UnitRate||x.MinimumQuantity<0||decimal.Round(x.MinimumQuantity,2)!=x.MinimumQuantity||!new[]{"Any","Weekday","Weekend","BankHoliday"}.Contains(x.DayType)||!new[]{"Standard","Weekend","BankHoliday","Night","Cancellation","Travel","Mileage"}.Contains(x.RuleType)||x.TimeFrom.HasValue!=x.TimeTo.HasValue||(x.TimeFrom.HasValue&&x.TimeFrom==x.TimeTo)||!new[]{"Hour","Visit","Mile","Item"}.Contains(x.Unit)))return BadRequest(new{message="Valid effective dates and at least one valid rate rule are required."});
         var card=await Scalar("select count(*) from finance_rate_cards where id=@card and organization_id=@organization and active and (@wide or branch_id is null or branch_id=@branch)",c=>Add(c,"card",rateCardId),token);if(card==0)return NotFound();
         var overlap=await Scalar("select count(*) from finance_rate_versions where rate_card_id=@card and status='Active' and effective_from<=coalesce(@effectiveTo,'infinity'::date) and coalesce(effective_to,'infinity'::date)>=@effectiveFrom",c=>{Add(c,"card",rateCardId);Add(c,"effectiveFrom",request.EffectiveFrom);Add(c,"effectiveTo",request.EffectiveTo);},token);if(overlap>0)return Conflict(new{message="An active rate version overlaps these effective dates."});
-        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async () =>
         {
-            await using var tx=await db.Database.BeginTransactionAsync(token);var id=Guid.NewGuid();var version=await Scalar("select coalesce(max(version),0)+1 from finance_rate_versions where rate_card_id=@card",c=>Add(c,"card",rateCardId),token);
-            await Exec("insert into finance_rate_versions(id,rate_card_id,organization_id,branch_id,version,effective_from,effective_to,status,created_by) values(@id,@card,@organization,@recordBranch,@version,@effectiveFrom,@effectiveTo,'Active',@actor)",c=>{Add(c,"id",id);Add(c,"card",rateCardId);Add(c,"recordBranch",tenant.IsOrganizationWide?null:Branch);Add(c,"version",version);Add(c,"effectiveFrom",request.EffectiveFrom);Add(c,"effectiveTo",request.EffectiveTo);},token);
-            foreach(var rule in request.Rules)await Exec("insert into finance_rate_rules(id,rate_version_id,organization_id,rule_type,day_type,time_from,time_to,unit,unit_rate,minimum_quantity,priority,created_by) values(@id,@versionId,@organization,@ruleType,@dayType,@timeFrom,@timeTo,@unit,@rate,@minimum,@priority,@actor)",c=>{Add(c,"id",Guid.NewGuid());Add(c,"versionId",id);Add(c,"ruleType",rule.RuleType);Add(c,"dayType",rule.DayType);Add(c,"timeFrom",rule.TimeFrom);Add(c,"timeTo",rule.TimeTo);Add(c,"unit",rule.Unit);Add(c,"rate",rule.UnitRate);Add(c,"minimum",rule.MinimumQuantity);Add(c,"priority",rule.Priority);},token);
+            await using var tx=await db.Database.BeginTransactionAsync(token);
+            await Exec("select pg_advisory_xact_lock(hashtextextended(@key,0))",c=>Add(c,"key",$"finance-rate:{tenant.OrganizationId}:{rateCardId}"),token);
+            if(await Scalar("select count(*) from finance_rate_versions where rate_card_id=@card and status='Active' and effective_from<=coalesce(@end,'infinity'::date) and coalesce(effective_to,'infinity'::date)>=@start",c=>{Add(c,"card",rateCardId);Add(c,"start",request.EffectiveFrom);Add(c,"end",request.EffectiveTo);},token)>0)return Conflict(new{message="An active rate version overlaps these dates. Reload before retrying."});
+            var id=Guid.NewGuid();var version=await Scalar("select coalesce(max(version),0)+1 from finance_rate_versions where rate_card_id=@card",c=>Add(c,"card",rateCardId),token);
+            await Exec("insert into finance_rate_versions(id,rate_card_id,organization_id,branch_id,version,effective_from,effective_to,status,created_by) values(@id,@card,@organization,(select branch_id from finance_rate_cards where id=@card),@version,@effectiveFrom,@effectiveTo,'Active',@actor)",c=>{Add(c,"id",id);Add(c,"card",rateCardId);Add(c,"recordBranch",tenant.IsOrganizationWide?null:Branch);Add(c,"version",version);Add(c,"effectiveFrom",request.EffectiveFrom);Add(c,"effectiveTo",request.EffectiveTo);},token);
+            foreach(var rule in request.Rules)await Exec("insert into finance_rate_rules(id,rate_version_id,organization_id,rule_type,day_type,time_from,time_to,unit,unit_rate,minimum_quantity,priority,created_by,staff_level,location_code,minimum_minutes,maximum_minutes) values(@id,@versionId,@organization,@ruleType,@dayType,@timeFrom,@timeTo,@unit,@rate,@minimum,@priority,@actor,@staffLevel,@locationCode,@minimumMinutes,@maximumMinutes)",c=>{Add(c,"id",Guid.NewGuid());Add(c,"versionId",id);Add(c,"ruleType",rule.RuleType);Add(c,"dayType",rule.DayType);Add(c,"timeFrom",rule.TimeFrom);Add(c,"timeTo",rule.TimeTo);Add(c,"unit",rule.Unit);Add(c,"rate",rule.UnitRate);Add(c,"minimum",rule.MinimumQuantity);Add(c,"priority",rule.Priority);Add(c,"staffLevel",rule.StaffLevel);Add(c,"locationCode",rule.LocationCode);Add(c,"minimumMinutes",rule.MinimumMinutes);Add(c,"maximumMinutes",rule.MaximumMinutes);},token);
             Audit("RATE_CHANGED","RateVersion",id);await db.SaveChangesAsync(token);await tx.CommitAsync(token);return Created($"/api/phase1/finance/rate-cards/{rateCardId}/versions/{id}",new{id,version});
         });
     }
 
     [HttpGet("rate-cards/{rateCardId:guid}/versions")]
     public async Task<IActionResult> RateVersions(Guid rateCardId,CancellationToken token)=>Ok(await Query("""
-      select v.id,v.version,v.effective_from,v.effective_to,v.status,r.id,r.rule_type,r.day_type,r.unit,r.unit_rate,r.minimum_quantity,r.priority
+      select v.id,v.version,v.effective_from,v.effective_to,v.status,r.id,r.rule_type,r.day_type,r.unit,r.unit_rate,r.minimum_quantity,r.priority,r.staff_level,r.location_code,r.minimum_minutes,r.maximum_minutes,r.time_from,r.time_to
       from finance_rate_versions v join finance_rate_cards c on c.id=v.rate_card_id left join finance_rate_rules r on r.rate_version_id=v.id
       where v.rate_card_id=@card and v.organization_id=@organization and (@wide or c.branch_id is null or c.branch_id=@branch)
       order by v.version desc,r.priority desc
-    """,c=>Add(c,"card",rateCardId),r=>new{versionId=r.GetGuid(0),version=r.GetInt32(1),effectiveFrom=r.GetFieldValue<DateOnly>(2),effectiveTo=r.IsDBNull(3)?null:(DateOnly?)r.GetFieldValue<DateOnly>(3),status=r.GetString(4),ruleId=r.IsDBNull(5)?null:(Guid?)r.GetGuid(5),ruleType=r.IsDBNull(6)?null:r.GetString(6),dayType=r.IsDBNull(7)?null:r.GetString(7),unit=r.IsDBNull(8)?null:r.GetString(8),unitRate=r.IsDBNull(9)?null:(decimal?)r.GetDecimal(9),minimumQuantity=r.IsDBNull(10)?null:(decimal?)r.GetDecimal(10),priority=r.IsDBNull(11)?null:(int?)r.GetInt32(11)},token));
+    """,c=>Add(c,"card",rateCardId),r=>new{versionId=r.GetGuid(0),version=r.GetInt32(1),effectiveFrom=r.GetFieldValue<DateOnly>(2),effectiveTo=r.IsDBNull(3)?null:(DateOnly?)r.GetFieldValue<DateOnly>(3),status=r.GetString(4),ruleId=r.IsDBNull(5)?null:(Guid?)r.GetGuid(5),ruleType=r.IsDBNull(6)?null:r.GetString(6),dayType=r.IsDBNull(7)?null:r.GetString(7),unit=r.IsDBNull(8)?null:r.GetString(8),unitRate=r.IsDBNull(9)?null:(decimal?)r.GetDecimal(9),minimumQuantity=r.IsDBNull(10)?null:(decimal?)r.GetDecimal(10),priority=r.IsDBNull(11)?null:(int?)r.GetInt32(11),staffLevel=r.IsDBNull(12)?null:r.GetString(12),locationCode=r.IsDBNull(13)?null:r.GetString(13),minimumMinutes=r.IsDBNull(14)?null:(decimal?)r.GetDecimal(14),maximumMinutes=r.IsDBNull(15)?null:(decimal?)r.GetDecimal(15),timeFrom=r.IsDBNull(16)?null:(TimeOnly?)r.GetFieldValue<TimeOnly>(16),timeTo=r.IsDBNull(17)?null:(TimeOnly?)r.GetFieldValue<TimeOnly>(17)},token));
 
     private static string? ValidateFunder(FunderRequest r)=>string.IsNullOrWhiteSpace(r.Name)?"Funder name is required.":!new[]{"LocalAuthority","Private","Family","NHS","Organisation","Other"}.Contains(r.FunderType)?"Funder type is invalid.":r.PaymentTermsDays is <0 or >365?"Payment terms must be between 0 and 365 days.":!new[]{"Weekly","FourWeekly","Monthly","AdHoc"}.Contains(r.DefaultInvoiceFrequency)?"Invoice frequency is invalid.":!Currency(r.Currency)?"Currency must be a three-letter code.":!string.IsNullOrWhiteSpace(r.BillingEmail)&&!System.Net.Mail.MailAddress.TryCreate(r.BillingEmail,out _)?"Billing email is invalid.":null;
     private static bool Currency(string value)=>!string.IsNullOrWhiteSpace(value)&&value.Trim().Length==3&&value.Trim().All(char.IsLetter);
@@ -177,4 +197,5 @@ public sealed record FunderRequest(string Name,string FunderType,string? Billing
 public sealed record FundingArrangementRequest(Guid ServiceUserId,Guid FunderId,Guid? RateCardId,DateTimeOffset StartDate,DateTimeOffset? EndDate,string InvoiceFrequency,string AllocationRule,string? BillingReference,string? PurchaseOrderReference,string? ServiceType,decimal AuthorizedHoursPerWeek,string? Notes);
 public sealed record RateCardRequest(string Name,string ServiceType,string Currency,bool OrganizationWide=false);
 public sealed record RateVersionRequest(DateOnly EffectiveFrom,DateOnly? EffectiveTo,List<RateRuleRequest> Rules);
-public sealed record RateRuleRequest(string RuleType,string DayType,string Unit,decimal UnitRate,decimal MinimumQuantity,int Priority,TimeOnly? TimeFrom=null,TimeOnly? TimeTo=null);
+[System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow)]
+public sealed record RateRuleRequest(string RuleType,string DayType,string Unit,decimal UnitRate,decimal MinimumQuantity,int Priority,TimeOnly? TimeFrom=null,TimeOnly? TimeTo=null,string? StaffLevel=null,string? LocationCode=null,decimal? MinimumMinutes=null,decimal? MaximumMinutes=null);

@@ -59,7 +59,12 @@ public sealed class FinanceGovernanceRegressionTests(PostgresRegressionFactory f
             "/api/phase1/finance/invoice-batches", new { periodStart=start, periodEnd=end, defaultHourlyRate=25m, mileageRate=0m })).StatusCode);
         Assert.Equal(2, (await finance.GetFromJsonAsync<List<InvoiceLine>>($"/api/phase1/finance/invoices/{invoiceId}/lines"))!.Count);
 
-        var reconciliation=await finance.PostAsJsonAsync("/api/phase1/finance/funding-reconciliations",new{serviceUserId=personId,periodStart=start,periodEnd=end,allowedVarianceHours=0.1m,notes="Regression reconciliation"});
+        using(var scope=factory.Services.CreateScope())
+        {
+          var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();
+          await db.Database.ExecuteSqlRawAsync("update funding_arrangements a set funder_id=e.funder_id,rate_card_id=v.rate_card_id from finance_billable_events e join finance_rate_versions v on v.id=e.rate_version_id where a.service_user_id={0} and a.funder_id is null and e.service_user_id=a.service_user_id",personId);
+        }
+        var reconciliation=await finance.PostAsJsonAsync("/api/phase1/finance/funding-reconciliations",new{serviceUserId=personId,periodStart=start,periodEnd=end,serviceFrom="2032-03-02",serviceTo="2032-03-06",allowedVarianceHours=0.1m,notes="Regression reconciliation"});
         Assert.Equal(HttpStatusCode.Created,reconciliation.StatusCode);
         Assert.Contains("varianceHours",await reconciliation.Content.ReadAsStringAsync());
         var dashboard=await finance.GetStringAsync("/api/phase1/finance/dashboard");

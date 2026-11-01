@@ -8,6 +8,7 @@ public static class PublishedRotaAccess
 {
     public static HashSet<Guid> AdditionalVisitIds(CareDbContext db, ITenantContext tenant, Guid workerId)
     {
+        if (!db.Database.IsNpgsql()) return [];
         return db.Database.SqlQuery<Guid>($"""
             select a.visit_id as "Value" from visit_care_worker_assignments a
             where a.organization_id={tenant.OrganizationId} and a.care_worker_id={workerId}
@@ -22,6 +23,7 @@ public static class PublishedRotaAccess
 
     public static HashSet<Guid> CurrentVisitIds(CareDbContext db, ITenantContext tenant, Guid workerId)
     {
+        if (!db.Database.IsNpgsql()) return [];
         return db.Database.SqlQuery<Guid>($"""
             select pv.visit_id as "Value"
             from rota_publications p

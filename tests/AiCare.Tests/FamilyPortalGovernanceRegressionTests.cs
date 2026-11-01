@@ -89,6 +89,12 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
         var family = _factory.CreateClient();
         var familyLogin = await Login(family, seed.Email, "FamilySecure123!");
         family.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", familyLogin.Token);
+        using (var accountScope = _factory.Services.CreateScope())
+        {
+            var db = accountScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            var familyAccount = await db.AppUsers.SingleAsync(x => x.FamilyMemberId == seed.FamilyMemberId);
+            Assert.Equal(TenantDefaults.BranchId, familyAccount.BranchId);
+        }
 
         var people = await family.GetAsync("/api/family/people");
         Assert.Equal(HttpStatusCode.OK, people.StatusCode);

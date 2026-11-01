@@ -7,17 +7,23 @@
     <UserSecretsId>d8acc770-b5b6-4335-bf38-6eea5c79aa68</UserSecretsId>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="AiCare.Tests" />
+    <EmbeddedResource Include="Fonts/NotoSans.ttf;Fonts/NotoSansArabic.ttf;Fonts/NotoSansSC.otf" />
+    <Content Include="Fonts/*.LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <ProjectReference Include="..\AiCare.Application\AiCare.Application.csproj" />
     <ProjectReference Include="..\AiCare.Domain\AiCare.Domain.csproj" />
     <ProjectReference Include="..\AiCare.Infrastructure\AiCare.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" Version="8.3.1.5" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.20" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.20">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.20" />
+    <PackageReference Include="SkiaSharp.HarfBuzz" Version="3.119.4" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.4" />
   </ItemGroup>
 </Project>

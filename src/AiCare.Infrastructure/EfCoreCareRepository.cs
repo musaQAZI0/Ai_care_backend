@@ -431,7 +431,7 @@ public sealed class EfCoreCareRepository : ICareRepository
 
     public Incident AddIncident(CreateIncidentRequest request)
     {
-        var incident = new Incident(Guid.NewGuid(), request.ServiceUserId, request.VisitId, request.Category, request.Severity, request.Description, "Reported", DateTimeOffset.Now, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId);
+        var incident = new Incident(Guid.NewGuid(), request.ServiceUserId, request.VisitId, request.Category, request.Severity, request.Description, "Reported", DateTimeOffset.UtcNow, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId);
         _context.Incidents.Add(incident);
         AddAudit("incident.reported", "system", nameof(Incident), incident.Id);
         _context.SaveChanges();

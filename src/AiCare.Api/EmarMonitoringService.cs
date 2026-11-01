@@ -28,6 +28,10 @@ public sealed class EmarMonitoringService(CareDbContext db, IConfiguration confi
                 join medication_safety_profiles p on p.medication_id=r."MedicationId"
                   and p.organization_id=r."OrganizationId" and p.branch_id=r."BranchId"
                 where r."Outcome"='Scheduled' and p.reconciliation_status='Verified'
+                  and (r."MedicationProfileVersion"=p.profile_version or
+                    (r."MedicationProfileVersion" is null and not exists(
+                      select 1 from medication_change_requests c where c.medication_id=r."MedicationId"
+                        and c.organization_id=r."OrganizationId" and c.branch_id=r."BranchId" and c.status='Applied')))
                   and (@pilotBranchId is null or r."BranchId"=@pilotBranchId)
                   and r."ScheduledAt" + p.dose_window_minutes * interval '1 minute' < now()
                 on conflict do nothing

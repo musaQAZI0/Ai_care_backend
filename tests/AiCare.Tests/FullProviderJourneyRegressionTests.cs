@@ -78,6 +78,11 @@ public sealed class FullProviderJourneyRegressionTests(PostgresRegressionFactory
             db.Visits.Add(new Visit(visitId, serviceUserId, workerId, starts, "Morning care", 60, "Personal care; Nutrition", VisitStatus.Scheduled, null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             await db.SaveChangesAsync();
         }
+        var visitDate = DateOnly.FromDateTime(starts.UtcDateTime);
+        var weekStart = visitDate.AddDays(-((int)visitDate.DayOfWeek + 6) % 7);
+        var publication = await manager.PostAsJsonAsync("/api/phase1/rota-publications", new { branchId = TenantDefaults.BranchId, weekStart });
+        Assert.True(publication.StatusCode == HttpStatusCode.Created,
+            $"Rota publication returned {(int)publication.StatusCode}: {await publication.Content.ReadAsStringAsync()}");
 
         var materializedTasks = await worker.GetFromJsonAsync<List<VisitTaskDto>>($"/api/phase1/visits/{visitId}/tasks");
         var visitTask = Assert.Single(materializedTasks!);

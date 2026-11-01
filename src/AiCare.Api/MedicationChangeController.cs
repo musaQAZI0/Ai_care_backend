@@ -49,6 +49,10 @@ public sealed class MedicationChangeController(CareDbContext db, ITenantContext 
         if (request.EffectiveAt < DateTimeOffset.UtcNow.AddDays(-30)) return BadRequest(new { message = "Effective time is too far in the past." });
         if (request.ChangeType == "Regimen" && InvalidProposal(request.Proposal, medication.IsPrn))
             return BadRequest(new { message = "Complete proposed dose, route, schedule, prescriber, form, strength, indication, and PRN protocol are required." });
+        if (request.Proposal is { } proposed &&
+            (!MedicationDoseTimes.TryNormalize(proposed.ScheduledLocalTimes, out var proposedTimes) ||
+             proposed.IsPrn && proposedTimes.Length > 0))
+            return BadRequest(new { message = "Fixed daily dose times must be distinct HH:mm UK clock values; PRN medicine cannot have daily slots." });
         if (request.Proposal is not null && request.Proposal.IsPrn && InvalidPrn(request.Proposal))
             return BadRequest(new { message = "PRN indication, dose limit, interval and effect review are required." });
 
@@ -58,6 +62,9 @@ public sealed class MedicationChangeController(CareDbContext db, ITenantContext 
             var baseline = await ProfileState(medicationId, token);
             if (baseline is null || baseline.Value.Status != "Verified")
                 return Conflict(new { message = "A verified active medication profile is required before proposing a change." });
+            if (request.ChangeType == "Regimen" && request.Proposal is { IsPrn: false, ScheduledLocalTimes: null } &&
+                await Scalar<bool>("select jsonb_array_length(scheduled_local_times)>0 from medication_safety_profiles where medication_id=@medication and organization_id=@organization and branch_id=@branch", c=>Add(c,"medication",medicationId),token))
+                return BadRequest(new { message = "Include the proposed fixed daily times. Use an explicit empty list only when intentionally removing the fixed daily schedule." });
             if (await Scalar<bool>("select exists(select 1 from medication_change_requests where medication_id=@medication and organization_id=@organization and branch_id=@branch and status in ('Pending','Approved'))", c => Add(c,"medication",medicationId), token))
                 return Conflict(new { message = "This medication already has a pending or approved change." });
             var id = Guid.NewGuid();
@@ -178,7 +185,7 @@ public sealed class MedicationChangeController(CareDbContext db, ITenantContext 
             order by requested_at desc
             """, c=>Add(c,"medication",medicationId), r=>(object)new {
                 id=r.GetGuid(0),changeType=r.GetString(1),status=r.GetString(2),baselineProfileVersion=r.GetInt32(3),
-                proposal=JsonSerializer.Deserialize<JsonElement>(r.GetString(4)),reason=r.GetString(5),sourceType=r.GetString(6),
+                proposal=JsonSerializer.Deserialize<MedicationChangeProposal>(r.GetString(4)),reason=r.GetString(5),sourceType=r.GetString(6),
                 sourceReference=r.GetString(7),prescriberInstruction=r.GetString(8),requestedBy=r.GetString(9),
                 requestedAt=r.GetFieldValue<DateTimeOffset>(10),effectiveAt=r.GetFieldValue<DateTimeOffset>(11),
                 reviewedBy=r.GetString(12),reviewedAt=Date(r,13),reviewReason=r.GetString(14),
@@ -226,7 +233,7 @@ public sealed class MedicationChangeController(CareDbContext db, ITenantContext 
     private static DateTimeOffset? Date(DbDataReader r,int i)=>r.IsDBNull(i)?null:r.GetFieldValue<DateTimeOffset>(i);
     private static void Add(DbCommand c,string n,object? v){var p=c.CreateParameter();p.ParameterName=n;p.Value=v??DBNull.Value;c.Parameters.Add(p);}
 }
-public sealed record MedicationChangeProposal(string Dosage,string Route,string Schedule,bool IsPrn,string Indication,string Prescriber,string Form,string Strength,string DoseUnit,string Frequency,string AdministrationInstructions,DateTimeOffset? StartDate,DateTimeOffset? EndDate,int DoseWindowMinutes,int? MaxPrnDoses24h,int? MinPrnIntervalMinutes,string PrnIndication,int? PrnEffectReviewMinutes,bool RequiresWitness,DateTimeOffset? ReviewDueAt);
+public sealed record MedicationChangeProposal(string Dosage,string Route,string Schedule,bool IsPrn,string Indication,string Prescriber,string Form,string Strength,string DoseUnit,string Frequency,string AdministrationInstructions,DateTimeOffset? StartDate,DateTimeOffset? EndDate,int DoseWindowMinutes,int? MaxPrnDoses24h,int? MinPrnIntervalMinutes,string PrnIndication,int? PrnEffectReviewMinutes,bool RequiresWitness,DateTimeOffset? ReviewDueAt,string[]? ScheduledLocalTimes=null);
 public sealed record MedicationChangeRequest(string ChangeType,MedicationChangeProposal? Proposal,DateTimeOffset EffectiveAt,string Reason,string SourceType,string SourceReference,string PrescriberInstruction);
 public sealed record MedicationChangeReviewRequest(string Decision,string Reason);
 internal sealed record MedicationChangeRow(Guid Id,Guid MedicationId,string ChangeType,string Status,int BaselineProfileVersion,string ProposalJson,string Reason,string SourceType,string SourceReference,Guid RequestedByUserId,DateTimeOffset EffectiveAt,Guid? ReviewedByUserId,string ReviewedBy);

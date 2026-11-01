@@ -96,6 +96,19 @@ public sealed class InitialMedicationVerificationRegressionTests : IClassFixture
             new{decision="Reject",reason="Too late"});
         Assert.Equal(HttpStatusCode.Conflict,duplicateDecision.StatusCode);
         await StepUpTestGrants.GrantAsync(factory,preparer,"medication");
+        var noPlanAuthority=await preparer.PostAsJsonAsync("/api/phase1/mar",new{
+            medicationId,visitId=RegressionIds.VisitId,careWorkerId=RegressionIds.WorkerId,
+            scheduledAt=DateTimeOffset.UtcNow.AddHours(1),notes="No active medicine authority"});
+        Assert.Equal(HttpStatusCode.Conflict,noPlanAuthority.StatusCode);
+        Assert.Contains("care-plan",await noPlanAuthority.Content.ReadAsStringAsync(),StringComparison.OrdinalIgnoreCase);
+        await MedicationAuthorityTestHelper.SeedAsync(factory,RegressionIds.ServiceUserId,medicationId,"Prompt");
+        await StepUpTestGrants.GrantAsync(factory,preparer,"medication");
+        var promptOnly=await preparer.PostAsJsonAsync("/api/phase1/mar",new{
+            medicationId,visitId=RegressionIds.VisitId,careWorkerId=RegressionIds.WorkerId,
+            scheduledAt=DateTimeOffset.UtcNow.AddHours(1),notes="Prompt only"});
+        Assert.Equal(HttpStatusCode.Conflict,promptOnly.StatusCode);
+        await MedicationAuthorityTestHelper.SeedAsync(factory,RegressionIds.ServiceUserId,medicationId);
+        await StepUpTestGrants.GrantAsync(factory,preparer,"medication");
         var scheduled=await preparer.PostAsJsonAsync("/api/phase1/mar",new{
             medicationId,visitId=RegressionIds.VisitId,careWorkerId=RegressionIds.WorkerId,
             scheduledAt=DateTimeOffset.UtcNow.AddHours(1),notes="After review"});

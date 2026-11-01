@@ -37,6 +37,9 @@ public sealed class MedicationChangeActivationService(CareDbContext db)
         {
             var proposal=JsonSerializer.Deserialize<MedicationChangeProposal>(change.ProposalJson);
             if(proposal is null)return "Proposed regimen could not be read.";
+            if (!MedicationDoseTimes.TryNormalize(proposal.ScheduledLocalTimes, out var scheduledTimes) ||
+                proposal.IsPrn && scheduledTimes.Length > 0)
+                return "Approved dose times are invalid. Reconcile and review the instruction again.";
             await Execute("""
                 update "Medications" set "Dosage"=@dosage,"Route"=@route,"Schedule"=@schedule,"IsPrn"=@isPrn
                   where "Id"=@medication and "OrganizationId"=@organization and "BranchId"=@branch;
@@ -47,6 +50,7 @@ public sealed class MedicationChangeActivationService(CareDbContext db)
                   review_due_at=@reviewDue,last_reconciled_at=now(),reconciled_by=@reviewerName,
                   reconciliation_status='Verified',source_type=@sourceType,source_reference=@sourceReference,
                   reviewed_by_user_id=@reviewerId,reviewed_at=now(),change_reason=@reason,
+                  scheduled_local_times=cast(@scheduledTimes as jsonb),
                   profile_version=profile_version+1,updated_at=now()
                   where medication_id=@medication and organization_id=@organization and branch_id=@branch
                 """, c => {
@@ -59,8 +63,25 @@ public sealed class MedicationChangeActivationService(CareDbContext db)
                     Add(c,"prnIndication",proposal.PrnIndication.Trim());Add(c,"effectReview",proposal.PrnEffectReviewMinutes);
                     Add(c,"witness",proposal.RequiresWitness);Add(c,"reviewDue",proposal.ReviewDueAt);
                     Add(c,"sourceType",change.SourceType);Add(c,"sourceReference",change.SourceReference);Add(c,"reason",change.Reason);
+                    Add(c,"scheduledTimes",JsonSerializer.Serialize(scheduledTimes));
                 }, token);
         }
+        await Execute("""
+            insert into emar_escalations(id,mar_record_id,ledger_id,organization_id,branch_id,
+              escalation_type,severity,status,message,owner,due_at)
+            select gen_random_uuid(),r."Id",null,r."OrganizationId",r."BranchId",
+              'OrderChanged','High','Open',
+              'Scheduled dose uses an earlier medication instruction. Review the current order and reschedule or record an appropriate non-administration outcome.',
+              'Medication lead',now()
+            from "MedicationAdministrationRecords" r
+            join medication_safety_profiles p on p.medication_id=r."MedicationId"
+              and p.organization_id=r."OrganizationId" and p.branch_id=r."BranchId"
+            where r."MedicationId"=@medication and r."OrganizationId"=@organization and r."BranchId"=@branch
+              and r."Outcome"='Scheduled' and r."MedicationProfileVersion" is distinct from p.profile_version
+              and not exists(select 1 from emar_escalations e where e.mar_record_id=r."Id"
+                and e.organization_id=r."OrganizationId" and e.branch_id=r."BranchId"
+                and e.escalation_type='OrderChanged' and e.status<>'Resolved')
+            """, c=>Add(c,"medication",change.MedicationId), token);
         await Execute("""
             update medication_change_requests set status='Applied',applied_by_user_id=@actorId,applied_by=@actor,applied_at=now(),updated_at=now()
             where id=@change and medication_id=@medication and organization_id=@organization and branch_id=@branch

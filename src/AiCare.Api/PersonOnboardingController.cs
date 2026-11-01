@@ -6,13 +6,14 @@ using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AiCare.Api;
 
 [ApiController]
 [Route("api/phase1/service-users/{serviceUserId:guid}/onboarding")]
 [Authorize(Roles = "CareCoordinator,CareManager,Administrator")]
-public sealed class PersonOnboardingController : ControllerBase
+public sealed partial class PersonOnboardingController : ControllerBase
 {
     private readonly CareDbContext _context;
     private readonly ITenantContext _tenant;
@@ -164,6 +165,7 @@ public sealed class PersonOnboardingController : ControllerBase
     private async Task<int> Scalar(DbConnection connection, string sql, Guid serviceUserId, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
+        command.Transaction = _context.Database.CurrentTransaction?.GetDbTransaction();
         command.CommandText = sql;
         var person = command.CreateParameter();
         person.ParameterName = "person";

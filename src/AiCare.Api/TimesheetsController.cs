@@ -73,6 +73,25 @@ public sealed class TimesheetsController(CareDbContext db,ITenantContext tenant,
    """,c=>Add(c,"id",id),t);
   await Audit("timesheet.visits_imported",id,p.Value.GetProperty("branch_id").GetGuid(),t);return Ok(new{imported=count});
  },t);
+ [HttpPost("entries/{id:guid}/refresh-attendance")]
+ public Task<IActionResult> RefreshAttendance(Guid id,RefreshBillingAttendanceRequest r,CancellationToken t)=>Tx(async()=>{
+  if(!Manage)return Forbid();
+  if(string.IsNullOrWhiteSpace(r.Reason))return BadRequest(new{message="An attendance correction reason is required."});
+  await Exec("select pg_advisory_xact_lock(hashtextextended(@key,0))",c=>Add(c,"key",$"finance-billing:{tenant.OrganizationId}"),t);
+  var entry=await Entry(id,t);if(entry is null)return NotFound();var period=await Period(entry.Value.GetProperty("period_id").GetGuid(),t);if(period is null)return NotFound();
+  if(period.Value.GetProperty("status").GetString()!="Open"||entry.Value.GetProperty("status").GetString()!="Draft"||entry.Value.GetProperty("revision").GetInt32()!=r.ExpectedRevision)return Conflict(new{message="Refresh requires a current draft in an open period. Reload before retrying."});
+  if(await Count("select count(*) from finance_billable_events where timesheet_entry_id=@entry and organization_id=@org and status in ('Approved','Invoiced')",c=>Add(c,"entry",id),t)>0)return Conflict(new{message="Approved billing attendance requires a controlled financial correction."});
+  var changed=await Exec("""
+   update timesheet_entries e set planned_minutes=v."DurationMinutes",actual_minutes=extract(epoch from(v."CheckedOutAt"-v."CheckedInAt"))/60,
+     reason=@reason,changed_by=@actor,submitted_by=null,approved_by=null,revision=e.revision+1,updated_at=now()
+   from "Visits" v where e.id=@entry and e.organization_id=@org and e.revision=@revision and e.status='Draft'
+     and v."Id"=e.visit_id and v."OrganizationId"=e.organization_id and v."BranchId"=e.branch_id and v."CareWorkerId"=e.care_worker_id
+     and v."Status"='Completed' and v."CheckedOutAt">v."CheckedInAt"
+   """,c=>{Add(c,"entry",id);Add(c,"revision",r.ExpectedRevision);Add(c,"reason",r.Reason.Trim());},t);
+  if(changed==0)return Conflict(new{message="Current completed attendance and worker/branch scope must match the entry."});
+  await Audit("timesheet.attendance_refreshed",id,entry.Value.GetProperty("branch_id").GetGuid(),t);
+  return Ok(new{id,revision=r.ExpectedRevision+1,status="Draft",message="Attendance refreshed. Review payable time separately, then resubmit for approval."});
+ },t);
  [HttpPut("entries/{id:guid}")]
  public Task<IActionResult> Adjust(Guid id,AdjustTimesheet r,CancellationToken t)=>Tx(async()=>{
   var e=await Entry(id,t);if(e is null)return NotFound();var p=await Period(e.Value.GetProperty("period_id").GetGuid(),t);if(p is null)return NotFound();
@@ -86,6 +105,7 @@ public sealed class TimesheetsController(CareDbContext db,ITenantContext tenant,
  },t);
  [HttpPost("entries/{id:guid}/transition")]
  public Task<IActionResult> Transition(Guid id,TimesheetTransition r,CancellationToken t)=>Tx(async()=>{
+  await Exec("select pg_advisory_xact_lock(hashtextextended(@key,0))",c=>Add(c,"key",$"finance-billing:{tenant.OrganizationId}"),t);
   var e=await Entry(id,t);if(e is null)return NotFound();var p=await Period(e.Value.GetProperty("period_id").GetGuid(),t);if(p is null)return NotFound();
   var own=user.CareWorkerId==e.Value.GetProperty("care_worker_id").GetGuid();
   if(r.Action=="Submit" ? !(Manage||own) : !Manage)return Forbid();
@@ -93,6 +113,7 @@ public sealed class TimesheetsController(CareDbContext db,ITenantContext tenant,
   var status=e.Value.GetProperty("status").GetString();
   var next=r.Action switch {"Submit" when status=="Draft"=>"Submitted","Approve" when status=="Submitted"=>"Approved","Return" when status is "Submitted" or "Approved"=>"Draft",_=>null};
   if(next is null)return Conflict(new{message="Invalid timesheet transition."});
+  if(next=="Draft"&&await Count("select count(*) from finance_billable_events where timesheet_entry_id=@entry and organization_id=@org and status in ('Approved','Invoiced')",c=>Add(c,"entry",id),t)>0)return Conflict(new{message="Approved billing attendance requires a controlled financial correction."});
   if(string.IsNullOrWhiteSpace(r.Reason))return BadRequest(new{message="Transition reason is required."});
   if(next=="Submitted"&&e.Value.GetProperty("payable_minutes").ValueKind==JsonValueKind.Null)return Conflict(new{message="Missing actual time requires a documented adjustment before submission."});
   if(next=="Approved"&&own)return Conflict(new{message="A different manager must approve your timesheet."});
@@ -145,7 +166,8 @@ public sealed class TimesheetsController(CareDbContext db,ITenantContext tenant,
   if(periods.Count!=1)return Conflict(new{message="Select a unique governed pay period and approve and lock its timesheets before payroll generation."});return await Payroll(periods[0].GetProperty("id").GetGuid(),t);
  }
  [HttpGet("/api/phase1/payroll-runs/{id:guid}/export"),Authorize(Roles="Administrator,BackOffice")]
- public Task<IActionResult> Export(Guid id,CancellationToken t)=>Tx(async()=>{
+ public IActionResult Export(Guid id,CancellationToken t)=>StatusCode(410,new{message="Use independently approved finance/payroll-ready batches and an explicit payroll export permission."});
+ [NonAction]private Task<IActionResult> RetiredExport(Guid id,CancellationToken t)=>Tx(async()=>{
   var periods=await Rows("select p.* from timesheet_periods p join \"PayrollRuns\" r on r.\"Id\"=p.payroll_run_id where p.payroll_run_id=@id and p.organization_id=@org and (@wide or p.branch_id=@branch) and p.status='Locked' and r.\"Status\"='Approved'",c=>Add(c,"id",id),t);
   if(periods.Count!=1)return Conflict(new{message="Export requires an approved payroll run linked to a locked timesheet period."});
   var rows=await Rows("select care_worker_id,visit_id,payable_hours,hourly_rate,travel_amount,mileage_amount,gross_pay from finance_payroll_lines where payroll_run_id=@id and organization_id=@org order by care_worker_id,visit_id",c=>Add(c,"id",id),t);
@@ -172,5 +194,6 @@ public sealed class TimesheetsController(CareDbContext db,ITenantContext tenant,
 }
 public sealed record CreatePayPeriod(Guid BranchId,DateTimeOffset PeriodStart,DateTimeOffset PeriodEnd,decimal? HourlyRate,decimal? TravelRate,decimal? MileageRate);
 public sealed record AdjustTimesheet(int ExpectedRevision,decimal PayableMinutes,decimal TravelMinutes,decimal Mileage,decimal? HourlyRate,string Reason);
+public sealed record RefreshBillingAttendanceRequest(int ExpectedRevision,string Reason);
 public sealed record TimesheetTransition(int ExpectedRevision,string Action,string Reason);
 public sealed record LockTimesheetPeriod(int ExpectedRevision);
