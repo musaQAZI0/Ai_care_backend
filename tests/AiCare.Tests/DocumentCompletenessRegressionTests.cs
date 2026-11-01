@@ -46,7 +46,7 @@ public sealed partial class MeasurableCareGoalsRegressionTests
         await Expect(await f.Manager.PostAsJsonAsync(remediation,resolved with{RequestId=Guid.NewGuid(),ExpectedRevision=1}),HttpStatusCode.Conflict);
         await Expect(await f.Manager.PostAsJsonAsync(path,verification),HttpStatusCode.OK);Assert.False(await Complete()); // Replay does not verify changed metadata.
         await Expect(await f.Manager.PostAsJsonAsync(path,verification with{RequestId=Guid.NewGuid(),ExpectedRevision=2}),HttpStatusCode.Created);Assert.True(await Complete());
-        await Expect(await f.Manager.DeleteAsync($"/api/phase1/documents/{document}"),HttpStatusCode.NoContent);Assert.False(await Complete());
+        await Expect(await f.Manager.DeleteAsync($"/api/phase1/documents/{document}?reason=Superseded%20after%20metadata%20change"),HttpStatusCode.NoContent);Assert.False(await Complete());
         await Expect(await f.Manager.PostAsJsonAsync(path,verification with{RequestId=Guid.NewGuid(),ExpectedRevision=3}),HttpStatusCode.NotFound);
         var disable=rule with{RequestId=Guid.NewGuid(),RootId=rule.RequestId,ExpectedVersion=1,Enabled=false,Reason="Requirement retired by manager"};
         await Expect(await f.Manager.PostAsJsonAsync(root,disable),HttpStatusCode.Created);

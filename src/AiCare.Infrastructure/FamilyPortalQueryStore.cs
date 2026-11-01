@@ -116,6 +116,7 @@ public sealed class FamilyPortalQueryStore(CareDbContext db) : IFamilyPortalQuer
             left join family_document_grants g on g.document_id = d."Id" and g.family_member_id = @family and g.organization_id = @organization
             where d."OrganizationId" = @organization
               and d."ServiceUserId" = @person
+              and lower(trim(d."Category")) <> 'withdrawn'
               and (v.visibility = 'ServiceUserAndRepresentative' or (v.visibility = 'ExplicitFamilyAccess' and g.family_member_id is not null))
             order by d."UploadedAt" desc
             """;

@@ -1578,27 +1578,42 @@ phase1.MapDelete("/family-members/{id:guid}", (Guid id, CareDbContext context, I
     context.SaveChanges();
     return Results.NoContent();
 });
-phase1.MapGet("/documents", (ICareRepository repository) => Results.Ok(repository.GetDocuments()));
-phase1.MapGet("/documents/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/documents", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
-    var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    return document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId) ? Results.NotFound() : Results.Ok(document);
-});
-phase1.MapPost("/documents", (CreateDocumentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant) =>
-{
-    if (request.ServiceUserId == Guid.Empty || Missing(request.FileName, request.Category, request.StoragePath, request.UploadedBy))
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: true);
+    if (denied is not null) return denied;
+
+    var documents = context.Documents.AsNoTracking()
+        .Where(item => (tenant.IsPlatformOwner || item.OrganizationId == tenant.OrganizationId) &&
+            (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == tenant.BranchId) &&
+            item.Category != "Withdrawn");
+    if (currentUser.IsCareWorker)
     {
-        return Error("Document file name, category, storage path, and uploader are required.");
+        if (currentUser.CareWorkerId is not Guid workerId)
+            return Error("Care worker account is not linked to a care worker profile.", StatusCodes.Status403Forbidden);
+        var personIds = DocumentPersonIdsForWorker(context, tenant, workerId);
+        documents = documents.Where(item => personIds.Contains(item.ServiceUserId));
     }
-
-    var validation = ValidateServiceUserReference(request.ServiceUserId, context, tenant);
-    if (validation is not null) return validation;
-
-    var document = repository.AddDocument(request);
-    return Results.Created($"/api/phase1/documents/{document.Id}", document);
+    return Results.Ok(documents.OrderByDescending(item => item.UploadedAt).ToList().Select(DocumentResponse));
 });
-phase1.MapPost("/documents/upload", async (HttpRequest request, IWebHostEnvironment environment, IConfiguration configuration, IHttpClientFactory httpClientFactory, ICareRepository repository, ITenantContext tenant) =>
+phase1.MapGet("/documents/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: true);
+    if (denied is not null) return denied;
+    var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    return document is null || document.Category == "Withdrawn" || !CanAccessDocument(document, context, tenant, currentUser)
+        ? Results.NotFound()
+        : Results.Ok(DocumentResponse(document));
+});
+phase1.MapPost("/documents", (CreateDocumentRequest request, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: false);
+    return denied ?? Error("Document metadata cannot be created directly. Upload the file through /api/phase1/documents/upload.", StatusCodes.Status405MethodNotAllowed);
+});
+phase1.MapPost("/documents/upload", async (HttpRequest request, IWebHostEnvironment environment, IConfiguration configuration, IHttpClientFactory httpClientFactory, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: false);
+    if (denied is not null) return denied;
     if (!request.HasFormContentType)
     {
         return Error("Multipart form data is required.");
@@ -1608,11 +1623,15 @@ phase1.MapPost("/documents/upload", async (HttpRequest request, IWebHostEnvironm
     var file = form.Files.GetFile("file");
     var serviceUserIdValue = form["serviceUserId"].ToString();
     var category = form["category"].ToString();
-    var uploadedBy = form["uploadedBy"].ToString();
-    if (file is null || file.Length == 0 || !Guid.TryParse(serviceUserIdValue, out var serviceUserId) || Missing(category, uploadedBy))
+    if (file is null || file.Length == 0 || !Guid.TryParse(serviceUserIdValue, out var serviceUserId) || Missing(category))
     {
-        return Error("File, service user, category, and uploader are required.");
+        return Error("File, service user, and category are required.");
     }
+    if (category.Trim().Length > 100 || string.Equals(category.Trim(), "Withdrawn", StringComparison.OrdinalIgnoreCase))
+        return Error("Choose a valid active document category.");
+
+    var serviceUserValidation = ValidateServiceUserReference(serviceUserId, context, tenant);
+    if (serviceUserValidation is not null) return serviceUserValidation;
 
     if (file.Length > 10 * 1024 * 1024)
     {
@@ -1630,39 +1649,76 @@ phase1.MapPost("/documents/upload", async (HttpRequest request, IWebHostEnvironm
         ? await UploadToSupabaseStorage(file, storedName, configuration, httpClientFactory, tenant)
         : await UploadToLocalStorage(file, storedName, environment);
 
-    var document = repository.AddDocument(new CreateDocumentRequest(serviceUserId, safeFileName, category, storagePath, uploadedBy));
-    return Results.Created($"/api/phase1/documents/{document.Id}", document);
+    var document = new DocumentItem(Guid.NewGuid(), serviceUserId, safeFileName, category.Trim(), storagePath,
+        currentUser.UserName, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    try
+    {
+        context.Documents.Add(document);
+        AddAudit(context, tenant, currentUser, "document.uploaded", nameof(DocumentItem), document.Id, branchId: document.BranchId);
+        await context.SaveChangesAsync(request.HttpContext.RequestAborted);
+    }
+    catch
+    {
+        await DeleteUploadedDocumentAsync(storagePath, configuration, httpClientFactory, request.HttpContext.RequestAborted);
+        throw;
+    }
+    return Results.Created($"/api/phase1/documents/{document.Id}", DocumentResponse(document));
 });
-phase1.MapGet("/documents/{id:guid}/download-url", async (Guid id, CareDbContext context, IConfiguration configuration, IHttpClientFactory httpClientFactory, ITenantContext tenant) =>
+phase1.MapGet("/documents/{id:guid}/download-url", async (Guid id, HttpRequest request, CareDbContext context, IConfiguration configuration, IHttpClientFactory httpClientFactory, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: true);
+    if (denied is not null) return denied;
     var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    if (document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId))
+    if (document is null || document.Category == "Withdrawn" || !CanAccessDocument(document, context, tenant, currentUser))
     {
         return Results.NotFound();
     }
 
     if (!document.StoragePath.StartsWith("supabase://", StringComparison.OrdinalIgnoreCase))
     {
-        return Results.Ok(new { provider = "Local", path = document.StoragePath });
+        AddAudit(context, tenant, currentUser, "document.download_authorized", nameof(DocumentItem), document.Id, branchId: document.BranchId);
+        await context.SaveChangesAsync();
+        return Results.Ok(new { provider = "Local", url = $"{request.Scheme}://{request.Host}/api/phase1/documents/{id}/content" });
     }
 
-    var publicBaseUrl = configuration["Supabase:PublicFileBaseUrl"];
-    if (string.IsNullOrWhiteSpace(publicBaseUrl))
-    {
-        var signedUrl = await CreateSupabaseSignedUrl(document.StoragePath, configuration, httpClientFactory);
-        return Results.Ok(new { provider = "Supabase", url = signedUrl, expiresInSeconds = 900 });
-    }
-
-    var (_, objectKey) = ParseSupabaseStoragePath(document.StoragePath);
-    return Results.Ok(new { provider = "Supabase", url = $"{publicBaseUrl.TrimEnd('/')}/{objectKey}" });
+    var signedUrl = await CreateSupabaseSignedUrl(document.StoragePath, configuration, httpClientFactory);
+    AddAudit(context, tenant, currentUser, "document.download_url_issued", nameof(DocumentItem), document.Id, branchId: document.BranchId);
+    await context.SaveChangesAsync();
+    return Results.Ok(new { provider = "Supabase", url = signedUrl, expiresInSeconds = 900 });
 });
-phase1.MapPut("/documents/{id:guid}", (Guid id, CreateDocumentRequest request, ICareRepository repository) =>
+phase1.MapGet("/documents/{id:guid}/content", (Guid id, CareDbContext context, IWebHostEnvironment environment, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
-    var document = repository.UpdateDocument(id, request);
-    return document is null ? Results.NotFound() : Results.Ok(document);
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: true);
+    if (denied is not null) return denied;
+    var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    if (document is null || document.Category == "Withdrawn" || !CanAccessDocument(document, context, tenant, currentUser)) return Results.NotFound();
+    if (document.StoragePath.StartsWith("supabase://", StringComparison.OrdinalIgnoreCase)) return Results.NotFound();
+    var uploadRoot = Path.GetFullPath(Path.Combine(environment.ContentRootPath, "App_Data", "uploads"));
+    var filePath = Path.GetFullPath(document.StoragePath);
+    if (!filePath.StartsWith(uploadRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !File.Exists(filePath)) return Results.NotFound();
+    AddAudit(context, tenant, currentUser, "document.downloaded", nameof(DocumentItem), document.Id, branchId: document.BranchId);
+    context.SaveChanges();
+    return Results.File(filePath, "application/octet-stream", document.FileName, enableRangeProcessing: true);
 });
-phase1.MapDelete("/documents/{id:guid}", (Guid id, ICareRepository repository) =>
-    repository.DeleteDocument(id) ? Results.NoContent() : Results.NotFound());
+phase1.MapPut("/documents/{id:guid}", (Guid id, CreateDocumentRequest request, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: false);
+    return denied ?? Error("Uploaded document ownership and storage metadata are immutable. Withdraw this record and upload a replacement.", StatusCodes.Status405MethodNotAllowed);
+});
+phase1.MapDelete("/documents/{id:guid}", (Guid id, string? reason, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: false);
+    if (denied is not null) return denied;
+    if (string.IsNullOrWhiteSpace(reason)) return Error("A withdrawal reason is required.");
+    if (reason.Trim().Length > 300) return Error("The withdrawal reason must be 300 characters or fewer.");
+    var document = context.Documents.FirstOrDefault(item => item.Id == id);
+    if (document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId)) return Results.NotFound();
+    if (document.Category == "Withdrawn") return Results.NoContent();
+    context.Entry(document).CurrentValues.SetValues(document with { Category = "Withdrawn" });
+    AddAudit(context, tenant, currentUser, $"document.withdrawn: {reason.Trim()}", nameof(DocumentItem), id, branchId: document.BranchId);
+    context.SaveChanges();
+    return Results.NoContent();
+});
 phase1.MapGet("/medications", (ICareRepository repository) => Results.Ok(repository.GetMedications()));
 phase1.MapGet("/medications/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
 {
@@ -3019,6 +3075,56 @@ static IResult? RequireAdministrator(ICurrentUserContext currentUser) =>
 static IResult? RequireAnyRole(ICurrentUserContext currentUser, params UserRole[] roles) =>
     currentUser.HasAnyRole(roles) ? null : Error("You do not have permission to access this resource.", StatusCodes.Status403Forbidden);
 
+static IResult? RequireDocumentRole(ICurrentUserContext currentUser, bool allowCareWorker) =>
+    allowCareWorker
+        ? RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker)
+        : RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator);
+
+static bool CanAccessDocument(DocumentItem document, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+{
+    if (!tenant.CanAccess(document.OrganizationId, document.BranchId)) return false;
+    if (!currentUser.IsCareWorker) return true;
+    return currentUser.CareWorkerId is Guid workerId &&
+        DocumentPersonIdsForWorker(context, tenant, workerId).Contains(document.ServiceUserId);
+}
+
+static HashSet<Guid> DocumentPersonIdsForWorker(CareDbContext context, ITenantContext tenant, Guid workerId)
+{
+    var people = context.Visits.AsNoTracking()
+        .Where(visit => visit.OrganizationId == tenant.OrganizationId && visit.CareWorkerId == workerId &&
+            (tenant.IsOrganizationWide || tenant.BranchId == null || visit.BranchId == tenant.BranchId))
+        .Select(visit => visit.ServiceUserId)
+        .ToHashSet();
+    if (!context.Database.IsNpgsql()) return people;
+    var additional = tenant.IsOrganizationWide || tenant.BranchId is not Guid branchId
+        ? context.Database.SqlQuery<Guid>($"""
+            select distinct v."ServiceUserId" as "Value"
+            from "Visits" v
+            join visit_care_worker_assignments a on a.visit_id=v."Id"
+            where v."OrganizationId"={tenant.OrganizationId} and a.organization_id={tenant.OrganizationId}
+              and a.care_worker_id={workerId}
+            """).ToList()
+        : context.Database.SqlQuery<Guid>($"""
+            select distinct v."ServiceUserId" as "Value"
+            from "Visits" v
+            join visit_care_worker_assignments a on a.visit_id=v."Id"
+            where v."OrganizationId"={tenant.OrganizationId} and a.organization_id={tenant.OrganizationId}
+              and a.care_worker_id={workerId} and v."BranchId"={branchId}
+            """).ToList();
+    people.UnionWith(additional);
+    return people;
+}
+
+static object DocumentResponse(DocumentItem document) => new
+{
+    document.Id,
+    document.ServiceUserId,
+    document.FileName,
+    document.Category,
+    document.UploadedBy,
+    document.UploadedAt
+};
+
 static void AddAudit(CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string action, string entityType, Guid? entityId, Guid? organizationId = null, Guid? branchId = null)
 {
     var actor = string.IsNullOrWhiteSpace(currentUser.UserName) ? "system" : currentUser.UserName;
@@ -3783,6 +3889,27 @@ static async Task<string> UploadToSupabaseStorage(IFormFile file, string storedN
     }
 
     return $"supabase://{bucket}/{objectKey}";
+}
+
+static async Task DeleteUploadedDocumentAsync(string storagePath, IConfiguration configuration, IHttpClientFactory httpClientFactory, CancellationToken cancellationToken)
+{
+    if (!storagePath.StartsWith("supabase://", StringComparison.OrdinalIgnoreCase))
+    {
+        if (File.Exists(storagePath)) File.Delete(storagePath);
+        return;
+    }
+
+    var supabaseUrl = configuration["Supabase:Url"];
+    var serviceRoleKey = configuration["Supabase:ServiceRoleKey"];
+    if (string.IsNullOrWhiteSpace(supabaseUrl) || string.IsNullOrWhiteSpace(serviceRoleKey)) return;
+    var (bucket, objectKey) = ParseSupabaseStoragePath(storagePath);
+    var deleteUrl = $"{supabaseUrl.TrimEnd('/')}/storage/v1/object/{Uri.EscapeDataString(bucket)}/{Uri.EscapeDataString(objectKey).Replace("%2F", "/", StringComparison.Ordinal)}";
+    using var delete = new HttpRequestMessage(HttpMethod.Delete, deleteUrl);
+    delete.Headers.TryAddWithoutValidation("apikey", serviceRoleKey);
+    delete.Headers.TryAddWithoutValidation("Authorization", $"Bearer {serviceRoleKey}");
+    using var response = await httpClientFactory.CreateClient().SendAsync(delete, cancellationToken);
+    if (!response.IsSuccessStatusCode && response.StatusCode != System.Net.HttpStatusCode.NotFound)
+        throw new InvalidOperationException("Document metadata could not be saved and the uploaded object could not be cleaned up.");
 }
 
 static async Task<string> CreateSupabaseSignedUrl(string storagePath, IConfiguration configuration, IHttpClientFactory httpClientFactory)

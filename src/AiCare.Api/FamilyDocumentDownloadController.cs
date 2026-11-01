@@ -45,7 +45,8 @@ public sealed class FamilyDocumentDownloadController(
             var document = await db.Documents.AsNoTracking().FirstOrDefaultAsync(item =>
                 item.Id == documentId &&
                 item.ServiceUserId == serviceUserId &&
-                item.OrganizationId == tenant.OrganizationId,
+                item.OrganizationId == tenant.OrganizationId &&
+                item.Category != "Withdrawn",
                 cancellationToken);
             if (document is null) return NotFound();
 

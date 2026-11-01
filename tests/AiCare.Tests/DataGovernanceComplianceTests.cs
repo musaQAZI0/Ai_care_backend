@@ -296,15 +296,15 @@ public sealed class DataGovernanceComplianceTests : IClassFixture<AiCareApiFacto
         var client = _factory.CreateClient();
         await Login(client, "admin", "AdminPassword123!");
 
-        var response = await client.DeleteAsync($"/api/phase1/documents/{documentId}");
+        var response = await client.DeleteAsync($"/api/phase1/documents/{documentId}?reason=Superseded%20test%20record");
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         using var verify = _factory.Services.CreateScope();
         var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
         var document = verifyDb.Documents.Single(x => x.Id == documentId);
         Assert.Equal("Withdrawn", document.Category);
-        Assert.StartsWith("[Withdrawn]", document.FileName);
-        Assert.Contains(verifyDb.AuditEvents, x => x.Action == "document.withdrawn" && x.EntityId == documentId);
+        Assert.Equal("withdraw-test.pdf", document.FileName);
+        Assert.Contains(verifyDb.AuditEvents, x => x.Action.StartsWith("document.withdrawn:") && x.EntityId == documentId);
     }
 
     [Fact]
