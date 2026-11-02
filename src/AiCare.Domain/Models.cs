@@ -168,6 +168,19 @@ public sealed record DocumentItem(
     Guid? OrganizationId = null,
     Guid? BranchId = null);
 
+public sealed record DocumentLifecycleEvent(
+    Guid Id,
+    Guid DocumentId,
+    string EventType,
+    string Reason,
+    string CreatedBy,
+    DateTimeOffset CreatedAt,
+    Guid OrganizationId,
+    Guid BranchId,
+    Guid? ReplacementDocumentId = null);
+
+public sealed record SupersedeDocumentRequest(Guid ReplacementDocumentId, string Reason);
+
 public sealed record Medication(
     Guid Id,
     Guid ServiceUserId,

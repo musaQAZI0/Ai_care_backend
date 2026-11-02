@@ -302,7 +302,8 @@ public sealed class DataGovernanceComplianceTests : IClassFixture<AiCareApiFacto
         using var verify = _factory.Services.CreateScope();
         var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
         var document = verifyDb.Documents.Single(x => x.Id == documentId);
-        Assert.Equal("Withdrawn", document.Category);
+        Assert.Equal("Care plan", document.Category);
+        Assert.True(await verifyDb.DocumentLifecycleEvents.AsNoTracking().AnyAsync(item => item.DocumentId == documentId && item.EventType == "Withdrawn"));
         Assert.Equal("withdraw-test.pdf", document.FileName);
         Assert.Contains(verifyDb.AuditEvents, x => x.Action.StartsWith("document.withdrawn:") && x.EntityId == documentId);
     }

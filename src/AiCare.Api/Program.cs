@@ -1597,7 +1597,8 @@ phase1.MapGet("/documents", (string? search, string? category, Guid? serviceUser
         documents = documents.Where(item => personIds.Contains(item.ServiceUserId));
         showWithdrawn = false;
     }
-    if (!showWithdrawn) documents = documents.Where(item => item.Category != "Withdrawn");
+    if (!showWithdrawn) documents = documents.Where(item => item.Category != "Withdrawn" &&
+        !context.DocumentLifecycleEvents.Any(lifecycle => lifecycle.DocumentId == item.Id));
     if (!string.IsNullOrWhiteSpace(search))
     {
         var term = search.Trim().ToLower();
@@ -1611,16 +1612,16 @@ phase1.MapGet("/documents", (string? search, string? category, Guid? serviceUser
     if (serviceUserId is Guid personId) documents = documents.Where(item => item.ServiceUserId == personId);
     if (uploadedFrom is not null) documents = documents.Where(item => item.UploadedAt >= uploadedFrom);
     if (uploadedTo is not null) documents = documents.Where(item => item.UploadedAt <= uploadedTo);
-    return Results.Ok(documents.OrderByDescending(item => item.UploadedAt).ToList().Select(DocumentResponse));
+    return Results.Ok(documents.OrderByDescending(item => item.UploadedAt).ToList().Select(item => DocumentResponse(item, context)));
 });
 phase1.MapGet("/documents/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireDocumentRole(currentUser, allowCareWorker: true);
     if (denied is not null) return denied;
     var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    return document is null || document.Category == "Withdrawn" || !CanAccessDocument(document, context, tenant, currentUser)
+    return document is null || IsDocumentWithdrawn(document, context) || !CanAccessDocument(document, context, tenant, currentUser)
         ? Results.NotFound()
-        : Results.Ok(DocumentResponse(document));
+        : Results.Ok(DocumentResponse(document, context));
 });
 phase1.MapGet("/documents/{id:guid}/history", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
@@ -1635,7 +1636,31 @@ phase1.MapGet("/documents/{id:guid}/history", (Guid id, CareDbContext context, I
         .Take(100)
         .Select(item => new { item.Id, item.Action, item.Actor, item.CreatedAt })
         .ToList();
-    return Results.Ok(new { document = DocumentResponse(document), history });
+    var lifecycle = context.DocumentLifecycleEvents.AsNoTracking().FirstOrDefault(item => item.DocumentId == id);
+    var scopedLifecycle = context.DocumentLifecycleEvents.AsNoTracking()
+        .Where(item => item.OrganizationId == document.OrganizationId && item.BranchId == document.BranchId)
+        .ToList();
+    var rootId = id;
+    var visited = new HashSet<Guid>();
+    while (visited.Add(rootId))
+    {
+        var predecessor = scopedLifecycle.FirstOrDefault(item => item.ReplacementDocumentId == rootId);
+        if (predecessor is null) break;
+        rootId = predecessor.DocumentId;
+    }
+    var replacementChain = new List<object>();
+    visited.Clear();
+    var chainId = rootId;
+    while (visited.Add(chainId))
+    {
+        var chainDocument = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == chainId);
+        if (chainDocument is null) break;
+        replacementChain.Add(DocumentResponse(chainDocument, context));
+        var chainLifecycle = scopedLifecycle.FirstOrDefault(item => item.DocumentId == chainId);
+        if (chainLifecycle?.ReplacementDocumentId is not Guid nextId) break;
+        chainId = nextId;
+    }
+    return Results.Ok(new { document = DocumentResponse(document, context), lifecycle, replacementChain, history });
 });
 phase1.MapPost("/documents", (CreateDocumentRequest request, ICurrentUserContext currentUser) =>
 {
@@ -1703,14 +1728,14 @@ phase1.MapPost("/documents/upload", async (HttpRequest request, IWebHostEnvironm
         }
         throw;
     }
-    return Results.Created($"/api/phase1/documents/{document.Id}", DocumentResponse(document));
+    return Results.Created($"/api/phase1/documents/{document.Id}", DocumentResponse(document, context));
 });
 phase1.MapGet("/documents/{id:guid}/download-url", async (Guid id, HttpRequest request, CareDbContext context, IConfiguration configuration, IHttpClientFactory httpClientFactory, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireDocumentRole(currentUser, allowCareWorker: true);
     if (denied is not null) return denied;
     var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    if (document is null || document.Category == "Withdrawn" || !CanAccessDocument(document, context, tenant, currentUser))
+    if (document is null || IsDocumentWithdrawn(document, context) || !CanAccessDocument(document, context, tenant, currentUser))
     {
         return Results.NotFound();
     }
@@ -1732,7 +1757,7 @@ phase1.MapGet("/documents/{id:guid}/content", (Guid id, CareDbContext context, I
     var denied = RequireDocumentRole(currentUser, allowCareWorker: true);
     if (denied is not null) return denied;
     var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    if (document is null || document.Category == "Withdrawn" || !CanAccessDocument(document, context, tenant, currentUser)) return Results.NotFound();
+    if (document is null || IsDocumentWithdrawn(document, context) || !CanAccessDocument(document, context, tenant, currentUser)) return Results.NotFound();
     if (document.StoragePath.StartsWith("supabase://", StringComparison.OrdinalIgnoreCase)) return Results.NotFound();
     var uploadRoot = Path.GetFullPath(Path.Combine(environment.ContentRootPath, "App_Data", "uploads"));
     var filePath = Path.GetFullPath(document.StoragePath);
@@ -1754,11 +1779,39 @@ phase1.MapDelete("/documents/{id:guid}", (Guid id, string? reason, CareDbContext
     if (reason.Trim().Length > 300) return Error("The withdrawal reason must be 300 characters or fewer.");
     var document = context.Documents.FirstOrDefault(item => item.Id == id);
     if (document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId)) return Results.NotFound();
-    if (document.Category == "Withdrawn") return Results.NoContent();
-    context.Entry(document).CurrentValues.SetValues(document with { Category = "Withdrawn" });
+    if (IsDocumentWithdrawn(document, context)) return Results.NoContent();
+    context.DocumentLifecycleEvents.Add(new DocumentLifecycleEvent(Guid.NewGuid(), id, "Withdrawn", reason.Trim(),
+        currentUser.UserName, DateTimeOffset.UtcNow, document.OrganizationId ?? tenant.OrganizationId,
+        document.BranchId ?? tenant.BranchId ?? TenantDefaults.BranchId));
     AddAudit(context, tenant, currentUser, $"document.withdrawn: {reason.Trim()}", nameof(DocumentItem), id, branchId: document.BranchId);
     context.SaveChanges();
     return Results.NoContent();
+});
+phase1.MapPost("/documents/{id:guid}/supersede", (Guid id, SupersedeDocumentRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: false);
+    if (denied is not null) return denied;
+    if (string.IsNullOrWhiteSpace(request.Reason)) return Error("A replacement reason is required.");
+    if (request.Reason.Trim().Length > 300) return Error("The replacement reason must be 300 characters or fewer.");
+    if (id == request.ReplacementDocumentId) return Error("A document cannot replace itself.");
+    var document = context.Documents.FirstOrDefault(item => item.Id == id);
+    if (document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId)) return Results.NotFound();
+    if (IsDocumentWithdrawn(document, context)) return Error("The document has already been withdrawn or superseded.", StatusCodes.Status409Conflict);
+    var replacement = context.Documents.FirstOrDefault(item => item.Id == request.ReplacementDocumentId);
+    if (replacement is null || !tenant.CanAccess(replacement.OrganizationId, replacement.BranchId)) return Results.NotFound();
+    if (replacement.ServiceUserId != document.ServiceUserId || replacement.OrganizationId != document.OrganizationId || replacement.BranchId != document.BranchId)
+        return Error("The replacement must belong to the same person and branch.");
+    if (IsDocumentWithdrawn(replacement, context)) return Error("Choose an active replacement document.");
+    if (context.DocumentLifecycleEvents.Any(item => item.ReplacementDocumentId == replacement.Id))
+        return Error("The replacement document is already linked to another superseded record.", StatusCodes.Status409Conflict);
+
+    context.DocumentLifecycleEvents.Add(new DocumentLifecycleEvent(Guid.NewGuid(), id, "Superseded", request.Reason.Trim(),
+        currentUser.UserName, DateTimeOffset.UtcNow, document.OrganizationId ?? tenant.OrganizationId,
+        document.BranchId ?? tenant.BranchId ?? TenantDefaults.BranchId, replacement.Id));
+    AddAudit(context, tenant, currentUser, $"document.superseded by {replacement.Id}: {request.Reason.Trim()}", nameof(DocumentItem), id, branchId: document.BranchId);
+    AddAudit(context, tenant, currentUser, $"document.replacement_for {id}", nameof(DocumentItem), replacement.Id, branchId: replacement.BranchId);
+    context.SaveChanges();
+    return Results.Ok(new { document = DocumentResponse(document, context), replacement = DocumentResponse(replacement, context) });
 });
 phase1.MapGet("/medications", (ICareRepository repository) => Results.Ok(repository.GetMedications()));
 phase1.MapGet("/medications/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
@@ -3155,15 +3208,28 @@ static HashSet<Guid> DocumentPersonIdsForWorker(CareDbContext context, ITenantCo
     return people;
 }
 
-static object DocumentResponse(DocumentItem document) => new
+static bool IsDocumentWithdrawn(DocumentItem document, CareDbContext context) =>
+    string.Equals(document.Category, "Withdrawn", StringComparison.OrdinalIgnoreCase) ||
+    context.DocumentLifecycleEvents.Any(item => item.DocumentId == document.Id);
+
+static object DocumentResponse(DocumentItem document, CareDbContext context)
 {
-    document.Id,
-    document.ServiceUserId,
-    document.FileName,
-    document.Category,
-    document.UploadedBy,
-    document.UploadedAt
-};
+    var lifecycle = context.DocumentLifecycleEvents.AsNoTracking().FirstOrDefault(item => item.DocumentId == document.Id);
+    return new
+    {
+        document.Id,
+        document.ServiceUserId,
+        document.FileName,
+        document.Category,
+        document.UploadedBy,
+        document.UploadedAt,
+        Status = lifecycle?.EventType ?? (string.Equals(document.Category, "Withdrawn", StringComparison.OrdinalIgnoreCase) ? "Withdrawn" : "Active"),
+        lifecycle?.ReplacementDocumentId,
+        LifecycleReason = lifecycle?.Reason,
+        LifecycleAt = lifecycle?.CreatedAt,
+        LifecycleBy = lifecycle?.CreatedBy
+    };
+}
 
 static void AddAudit(CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string action, string entityType, Guid? entityId, Guid? organizationId = null, Guid? branchId = null)
 {

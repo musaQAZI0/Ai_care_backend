@@ -46,7 +46,8 @@ public sealed class FamilyDocumentDownloadController(
                 item.Id == documentId &&
                 item.ServiceUserId == serviceUserId &&
                 item.OrganizationId == tenant.OrganizationId &&
-                item.Category != "Withdrawn",
+                item.Category != "Withdrawn" &&
+                !db.DocumentLifecycleEvents.Any(lifecycle => lifecycle.DocumentId == item.Id),
                 cancellationToken);
             if (document is null) return NotFound();
 

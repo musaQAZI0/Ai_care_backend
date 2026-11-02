@@ -404,7 +404,12 @@ public sealed class EfCoreCareRepository : ICareRepository
             return false;
         }
 
-        _context.Entry(document).CurrentValues.SetValues(document with { Category = "Withdrawn", FileName = $"[Withdrawn] {document.FileName}" });
+        if (!_context.DocumentLifecycleEvents.Any(item => item.DocumentId == id))
+        {
+            _context.DocumentLifecycleEvents.Add(new DocumentLifecycleEvent(Guid.NewGuid(), id, "Withdrawn", "Withdrawn through repository operation",
+                "system", DateTimeOffset.UtcNow, document.OrganizationId ?? _tenant.OrganizationId,
+                document.BranchId ?? _tenant.BranchId ?? TenantDefaults.BranchId));
+        }
         AddAudit("document.withdrawn", "system", nameof(DocumentItem), id);
         _context.SaveChanges();
         return true;

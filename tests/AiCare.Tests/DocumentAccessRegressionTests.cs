@@ -60,15 +60,56 @@ public sealed partial class MeasurableCareGoalsRegressionTests
         await Expect(await f.Manager.DeleteAsync($"/api/phase1/documents/{id}?reason=Replaced%20by%20a%20signed%20copy"), HttpStatusCode.NoContent);
         await Expect(await f.Manager.GetAsync($"/api/phase1/documents/{id}"), HttpStatusCode.NotFound);
         var withdrawn = await f.Manager.GetFromJsonAsync<JsonElement[]>("/api/phase1/documents?includeWithdrawn=true");
-        Assert.Contains(withdrawn!, item => item.GetProperty("id").GetGuid() == id && item.GetProperty("category").GetString() == "Withdrawn");
+        Assert.Contains(withdrawn!, item => item.GetProperty("id").GetGuid() == id && item.GetProperty("category").GetString() == "Support agreement" && item.GetProperty("status").GetString() == "Withdrawn");
         var history = await f.Manager.GetFromJsonAsync<JsonElement>($"/api/phase1/documents/{id}/history");
         Assert.Contains(history.GetProperty("history").EnumerateArray(), item => item.GetProperty("action").GetString()!.StartsWith("document.withdrawn:", StringComparison.Ordinal));
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
         var retained = await db.Documents.AsNoTracking().SingleAsync(item => item.Id == id);
-        Assert.Equal("Withdrawn", retained.Category);
+        Assert.Equal("Support agreement", retained.Category);
+        var lifecycle = await db.DocumentLifecycleEvents.AsNoTracking().SingleAsync(item => item.DocumentId == id);
+        Assert.Equal("Withdrawn", lifecycle.EventType);
+        Assert.Equal("Replaced by a signed copy", lifecycle.Reason);
         Assert.Contains(await db.AuditEvents.AsNoTracking().Where(item => item.EntityId == id).Select(item => item.Action).ToListAsync(),
             action => action.StartsWith("document.withdrawn:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DocumentSupersessionPreservesCategoryAndLinksOnlySamePersonReplacement()
+    {
+        var f = await Setup();
+        var sourceId = Guid.NewGuid();
+        var replacementId = Guid.NewGuid();
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.Documents.AddRange(
+                new AiCare.Domain.DocumentItem(sourceId, f.Person, "old-plan.pdf", "Care plan", "local://old-plan.pdf", "Regression", DateTimeOffset.UtcNow.AddMinutes(-2), TenantDefaults.OrganizationId, TenantDefaults.BranchId),
+                new AiCare.Domain.DocumentItem(replacementId, f.Person, "signed-plan.pdf", "Care plan", "local://signed-plan.pdf", "Regression", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+        }
+
+        var response = await f.Manager.PostAsJsonAsync($"/api/phase1/documents/{sourceId}/supersede", new
+        {
+            replacementDocumentId = replacementId,
+            reason = "Signed version received"
+        });
+        await Expect(response, HttpStatusCode.OK);
+        var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Care plan", result.GetProperty("document").GetProperty("category").GetString());
+        Assert.Equal("Superseded", result.GetProperty("document").GetProperty("status").GetString());
+        Assert.Equal(replacementId, result.GetProperty("document").GetProperty("replacementDocumentId").GetGuid());
+        await Expect(await f.Manager.GetAsync($"/api/phase1/documents/{sourceId}/download-url"), HttpStatusCode.NotFound);
+        await Expect(await f.Manager.GetAsync($"/api/phase1/documents/{replacementId}"), HttpStatusCode.OK);
+        var history = await f.Manager.GetFromJsonAsync<JsonElement>($"/api/phase1/documents/{replacementId}/history");
+        var chain = history.GetProperty("replacementChain").EnumerateArray().ToArray();
+        Assert.Equal(new[] { sourceId, replacementId }, chain.Select(item => item.GetProperty("id").GetGuid()).ToArray());
+
+        using var verifyScope = factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<CareDbContext>();
+        var lifecycle = await verifyDb.DocumentLifecycleEvents.AsNoTracking().SingleAsync(item => item.DocumentId == sourceId);
+        Assert.Equal(replacementId, lifecycle.ReplacementDocumentId);
+        Assert.Equal("Care plan", (await verifyDb.Documents.AsNoTracking().SingleAsync(item => item.Id == sourceId)).Category);
     }
 }

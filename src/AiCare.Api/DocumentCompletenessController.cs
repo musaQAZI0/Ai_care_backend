@@ -16,7 +16,7 @@ public sealed partial class PersonOnboardingController
               exists(select 1 from "Documents" d join person_document_verifications v on v.document_id=d."Id"
                 where d."ServiceUserId"=@person and d."OrganizationId"=@org and d."BranchId"=@branch
                   and v.service_user_id=@person and v.organization_id=@org and v.branch_id=@branch
-                  and lower(trim(d."Category"))<>'withdrawn' and lower(trim(d."Category"))=lower(trim(r.category)) and v.status='Verified' and v.document_snapshot=to_jsonb(d)
+                  and lower(trim(d."Category"))<>'withdrawn' and not exists(select 1 from document_lifecycle_events e where e."DocumentId"=d."Id") and lower(trim(d."Category"))=lower(trim(r.category)) and v.status='Verified' and v.document_snapshot=to_jsonb(d)
                   and (v.valid_until is null or v.valid_until>now()) and (not r.expiry_required or v.valid_until is not null)
                   and not exists(select 1 from person_document_verifications newer where newer.document_id=v.document_id and newer.revision>v.revision)) complete
             from person_document_requirements r where r.service_user_id=@person and r.organization_id=@org and r.branch_id=@branch and r.enabled
@@ -39,7 +39,7 @@ public sealed partial class PersonOnboardingController
               coalesce(v.document_snapshot=to_jsonb(d),false) metadata_matches,v.evidence
             from "Documents" d left join lateral (select * from person_document_verifications where document_id=d."Id"
               and service_user_id=@person and organization_id=@org and branch_id=@branch order by revision desc limit 1) v on true
-            where d."ServiceUserId"=@person and d."OrganizationId"=@org and d."BranchId"=@branch and lower(trim(d."Category"))<>'withdrawn' order by d."FileName",d."Id"
+            where d."ServiceUserId"=@person and d."OrganizationId"=@org and d."BranchId"=@branch and lower(trim(d."Category"))<>'withdrawn' and not exists(select 1 from document_lifecycle_events e where e."DocumentId"=d."Id") order by d."FileName",d."Id"
             """, serviceUserId, branch, _ => { }, token);
         var verificationHistory=await RemediationRows("""
             select v.id,v.document_id,v.revision,v.status,v.valid_until,v.evidence,v.created_at,u."UserName" author,
@@ -81,7 +81,7 @@ public sealed partial class PersonOnboardingController
         var snapshot=JsonSerializer.Serialize(new{documentId,request=r});
         return DocumentWrite(serviceUserId,"person_document_verifications",r.RequestId,snapshot,async branch=> {
             if(r.ValidUntil is {} expiry && expiry<=DateTimeOffset.UtcNow) return BadRequest(new{message="Verification expiry must be in the future."});
-            var docs=await RemediationRows("select \"Id\" id from \"Documents\" where \"Id\"=@doc and \"ServiceUserId\"=@person and \"OrganizationId\"=@org and \"BranchId\"=@branch and lower(trim(\"Category\"))<>'withdrawn'",serviceUserId,branch,c=>RemediationAdd(c,"doc",documentId),token);
+            var docs=await RemediationRows("select d.\"Id\" id from \"Documents\" d where d.\"Id\"=@doc and d.\"ServiceUserId\"=@person and d.\"OrganizationId\"=@org and d.\"BranchId\"=@branch and lower(trim(d.\"Category\"))<>'withdrawn' and not exists(select 1 from document_lifecycle_events e where e.\"DocumentId\"=d.\"Id\")",serviceUserId,branch,c=>RemediationAdd(c,"doc",documentId),token);
             if(docs.Count!=1)return NotFound();
             var versions=await RemediationRows("select coalesce(max(revision),0) revision from person_document_verifications where document_id=@doc",serviceUserId,branch,c=>RemediationAdd(c,"doc",documentId),token);
             if(versions[0].GetProperty("revision").GetInt32()!=r.ExpectedRevision)return Conflict(new{message="Document verification changed. Refresh before saving."});

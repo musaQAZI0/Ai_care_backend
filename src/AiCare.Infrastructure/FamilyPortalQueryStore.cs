@@ -117,6 +117,7 @@ public sealed class FamilyPortalQueryStore(CareDbContext db) : IFamilyPortalQuer
             where d."OrganizationId" = @organization
               and d."ServiceUserId" = @person
               and lower(trim(d."Category")) <> 'withdrawn'
+              and not exists (select 1 from document_lifecycle_events e where e."DocumentId" = d."Id")
               and (v.visibility = 'ServiceUserAndRepresentative' or (v.visibility = 'ExplicitFamilyAccess' and g.family_member_id is not null))
             order by d."UploadedAt" desc
             """;

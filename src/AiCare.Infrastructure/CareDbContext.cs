@@ -23,6 +23,7 @@ public sealed class CareDbContext : DbContext
     public DbSet<RiskAssessment> RiskAssessments => Set<RiskAssessment>();
     public DbSet<FamilyMember> FamilyMembers => Set<FamilyMember>();
     public DbSet<DocumentItem> Documents => Set<DocumentItem>();
+    public DbSet<DocumentLifecycleEvent> DocumentLifecycleEvents => Set<DocumentLifecycleEvent>();
     public DbSet<Medication> Medications => Set<Medication>();
     public DbSet<MedicationAdministrationRecord> MedicationAdministrationRecords => Set<MedicationAdministrationRecord>();
     public DbSet<CareNote> CareNotes => Set<CareNote>();
@@ -204,6 +205,19 @@ public sealed class CareDbContext : DbContext
             builder.Property(document => document.FileName).IsRequired();
             builder.Property(document => document.Category).IsRequired();
             builder.Property(document => document.StoragePath).IsRequired();
+        });
+
+        modelBuilder.Entity<DocumentLifecycleEvent>(builder =>
+        {
+            builder.ToTable("document_lifecycle_events");
+            builder.HasKey(item => item.Id);
+            builder.HasIndex(item => item.DocumentId).IsUnique();
+            builder.HasIndex(item => item.ReplacementDocumentId).IsUnique();
+            builder.Property(item => item.EventType).HasMaxLength(32).IsRequired();
+            builder.Property(item => item.Reason).HasMaxLength(300).IsRequired();
+            builder.Property(item => item.CreatedBy).HasMaxLength(200).IsRequired();
+            builder.HasOne<DocumentItem>().WithMany().HasForeignKey(item => item.DocumentId).OnDelete(DeleteBehavior.Restrict);
+            builder.HasOne<DocumentItem>().WithMany().HasForeignKey(item => item.ReplacementDocumentId).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<Medication>(builder =>
