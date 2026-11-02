@@ -43,12 +43,16 @@ public sealed class PrivilegedAccessMiddleware(RequestDelegate next)
         var access = await FindAccess(db, userId.Value, organizationId.Value, branchId, routePerson, path, method, context.RequestAborted);
         if (access is not null)
         {
-            var identity = new ClaimsIdentity("PrivilegedAccess");
+            var identity = new ClaimsIdentity(
+                authenticationType: "PrivilegedAccess",
+                nameType: ClaimTypes.Name,
+                roleType: ClaimTypes.Role);
+            identity.AddClaim(new Claim(ClaimTypes.Name, context.User.Identity?.Name ?? "unknown"));
             identity.AddClaim(new Claim(ClaimTypes.Role, access.Role));
             identity.AddClaim(new Claim("privileged_access_id", access.Id.ToString()));
             identity.AddClaim(new Claim("privileged_access_type", access.Type));
-            context.User.AddIdentity(identity);
-            await RecordUse(db, access, userId.Value, context.User.Identity?.Name ?? "unknown", organizationId.Value, branchId, path, method, context.RequestAborted);
+            context.User = new ClaimsPrincipal(new[] { identity }.Concat(context.User.Identities));
+            await RecordUse(db, access, userId.Value, identity.Name ?? "unknown", organizationId.Value, branchId, path, method, context.RequestAborted);
         }
 
         await next(context);
