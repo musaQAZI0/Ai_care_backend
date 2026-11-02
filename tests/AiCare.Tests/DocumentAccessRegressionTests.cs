@@ -31,10 +31,17 @@ public sealed partial class MeasurableCareGoalsRegressionTests
 
         var assigned = await f.Worker.GetFromJsonAsync<JsonElement[]>("/api/phase1/documents");
         Assert.Contains(assigned!, item => item.GetProperty("id").GetGuid() == id);
+        var searched = await f.Manager.GetFromJsonAsync<JsonElement[]>("/api/phase1/documents?search=support-agreement&category=Support%20agreement");
+        Assert.Contains(searched!, item => item.GetProperty("id").GetGuid() == id);
+        var noMatch = await f.Manager.GetFromJsonAsync<JsonElement[]>("/api/phase1/documents?search=not-present");
+        Assert.DoesNotContain(noMatch!, item => item.GetProperty("id").GetGuid() == id);
+        await Expect(await f.Manager.GetAsync("/api/phase1/documents?uploadedFrom=2026-11-02T12%3A00%3A00Z&uploadedTo=2026-11-01T12%3A00%3A00Z"), HttpStatusCode.BadRequest);
         var unassigned = await f.Unassigned.GetFromJsonAsync<JsonElement[]>("/api/phase1/documents");
         Assert.DoesNotContain(unassigned!, item => item.GetProperty("id").GetGuid() == id);
         await Expect(await f.Unassigned.GetAsync($"/api/phase1/documents/{id}"), HttpStatusCode.NotFound);
+        await Expect(await f.Worker.GetAsync($"/api/phase1/documents/{id}/history"), HttpStatusCode.Forbidden);
         await Expect(await f.OtherBranch.GetAsync($"/api/phase1/documents/{id}/download-url"), HttpStatusCode.NotFound);
+        await Expect(await f.OtherBranch.GetAsync($"/api/phase1/documents/{id}/history"), HttpStatusCode.NotFound);
         await Expect(await (await ForeignManager()).GetAsync($"/api/phase1/documents/{id}/download-url"), HttpStatusCode.NotFound);
 
         var directMetadata = new
@@ -50,6 +57,10 @@ public sealed partial class MeasurableCareGoalsRegressionTests
         await Expect(await f.Manager.DeleteAsync($"/api/phase1/documents/{id}"), HttpStatusCode.BadRequest);
         await Expect(await f.Manager.DeleteAsync($"/api/phase1/documents/{id}?reason=Replaced%20by%20a%20signed%20copy"), HttpStatusCode.NoContent);
         await Expect(await f.Manager.GetAsync($"/api/phase1/documents/{id}"), HttpStatusCode.NotFound);
+        var withdrawn = await f.Manager.GetFromJsonAsync<JsonElement[]>("/api/phase1/documents?includeWithdrawn=true");
+        Assert.Contains(withdrawn!, item => item.GetProperty("id").GetGuid() == id && item.GetProperty("category").GetString() == "Withdrawn");
+        var history = await f.Manager.GetFromJsonAsync<JsonElement>($"/api/phase1/documents/{id}/history");
+        Assert.Contains(history.GetProperty("history").EnumerateArray(), item => item.GetProperty("action").GetString()!.StartsWith("document.withdrawn:", StringComparison.Ordinal));
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();

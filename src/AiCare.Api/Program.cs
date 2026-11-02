@@ -1578,22 +1578,39 @@ phase1.MapDelete("/family-members/{id:guid}", (Guid id, CareDbContext context, I
     context.SaveChanges();
     return Results.NoContent();
 });
-phase1.MapGet("/documents", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapGet("/documents", (string? search, string? category, Guid? serviceUserId, DateTimeOffset? uploadedFrom, DateTimeOffset? uploadedTo, bool? includeWithdrawn, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     var denied = RequireDocumentRole(currentUser, allowCareWorker: true);
     if (denied is not null) return denied;
+    if (uploadedFrom is not null && uploadedTo is not null && uploadedFrom > uploadedTo)
+        return Error("The upload-from date must be on or before the upload-to date.");
 
+    var showWithdrawn = includeWithdrawn == true;
     var documents = context.Documents.AsNoTracking()
         .Where(item => (tenant.IsPlatformOwner || item.OrganizationId == tenant.OrganizationId) &&
-            (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == tenant.BranchId) &&
-            item.Category != "Withdrawn");
+            (tenant.IsOrganizationWide || tenant.BranchId == null || item.BranchId == tenant.BranchId));
     if (currentUser.IsCareWorker)
     {
         if (currentUser.CareWorkerId is not Guid workerId)
             return Error("Care worker account is not linked to a care worker profile.", StatusCodes.Status403Forbidden);
         var personIds = DocumentPersonIdsForWorker(context, tenant, workerId);
         documents = documents.Where(item => personIds.Contains(item.ServiceUserId));
+        showWithdrawn = false;
     }
+    if (!showWithdrawn) documents = documents.Where(item => item.Category != "Withdrawn");
+    if (!string.IsNullOrWhiteSpace(search))
+    {
+        var term = search.Trim().ToLower();
+        documents = documents.Where(item => item.FileName.ToLower().Contains(term) || item.Category.ToLower().Contains(term));
+    }
+    if (!string.IsNullOrWhiteSpace(category))
+    {
+        var categoryFilter = category.Trim().ToLower();
+        documents = documents.Where(item => item.Category.ToLower() == categoryFilter);
+    }
+    if (serviceUserId is Guid personId) documents = documents.Where(item => item.ServiceUserId == personId);
+    if (uploadedFrom is not null) documents = documents.Where(item => item.UploadedAt >= uploadedFrom);
+    if (uploadedTo is not null) documents = documents.Where(item => item.UploadedAt <= uploadedTo);
     return Results.Ok(documents.OrderByDescending(item => item.UploadedAt).ToList().Select(DocumentResponse));
 });
 phase1.MapGet("/documents/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
@@ -1604,6 +1621,21 @@ phase1.MapGet("/documents/{id:guid}", (Guid id, CareDbContext context, ITenantCo
     return document is null || document.Category == "Withdrawn" || !CanAccessDocument(document, context, tenant, currentUser)
         ? Results.NotFound()
         : Results.Ok(DocumentResponse(document));
+});
+phase1.MapGet("/documents/{id:guid}/history", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+{
+    var denied = RequireDocumentRole(currentUser, allowCareWorker: false);
+    if (denied is not null) return denied;
+    var document = context.Documents.AsNoTracking().FirstOrDefault(item => item.Id == id);
+    if (document is null || !tenant.CanAccess(document.OrganizationId, document.BranchId)) return Results.NotFound();
+    var history = context.AuditEvents.AsNoTracking()
+        .Where(item => item.EntityId == id && item.OrganizationId == document.OrganizationId &&
+            (item.Action.StartsWith("document.") || item.Action.StartsWith("family.document_")))
+        .OrderByDescending(item => item.CreatedAt)
+        .Take(100)
+        .Select(item => new { item.Id, item.Action, item.Actor, item.CreatedAt })
+        .ToList();
+    return Results.Ok(new { document = DocumentResponse(document), history });
 });
 phase1.MapPost("/documents", (CreateDocumentRequest request, ICurrentUserContext currentUser) =>
 {
