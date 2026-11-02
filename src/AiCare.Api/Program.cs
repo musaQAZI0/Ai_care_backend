@@ -1689,9 +1689,18 @@ phase1.MapPost("/documents/upload", async (HttpRequest request, IWebHostEnvironm
         AddAudit(context, tenant, currentUser, "document.uploaded", nameof(DocumentItem), document.Id, branchId: document.BranchId);
         await context.SaveChangesAsync(request.HttpContext.RequestAborted);
     }
-    catch
+    catch (Exception saveException)
     {
-        await DeleteUploadedDocumentAsync(storagePath, configuration, httpClientFactory, request.HttpContext.RequestAborted);
+        try
+        {
+            using var cleanupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await DeleteUploadedDocumentAsync(storagePath, configuration, httpClientFactory, cleanupTimeout.Token);
+        }
+        catch (Exception cleanupException)
+        {
+            throw new InvalidOperationException("Document metadata could not be saved and uploaded-file cleanup also failed.",
+                new AggregateException(saveException, cleanupException));
+        }
         throw;
     }
     return Results.Created($"/api/phase1/documents/{document.Id}", DocumentResponse(document));
@@ -2795,7 +2804,6 @@ phase1.MapPost("/tenant/activate", (CareDbContext context, ITenantContext tenant
 phase1.MapGet("/storage/status", (IConfiguration configuration) => Results.Ok(new
 {
     provider = configuration["Storage:Provider"] ?? "Local",
-    root = configuration["Storage:RootPath"] ?? "App_Data/uploads",
     cloudReady = !string.Equals(configuration["Storage:Provider"], "Local", StringComparison.OrdinalIgnoreCase)
 }));
 
@@ -3884,9 +3892,17 @@ static async Task<string> UploadToLocalStorage(IFormFile file, string storedName
     var uploadRoot = Path.Combine(environment.ContentRootPath, "App_Data", "uploads");
     Directory.CreateDirectory(uploadRoot);
     var storagePath = Path.Combine(uploadRoot, storedName);
-    await using var stream = File.Create(storagePath);
-    await file.CopyToAsync(stream);
-    return storagePath;
+    try
+    {
+        await using var stream = File.Create(storagePath);
+        await file.CopyToAsync(stream);
+        return storagePath;
+    }
+    catch
+    {
+        if (File.Exists(storagePath)) File.Delete(storagePath);
+        throw;
+    }
 }
 
 static async Task<string> UploadToSupabaseStorage(IFormFile file, string storedName, IConfiguration configuration, IHttpClientFactory httpClientFactory, ITenantContext tenant)

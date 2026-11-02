@@ -39,11 +39,27 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
 
         var configured = await ConfigureAccess(admin, seed.FamilyMemberId, null, new[]
         {
-            "ViewCareSummary", "ViewTimeline", "ViewVisits", "ViewAppointments", "ViewCarePlan", "SubmitFeedback"
+            "ViewCareSummary", "ViewTimeline", "ViewVisits", "ViewAppointments", "ViewCarePlan", "ViewDocuments", "SubmitFeedback"
         });
         Assert.Equal("Verified", configured.VerificationStatus);
         Assert.Equal("Active", configured.AccessStatus);
         Assert.DoesNotContain("SignCarePlan", configured.Permissions);
+
+        var sharedDocument = Guid.NewGuid();
+        using (var documentScope = _factory.Services.CreateScope())
+        {
+            var db = documentScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.Documents.Add(new DocumentItem(sharedDocument, seed.PersonId, "family-support-plan.pdf", "Care plan",
+                "local://family-support-plan.pdf", "Regression manager", DateTimeOffset.UtcNow,
+                TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+        }
+        var visibility = await admin.PutAsJsonAsync($"/api/phase1/family-documents/{sharedDocument}/visibility", new
+        {
+            visibility = "ServiceUserAndRepresentative",
+            familyMemberIds = Array.Empty<Guid>()
+        });
+        Assert.Equal(HttpStatusCode.NoContent, visibility.StatusCode);
 
         var invite = await admin.PostAsync($"/api/phase1/family-access/{seed.FamilyMemberId}/invite", null);
         Assert.Equal(HttpStatusCode.OK, invite.StatusCode);
@@ -101,6 +117,28 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
         var peopleBody = await people.Content.ReadAsStringAsync();
         Assert.Contains(seed.PersonId.ToString(), peopleBody, StringComparison.OrdinalIgnoreCase);
 
+        var documentsUrl = $"/api/family/service-users/{seed.PersonId}/documents";
+        var sharedDocuments = await family.GetAsync(documentsUrl);
+        Assert.Equal(HttpStatusCode.OK, sharedDocuments.StatusCode);
+        Assert.Contains(sharedDocument.ToString(), await sharedDocuments.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+        var localDownload = await family.GetAsync($"{documentsUrl}/{sharedDocument}/download-url");
+        Assert.Equal(HttpStatusCode.Conflict, localDownload.StatusCode);
+
+        using (var expiryScope = _factory.Services.CreateScope())
+        {
+            var db = expiryScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"update family_access_grants set valid_until={DateTimeOffset.UtcNow.AddMinutes(-1)} where family_member_id={seed.FamilyMemberId}");
+        }
+        Assert.Equal(HttpStatusCode.Forbidden, (await family.GetAsync(documentsUrl)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await family.GetAsync($"{documentsUrl}/{sharedDocument}/download-url")).StatusCode);
+        var expiredPeople = await family.GetFromJsonAsync<JsonElement[]>("/api/family/people");
+        Assert.Empty(expiredPeople!);
+        using (var restoreExpiryScope = _factory.Services.CreateScope())
+        {
+            var db = restoreExpiryScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"update family_access_grants set valid_until={DateTimeOffset.UtcNow.AddYears(1)} where family_member_id={seed.FamilyMemberId}");
+        }
+
         var ownOverview = await family.GetAsync($"/api/family/service-users/{seed.PersonId}/overview");
         Assert.Equal(HttpStatusCode.OK, ownOverview.StatusCode);
         var wrongOverview = await family.GetAsync($"/api/family/service-users/{Guid.NewGuid()}/overview");
@@ -154,10 +192,18 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
         var signedBody = await allowedSignature.Content.ReadAsStringAsync();
         Assert.Contains("Signed", signedBody);
 
+        var withdrawDocument = await admin.DeleteAsync($"/api/phase1/documents/{sharedDocument}?reason=Superseded%20family%20copy");
+        Assert.Equal(HttpStatusCode.NoContent, withdrawDocument.StatusCode);
+        var afterWithdrawal = await family.GetAsync(documentsUrl);
+        Assert.Equal(HttpStatusCode.OK, afterWithdrawal.StatusCode);
+        Assert.DoesNotContain(sharedDocument.ToString(), await afterWithdrawal.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HttpStatusCode.NotFound, (await family.GetAsync($"{documentsUrl}/{sharedDocument}/download-url")).StatusCode);
+
         var suspend = await admin.PostAsync($"/api/phase1/family-access/{seed.FamilyMemberId}/suspend", null);
         Assert.Equal(HttpStatusCode.OK, suspend.StatusCode);
         var blockedWhileSuspended = await family.GetAsync($"/api/family/service-users/{seed.PersonId}/overview");
         Assert.Equal(HttpStatusCode.Forbidden, blockedWhileSuspended.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await family.GetAsync(documentsUrl)).StatusCode);
 
         var restore = await admin.PostAsync($"/api/phase1/family-access/{seed.FamilyMemberId}/restore", null);
         Assert.Equal(HttpStatusCode.OK, restore.StatusCode);
@@ -168,6 +214,7 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
         Assert.Equal(HttpStatusCode.OK, revoke.StatusCode);
         var blockedAfterRevoke = await family.GetAsync($"/api/family/service-users/{seed.PersonId}/overview");
         Assert.Equal(HttpStatusCode.Forbidden, blockedAfterRevoke.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await family.GetAsync(documentsUrl)).StatusCode);
 
         var relogin = await family.PostAsJsonAsync("/api/auth/login", new { userName = seed.Email, password = "FamilySecure123!", mfaCode = (string?)null });
         Assert.Equal(HttpStatusCode.Unauthorized, relogin.StatusCode);

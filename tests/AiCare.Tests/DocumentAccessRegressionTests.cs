@@ -15,6 +15,8 @@ public sealed partial class MeasurableCareGoalsRegressionTests
     public async Task DocumentsUseServerOwnedStorageMetadataAndEnforcePersonAccessAndWithdrawal()
     {
         var f = await Setup();
+        var storageStatus = await f.Manager.GetFromJsonAsync<JsonElement>("/api/phase1/storage/status");
+        Assert.False(storageStatus.TryGetProperty("root", out _));
 
         using var upload = new MultipartFormDataContent();
         upload.Add(new StringContent(f.Person.ToString()), "serviceUserId");

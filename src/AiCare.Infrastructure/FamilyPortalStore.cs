@@ -250,7 +250,9 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
     public async Task<IReadOnlyCollection<FamilyPortalPerson>> GetAuthorizedPeopleAsync(Guid organizationId, Guid familyMemberId, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var access = await GetAccessAsync(organizationId, familyMemberId, cancellationToken);
-        if (access is null || access.AccessStatus != "Active" || access.VerificationStatus != "Verified") return Array.Empty<FamilyPortalPerson>();
+        if (access is null || access.VerificationStatus != "Verified" ||
+            EffectiveStatus(access.AccessStatus, access.ValidFrom, access.ValidUntil, now) != "Active")
+            return Array.Empty<FamilyPortalPerson>();
         var person = await _db.ServiceUsers.AsNoTracking().FirstOrDefaultAsync(x => x.OrganizationId == organizationId && x.Id == access.ServiceUserId, cancellationToken);
         return person is null ? Array.Empty<FamilyPortalPerson>() : new[] { new FamilyPortalPerson(person.Id, person.FullName, access.Relationship, access.Permissions) };
     }
