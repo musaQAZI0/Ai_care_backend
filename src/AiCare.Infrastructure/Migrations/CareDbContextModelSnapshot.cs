@@ -562,6 +562,53 @@ namespace AiCare.Infrastructure.Migrations
                     b.ToTable("Documents");
                 });
 
+            modelBuilder.Entity("AiCare.Domain.DocumentLifecycleEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BranchId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid>("DocumentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<Guid?>("ReplacementDocumentId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DocumentId")
+                        .IsUnique();
+
+                    b.HasIndex("ReplacementDocumentId")
+                        .IsUnique();
+
+                    b.ToTable("document_lifecycle_events");
+                });
+
             modelBuilder.Entity("AiCare.Domain.FamilyMember", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1463,6 +1510,20 @@ namespace AiCare.Infrastructure.Migrations
                             Role = "Administrator",
                             UserName = "admin"
                         });
+                });
+
+            modelBuilder.Entity("AiCare.Domain.DocumentLifecycleEvent", b =>
+                {
+                    b.HasOne("AiCare.Domain.DocumentItem", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("AiCare.Domain.DocumentItem", null)
+                        .WithMany()
+                        .HasForeignKey("ReplacementDocumentId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 #pragma warning restore 612, 618
         }
