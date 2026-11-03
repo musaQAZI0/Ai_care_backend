@@ -118,7 +118,9 @@ public sealed class CareOperationsWebRegressionTests(PostgresRegressionFactory f
         var consent = await admin.PutAsJsonAsync($"/api/phase1/care-operations/location-consent/CareWorker/{RegressionIds.WorkerId}",
             new { sharingMode = "Exact", purpose = "Active visit safety", startsAt = now.AddMinutes(-1), endsAt = now.AddHours(1) });
         Assert.Equal(HttpStatusCode.OK, consent.StatusCode);
+        var beforeOptIn = new { visitId = RegressionIds.VisitId, latitude = 54.5m, longitude = -2.5m, accuracyMeters = 10m, capturedAt = DateTimeOffset.UtcNow };
         Assert.Equal(HttpStatusCode.OK, (await worker.PostAsync(path, null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await worker.PostAsJsonAsync("/api/phase1/care-operations/live-location", beforeOptIn)).StatusCode);
         var point = new { visitId = RegressionIds.VisitId, latitude = 54.5m, longitude = -2.5m, accuracyMeters = 10m, capturedAt = DateTimeOffset.UtcNow };
         Assert.Equal(HttpStatusCode.Accepted, (await worker.PostAsJsonAsync("/api/phase1/care-operations/live-location", point)).StatusCode);
         Assert.Contains(RegressionIds.WorkerId.ToString(), await admin.GetStringAsync("/api/phase1/care-operations/live-map"), StringComparison.OrdinalIgnoreCase);

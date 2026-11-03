@@ -51,7 +51,7 @@ public sealed class CareOperationsCompletionController(CareDbContext db,ITenantC
   var endsAt=visitEnd<consentEnd?visitEnd:consentEnd;
   await Exec("update worker_live_sharing set stopped_at=now() where organization_id=@organization and care_worker_id=@worker and stopped_at is null",c=>Add(c,"worker",worker),t);
   var id=Guid.NewGuid();
-  await Exec("insert into worker_live_sharing(id,organization_id,branch_id,care_worker_id,visit_id,ends_at) values(@id,@organization,@branch,@worker,@visit,@ends)",c=>{Add(c,"id",id);Add(c,"worker",worker);Add(c,"visit",visitId);Add(c,"ends",endsAt);},t);
+  await Exec("insert into worker_live_sharing(id,organization_id,branch_id,care_worker_id,visit_id,started_at,ends_at) values(@id,@organization,@branch,@worker,@visit,@started,@ends)",c=>{Add(c,"id",id);Add(c,"worker",worker);Add(c,"visit",visitId);Add(c,"started",now);Add(c,"ends",endsAt);},t);
   await Audit("location.worker_sharing_started","WorkerLiveSharing",id,t);
   return Ok(new{visitId,endsAt});
  }
