@@ -35,12 +35,9 @@ public sealed class PrivilegedAccessMiddleware(RequestDelegate next)
             return;
         }
 
-        var routePerson = context.Request.RouteValues.Values
-            .Select(value => Guid.TryParse(value?.ToString(), out var id) ? id : (Guid?)null)
-            .FirstOrDefault(value => value is not null);
         var path = context.Request.Path.Value ?? "";
         var method = context.Request.Method.ToUpperInvariant();
-        var access = await FindAccess(db, userId.Value, organizationId.Value, branchId, routePerson, path, method, context.RequestAborted);
+        var access = await FindAccess(db, userId.Value, organizationId.Value, branchId, path, method, context.RequestAborted);
         if (access is not null)
         {
             var identity = new ClaimsIdentity(
@@ -58,7 +55,7 @@ public sealed class PrivilegedAccessMiddleware(RequestDelegate next)
         await next(context);
     }
 
-    private static async Task<AccessGrant?> FindAccess(CareDbContext db, Guid userId, Guid organizationId, Guid? branchId, Guid? routePerson, string path, string method, CancellationToken token)
+    private static async Task<AccessGrant?> FindAccess(CareDbContext db, Guid userId, Guid organizationId, Guid? branchId, string path, string method, CancellationToken token)
     {
         var connection = db.Database.GetDbConnection();
         if (connection.State != ConnectionState.Open) await connection.OpenAsync(token);
@@ -86,10 +83,18 @@ public sealed class PrivilegedAccessMiddleware(RequestDelegate next)
             var prefix = reader.GetString(5);
             var methods = reader.GetFieldValue<string[]>(6);
             if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !methods.Contains(method, StringComparer.OrdinalIgnoreCase)) continue;
-            if (person is not null && routePerson != person) continue;
+            if (person is not null && !PathTargetsPerson(path, prefix, person.Value)) continue;
             return new AccessGrant(reader.GetGuid(0), reader.GetString(1), reader.GetString(2));
         }
         return null;
+    }
+
+    private static bool PathTargetsPerson(string path, string prefix, Guid personId)
+    {
+        var remainder = path[prefix.Length..].TrimStart('/');
+        var separator = remainder.IndexOf('/');
+        var personSegment = separator < 0 ? remainder : remainder[..separator];
+        return Guid.TryParse(personSegment, out var pathPersonId) && pathPersonId == personId;
     }
 
     private static async Task RecordUse(CareDbContext db, AccessGrant access, Guid userId, string actor, Guid organizationId, Guid? branchId, string path, string method, CancellationToken token)
