@@ -61,5 +61,21 @@ public sealed class AccountInvitationStore(CareDbContext db) : IAccountInvitatio
             await db.SaveChangesAsync(ct);await transaction.CommitAsync(ct);
         });
     }
+    public async Task<bool> RevokeAsync(Guid invitationId,Guid organizationId,Guid? branchId,bool organizationWide,Guid actorUserId,string actorName,string reason,DateTimeOffset now,CancellationToken ct)
+    {
+        var strategy=db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async() =>
+        {
+            await using var transaction=await db.Database.BeginTransactionAsync(ct);
+            var row=await db.Database.SqlQuery<InvitationRow>($"""select i.id as "InvitationId",i.user_id as "UserId",i.status as "Status",i.expires_at as "ExpiresAt",i.organization_id as "OrganizationId",i.branch_id as "BranchId" from account_invitations i where i.id={invitationId} and i.organization_id={organizationId} and ({organizationWide} or i.branch_id={branchId}) for update""").SingleOrDefaultAsync(ct);
+            if(row is null)return false;
+            if(row.Status is not ("Pending" or "Sent" or "Failed"))throw new InvalidOperationException("Only an open invitation can be revoked.");
+            await db.Database.ExecuteSqlInterpolatedAsync($"update account_invitations set status='Revoked',revoked_at={now},revoked_by_user_id={actorUserId},revoked_by={actorName},revocation_reason={reason} where id={invitationId}",ct);
+            await db.Database.ExecuteSqlInterpolatedAsync($"update auth_sessions set revoked_at=now(),revoked_by={actorName},revocation_reason={reason} where user_id={row.UserId} and organization_id={organizationId} and revoked_at is null",ct);
+            await db.Database.ExecuteSqlInterpolatedAsync($"update auth_refresh_tokens set revoked_at=now() where user_id={row.UserId} and revoked_at is null",ct);
+            db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"account.invitation_revoked",actorName,nameof(AppUser),row.UserId,now,organizationId,row.BranchId??branchId??TenantDefaults.BranchId));
+            await db.SaveChangesAsync(ct);await transaction.CommitAsync(ct);return true;
+        });
+    }
     private sealed class InvitationRow{public Guid InvitationId{get;set;}public Guid UserId{get;set;}public string Status{get;set;}="";public DateTimeOffset ExpiresAt{get;set;}public Guid OrganizationId{get;set;}public Guid? BranchId{get;set;}}
 }

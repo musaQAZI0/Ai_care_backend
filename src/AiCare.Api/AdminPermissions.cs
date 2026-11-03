@@ -80,7 +80,7 @@ public sealed class AdminPermissionGateMiddleware(RequestDelegate next)
         if (path.StartsWith("/api/phase1/admin/appointment-configuration", StringComparison.Ordinal) && method != "GET") return "settings.manage";
         if (path.StartsWith("/api/phase1/care-operations/training-courses", StringComparison.Ordinal) && method != "GET")
             return "training.manage";
-        if (method == "POST" && path == "/api/phase1/account-invitations") return "users.manage";
+        if (method == "POST" && (path == "/api/phase1/account-invitations" || path.StartsWith("/api/phase1/account-invitations/", StringComparison.Ordinal) && path.EndsWith("/revoke", StringComparison.Ordinal))) return "users.manage";
         if (method == "POST" && path.StartsWith("/api/security/access-reviews/", StringComparison.Ordinal) && path.EndsWith("/remediate", StringComparison.Ordinal))
             return "users.manage";
         if (method == "GET" && path.StartsWith("/api/phase1/operational-reports/", StringComparison.Ordinal) && path.EndsWith(".csv", StringComparison.Ordinal))

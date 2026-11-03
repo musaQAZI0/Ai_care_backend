@@ -14,6 +14,7 @@ public interface IAccountInvitationStore
     Task MarkQueueFailedAsync(Guid invitationId, string reason, CancellationToken ct);
     Task<AccountInvitationValidation> ValidateAsync(string tokenHash, DateTimeOffset now, CancellationToken ct);
     Task AcceptAsync(string tokenHash, string password, DateTimeOffset now, CancellationToken ct);
+    Task<bool> RevokeAsync(Guid invitationId, Guid organizationId, Guid? branchId, bool organizationWide, Guid actorUserId, string actorName, string reason, DateTimeOffset now, CancellationToken ct);
 }
 public interface IAccountInvitationEmailSender { Task SendAsync(AccountInvitationEmailRequest request, CancellationToken ct); }
 public interface IAccountInvitationService
@@ -21,6 +22,7 @@ public interface IAccountInvitationService
     Task<AccountInvitationResult> CreateAsync(Guid organizationId, Guid? branchId, Guid actorUserId, string actorName, CreateAccountInvitationCommand command, string frontendBaseUrl, CancellationToken ct);
     Task<AccountInvitationValidation> ValidateAsync(string token, CancellationToken ct);
     Task AcceptAsync(string token, string password, bool acceptTerms, CancellationToken ct);
+    Task<bool> RevokeAsync(Guid invitationId, Guid organizationId, Guid? branchId, bool organizationWide, Guid actorUserId, string actorName, string reason, CancellationToken ct);
 }
 
 public sealed class AccountInvitationService(IAccountInvitationStore store, IAccountInvitationEmailSender emailSender) : IAccountInvitationService
@@ -44,6 +46,7 @@ public sealed class AccountInvitationService(IAccountInvitationStore store, IAcc
     }
     public Task<AccountInvitationValidation> ValidateAsync(string token, CancellationToken ct) => string.IsNullOrWhiteSpace(token) ? Task.FromResult(new AccountInvitationValidation(false,"Invalid","Invitation token is required.",null,null,null,null)) : store.ValidateAsync(Hash(token),DateTimeOffset.UtcNow,ct);
     public Task AcceptAsync(string token,string password,bool acceptTerms,CancellationToken ct) { if(string.IsNullOrWhiteSpace(token))throw new InvalidOperationException("Invitation token is required."); if(!acceptTerms)throw new InvalidOperationException("Terms must be accepted before activation."); ValidatePassword(password); return store.AcceptAsync(Hash(token),password,DateTimeOffset.UtcNow,ct); }
+    public Task<bool> RevokeAsync(Guid invitationId,Guid organizationId,Guid? branchId,bool organizationWide,Guid actorUserId,string actorName,string reason,CancellationToken ct) => store.RevokeAsync(invitationId,organizationId,branchId,organizationWide,actorUserId,actorName,reason,DateTimeOffset.UtcNow,ct);
     private static string Hash(string value)=>Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static string Base64Url(byte[] bytes)=>Convert.ToBase64String(bytes).TrimEnd('=').Replace('+','-').Replace('/','_');
     private static void ValidatePassword(string password) { if(password.Length<12||!password.Any(char.IsUpper)||!password.Any(char.IsLower)||!password.Any(char.IsDigit)||!password.Any(ch=>!char.IsLetterOrDigit(ch)))throw new InvalidOperationException("Password must contain at least 12 characters, upper and lower case letters, a number, and a symbol."); }

@@ -45,6 +45,7 @@ public sealed class AccountInvitationServiceTests
         public Task MarkQueueFailedAsync(Guid id,string reason,CancellationToken ct){Failed=true;return Task.CompletedTask;}
         public Task<AccountInvitationValidation>ValidateAsync(string hash,DateTimeOffset now,CancellationToken ct)=>Task.FromResult(new AccountInvitationValidation(true,"Sent","Invitation is valid.","User","Provider","CareWorker",now.AddHours(1)));
         public Task AcceptAsync(string hash,string password,DateTimeOffset now,CancellationToken ct)=>Task.CompletedTask;
+        public Task<bool> RevokeAsync(Guid invitationId,Guid organizationId,Guid? branchId,bool organizationWide,Guid actorUserId,string actorName,string reason,DateTimeOffset now,CancellationToken ct)=>Task.FromResult(true);
     }
     private sealed class Sender:IAccountInvitationEmailSender
     {
