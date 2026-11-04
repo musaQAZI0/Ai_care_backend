@@ -22,6 +22,22 @@ namespace AiCare.Infrastructure.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("AiCare.Domain.PersonRecordRevision", b =>
+                {
+                    b.Property<Guid>("Id").ValueGeneratedOnAdd().HasColumnType("uuid");
+                    b.Property<Guid>("ServiceUserId").HasColumnType("uuid");
+                    b.Property<Guid>("PersonRecordId").HasColumnType("uuid");
+                    b.Property<string>("Actor").IsRequired().HasColumnType("text");
+                    b.Property<DateTimeOffset>("RecordedAt").HasColumnType("timestamp with time zone");
+                    b.Property<string>("BeforeJson").HasColumnType("jsonb");
+                    b.Property<string>("AfterJson").IsRequired().HasColumnType("jsonb");
+                    b.Property<Guid>("OrganizationId").HasColumnType("uuid");
+                    b.Property<Guid?>("BranchId").HasColumnType("uuid");
+                    b.HasKey("Id");
+                    b.HasIndex("OrganizationId", "ServiceUserId", "RecordedAt");
+                    b.ToTable("PersonRecordRevisions");
+                });
+
             modelBuilder.Entity("AiCare.Domain.AdminUser", b =>
                 {
                     b.Property<Guid>("Id")

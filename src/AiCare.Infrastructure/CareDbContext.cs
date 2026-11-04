@@ -12,6 +12,7 @@ public sealed class CareDbContext : DbContext
 
     public DbSet<ServiceUser> ServiceUsers => Set<ServiceUser>();
     public DbSet<PersonRecord> PersonRecords => Set<PersonRecord>();
+    public DbSet<PersonRecordRevision> PersonRecordRevisions => Set<PersonRecordRevision>();
     public DbSet<CareAssessment> CareAssessments => Set<CareAssessment>();
     public DbSet<CarePlanOutcome> CarePlanOutcomes => Set<CarePlanOutcome>();
     public DbSet<Organization> Organizations => Set<Organization>();
@@ -111,6 +112,14 @@ public sealed class CareDbContext : DbContext
             builder.HasIndex(record => new { record.OrganizationId, record.BranchId, record.ServiceUserId }).IsUnique();
             builder.Property(record => record.WhatMattersToMe).IsRequired(false);
             builder.Property(record => record.DesiredOutcomes).IsRequired(false);
+        });
+
+        modelBuilder.Entity<PersonRecordRevision>(builder =>
+        {
+            builder.HasKey(revision => revision.Id);
+            builder.HasIndex(revision => new { revision.OrganizationId, revision.ServiceUserId, revision.RecordedAt });
+            builder.Property(revision => revision.BeforeJson).HasColumnType("jsonb");
+            builder.Property(revision => revision.AfterJson).HasColumnType("jsonb");
         });
 
         modelBuilder.Entity<CareAssessment>(builder =>

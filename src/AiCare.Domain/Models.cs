@@ -46,6 +46,17 @@ public sealed record PersonRecord(
     Guid? OrganizationId = null,
     Guid? BranchId = null);
 
+public sealed record PersonRecordRevision(
+    Guid Id,
+    Guid ServiceUserId,
+    Guid PersonRecordId,
+    string Actor,
+    DateTimeOffset RecordedAt,
+    string? BeforeJson,
+    string AfterJson,
+    Guid OrganizationId,
+    Guid? BranchId);
+
 public sealed record CareAssessment(
     Guid Id,
     Guid ServiceUserId,

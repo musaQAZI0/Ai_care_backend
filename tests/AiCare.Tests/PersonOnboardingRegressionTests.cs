@@ -129,6 +129,24 @@ public sealed class PersonOnboardingRegressionTests(PostgresRegressionFactory fa
         Assert.Single(history, item => item.Action == "person_record.updated");
         Assert.All(history, item => { Assert.Equal(actor, item.Actor); Assert.Equal(branch, item.BranchId);
             Assert.Equal(TenantDefaults.OrganizationId, item.OrganizationId); });
+
+        var revisions = (await client.GetFromJsonAsync<List<PersonRecordRevision>>(
+            $"/api/phase1/service-users/{person.Id}/person-record/history"))!;
+        Assert.Equal(2, revisions.Count);
+        var initial = Assert.Single(revisions, item => item.BeforeJson is null);
+        var changed = Assert.Single(revisions, item => item.BeforeJson is not null);
+        var before = JsonSerializer.Deserialize<PersonRecord>(changed.BeforeJson!)!;
+        var after = JsonSerializer.Deserialize<PersonRecord>(changed.AfterJson)!;
+        Assert.Equal(request.PreferredName, before.PreferredName);
+        Assert.Equal("Updated preferred name", after.PreferredName);
+        Assert.Equal("Updated history", after.PersonalHistory);
+        Assert.Equal(JsonSerializer.Deserialize<PersonRecord>(initial.AfterJson)! with { LastReviewedAt = before.LastReviewedAt }, before);
+        Assert.All(revisions, item => { Assert.Equal(actor, item.Actor); Assert.Equal(branch, item.BranchId);
+            Assert.Equal(person.Id, item.ServiceUserId); Assert.Equal(recordId.Value, item.PersonRecordId); });
+        Assert.True(await evidenceDb.AuditEvents.AnyAsync(item => item.Action == "person_record.history_viewed"
+            && item.EntityId == person.Id && item.Actor == actor && item.BranchId == branch));
+        var export = await client.GetFromJsonAsync<JsonElement>($"/api/phase1/data-governance/service-users/{person.Id}/export");
+        Assert.Equal(2, export.GetProperty("personRecordRevisions").GetArrayLength());
     }
 
     private static CreateServiceUserRequest Request() => new(

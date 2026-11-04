@@ -85,6 +85,7 @@ public sealed class DataGovernanceController(
             requestId = request.Id,
             serviceUser = person,
             personRecord = await db.PersonRecords.AsNoTracking().FirstOrDefaultAsync(x => x.ServiceUserId == serviceUserId && x.OrganizationId == tenant.OrganizationId, ct),
+            personRecordRevisions = await db.PersonRecordRevisions.AsNoTracking().Where(x => x.ServiceUserId == serviceUserId && x.OrganizationId == tenant.OrganizationId).ToListAsync(ct),
             assessments = await db.CareAssessments.AsNoTracking().Where(x => x.ServiceUserId == serviceUserId && x.OrganizationId == tenant.OrganizationId).ToListAsync(ct),
             carePlans = await db.CarePlans.AsNoTracking().Where(x => x.ServiceUserId == serviceUserId && x.OrganizationId == tenant.OrganizationId).ToListAsync(ct),
             risks = await db.RiskAssessments.AsNoTracking().Where(x => x.ServiceUserId == serviceUserId && x.OrganizationId == tenant.OrganizationId).ToListAsync(ct),
@@ -157,6 +158,11 @@ public sealed class DataGovernanceController(
                 PersonalHistory = "REDACTED"
             });
         }
+
+        // Historical snapshots must not retain identifiers removed by this governed action.
+        var revisions = await db.PersonRecordRevisions.Where(x => x.OrganizationId == tenant.OrganizationId && x.ServiceUserId == serviceUserId).ToListAsync(ct);
+        foreach (var revision in revisions)
+            db.Entry(revision).CurrentValues.SetValues(revision with { BeforeJson = null, AfterJson = "{}" });
 
         var family = await db.FamilyMembers.Where(x => x.OrganizationId == tenant.OrganizationId && x.ServiceUserId == serviceUserId).ToListAsync(ct);
         foreach (var member in family)
