@@ -403,9 +403,9 @@ phase1.MapPost("/service-users", (CreateServiceUserRequest request, ICareReposit
         return Error("Full name, phone number, care needs, emergency contact, and preferred care worker are required.");
     }
 
-    if (request.DateOfBirth > DateOnly.FromDateTime(DateTime.UtcNow))
+    if (request.DateOfBirth == default || request.DateOfBirth > DateOnly.FromDateTime(DateTime.UtcNow))
     {
-        return Error("Date of birth cannot be in the future.");
+        return Error("A valid date of birth is required and cannot be in the future.");
     }
 
     if (InvalidContact(request.Contact)) return Error("Check contact details: valid email, supported contact method, and field length limits are required.");
@@ -430,9 +430,9 @@ phase1.MapPut("/service-users/{id:guid}", (Guid id, CreateServiceUserRequest req
         return Error("Full name, phone number, care needs, emergency contact, and preferred care worker are required.");
     }
 
-    if (request.DateOfBirth > DateOnly.FromDateTime(DateTime.UtcNow))
+    if (request.DateOfBirth == default || request.DateOfBirth > DateOnly.FromDateTime(DateTime.UtcNow))
     {
-        return Error("Date of birth cannot be in the future.");
+        return Error("A valid date of birth is required and cannot be in the future.");
     }
 
     if (InvalidContact(request.Contact)) return Error("Check contact details: valid email, supported contact method, and field length limits are required.");
