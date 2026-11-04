@@ -54,9 +54,9 @@ public sealed class FinalAdministratorConcurrencyRegressionTests(PostgresRegress
         var client = factory.CreateClient();
         var response = await client.PostAsJsonAsync("/api/auth/login", new { userName, password = "Admin123!", mfaCode = (string?)null });
         response.EnsureSuccessStatusCode();
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await response.Content.ReadFromJsonAsync<Login>())!.Token);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await response.Content.ReadFromJsonAsync<LoginResponse>())!.Token);
         return client;
     }
 
-    private sealed record Login(string Token);
+    private sealed record LoginResponse(string Token);
 }
