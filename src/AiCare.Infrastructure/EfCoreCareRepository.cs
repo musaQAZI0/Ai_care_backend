@@ -55,7 +55,8 @@ public sealed class EfCoreCareRepository : ICareRepository
 
         _context.ServiceUsers.Add(serviceUser);
         SaveContact("ServiceUser", serviceUser.Id, serviceUser.BranchId!.Value, request.Contact);
-        AddAudit("service_user.onboarded", "system", nameof(ServiceUser), serviceUser.Id);
+        AddProfileRevision(serviceUser, null);
+        AddAudit("service_user.onboarded", "system", nameof(ServiceUser), serviceUser.Id, save: false, branchId: serviceUser.BranchId);
         _context.SaveChanges();
         return serviceUser;
     }
@@ -68,6 +69,7 @@ public sealed class EfCoreCareRepository : ICareRepository
             return null;
         }
 
+        var beforeJson = ProfileSnapshot(serviceUser);
         var updated = serviceUser with
         {
             FullName = request.FullName,
@@ -90,7 +92,8 @@ public sealed class EfCoreCareRepository : ICareRepository
         };
         _context.Entry(serviceUser).CurrentValues.SetValues(updated);
         SaveContact("ServiceUser", id, serviceUser.BranchId!.Value, request.Contact);
-        AddAudit("service_user.updated", "system", nameof(ServiceUser), id);
+        AddProfileRevision(updated, beforeJson);
+        AddAudit("service_user.updated", "system", nameof(ServiceUser), id, save: false, branchId: serviceUser.BranchId);
         _context.SaveChanges();
         return updated;
     }
@@ -143,8 +146,21 @@ public sealed class EfCoreCareRepository : ICareRepository
             request.PreferredContactMethod?.Trim() ?? "");
         if (current is null) _context.ProfileContactDetails.Add(next);
         else _context.Entry(current).CurrentValues.SetValues(next);
-        AddAudit("profile_contact.updated", "system", nameof(ProfileContactDetails), next.Id);
+        AddAudit("profile_contact.updated", "system", nameof(ProfileContactDetails), next.Id, save: false, branchId: branchId);
     }
+
+    private string ProfileSnapshot(ServiceUser person)
+    {
+        var contact = _context.ProfileContactDetails.Local.FirstOrDefault(item => item.OrganizationId == person.OrganizationId
+            && item.SubjectType == "ServiceUser" && item.SubjectId == person.Id)
+            ?? _context.ProfileContactDetails.AsNoTracking().SingleOrDefault(item => item.OrganizationId == person.OrganizationId
+                && item.SubjectType == "ServiceUser" && item.SubjectId == person.Id);
+        return System.Text.Json.JsonSerializer.Serialize(new { Profile = person, Contact = contact });
+    }
+
+    private void AddProfileRevision(ServiceUser person, string? beforeJson) =>
+        _context.ServiceUserProfileRevisions.Add(new ServiceUserProfileRevision(Guid.NewGuid(), person.Id,
+            _currentUser.UserName, DateTimeOffset.UtcNow, beforeJson, ProfileSnapshot(person), _tenant.OrganizationId, person.BranchId));
 
     public IReadOnlyCollection<Visit> GetVisits() => Visible(_context.Visits).ToList();
 
@@ -638,11 +654,11 @@ public sealed class EfCoreCareRepository : ICareRepository
         return CreateSimplePdf(text);
     }
 
-    private void AddAudit(string action, string actor, string entityType, Guid? entityId)
+    private void AddAudit(string action, string actor, string entityType, Guid? entityId, bool save = true, Guid? branchId = null)
     {
         var resolvedActor = string.IsNullOrWhiteSpace(_currentUser.UserName) ? actor : _currentUser.UserName;
-        _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), action, resolvedActor, entityType, entityId, DateTimeOffset.UtcNow, _tenant.OrganizationId, _tenant.BranchId ?? TenantDefaults.BranchId));
-        _context.SaveChanges();
+        _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), action, resolvedActor, entityType, entityId, DateTimeOffset.UtcNow, _tenant.OrganizationId, branchId ?? _tenant.BranchId ?? TenantDefaults.BranchId));
+        if (save) _context.SaveChanges();
     }
 
     private IQueryable<T> Visible<T>(DbSet<T> set)

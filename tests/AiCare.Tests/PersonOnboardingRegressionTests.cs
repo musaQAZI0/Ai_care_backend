@@ -149,6 +149,87 @@ public sealed class PersonOnboardingRegressionTests(PostgresRegressionFactory fa
         Assert.Equal(2, export.GetProperty("personRecordRevisions").GetArrayLength());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProfileAndContactHistoryRetainsPriorValuesAndPersonBranch(bool administratorAcrossBranches)
+    {
+        var (client, actor) = await ManagerClient(administratorAcrossBranches ? UserRole.Administrator : UserRole.CareManager);
+        using var ownedClient = client;
+        var request = Request();
+        var create = await client.PostAsJsonAsync("/api/phase1/service-users", request);
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+        var person = (await create.Content.ReadFromJsonAsync<ServiceUser>())!;
+        var branch = TenantDefaults.BranchId;
+        if (administratorAcrossBranches)
+        {
+            branch = Guid.NewGuid();
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.Branches.Add(new Branch(branch, TenantDefaults.OrganizationId, "Profile history branch", "North", "Active"));
+            var tracked = await db.ServiceUsers.SingleAsync(item => item.Id == person.Id);
+            db.Entry(tracked).CurrentValues.SetValues(tracked with { BranchId = branch });
+            await db.SaveChangesAsync();
+        }
+        var edit = request with { FullName = request.FullName + " updated", Address = "New fictional address",
+            CareNeeds = "Updated support", Contact = request.Contact! with { Postcode = " cd3 4ef ", EmergencyContactName = "New fictional contact" } };
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync($"/api/phase1/service-users/{person.Id}", edit)).StatusCode);
+        // Omitted contact means preserve the existing contact, including in the snapshot.
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync($"/api/phase1/service-users/{person.Id}", edit with { Contact = null })).StatusCode);
+        var revisions = (await client.GetFromJsonAsync<List<ServiceUserProfileRevision>>($"/api/phase1/service-users/{person.Id}/profile/history"))!;
+        Assert.Equal(3, revisions.Count);
+        var initial = Assert.Single(revisions, item => item.BeforeJson is null);
+        using var initialJson = JsonDocument.Parse(initial.AfterJson);
+        Assert.Equal(request.FullName, initialJson.RootElement.GetProperty("Profile").GetProperty("FullName").GetString());
+        var edits = revisions.Where(item => item.BeforeJson is not null).ToList();
+        Assert.All(edits, revision =>
+        {
+            Assert.Equal(branch, revision.BranchId); Assert.Equal(actor, revision.Actor);
+            using var after = JsonDocument.Parse(revision.AfterJson);
+            Assert.Equal(edit.FullName, after.RootElement.GetProperty("Profile").GetProperty("FullName").GetString());
+            Assert.Equal("CD3 4EF", after.RootElement.GetProperty("Contact").GetProperty("Postcode").GetString());
+            Assert.Equal("New fictional contact", after.RootElement.GetProperty("Contact").GetProperty("EmergencyContactName").GetString());
+        });
+        Assert.Contains(edits, revision => JsonDocument.Parse(revision.BeforeJson!).RootElement.GetProperty("Profile").GetProperty("FullName").GetString() == request.FullName);
+        using var verify = factory.Services.CreateScope();
+        var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
+        Assert.Equal(3, await verifyDb.ServiceUserProfileRevisions.CountAsync(item => item.ServiceUserId == person.Id));
+        Assert.True(await verifyDb.AuditEvents.AnyAsync(item => item.Action == "service_user.updated" && item.EntityId == person.Id && item.BranchId == branch && item.Actor == actor));
+        var export = await client.GetFromJsonAsync<JsonElement>($"/api/phase1/data-governance/service-users/{person.Id}/export");
+        Assert.Equal(3, export.GetProperty("profileRevisions").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task ProfileAndContactWriteRollBackIfRevisionPersistenceFails()
+    {
+        var (client, _) = await ManagerClient();
+        using var ownedClient = client;
+        var request = Request();
+        var create = await client.PostAsJsonAsync("/api/phase1/service-users", request);
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+        var person = (await create.Content.ReadFromJsonAsync<ServiceUser>())!;
+        using var setup = factory.Services.CreateScope();
+        var db = setup.ServiceProvider.GetRequiredService<CareDbContext>();
+        // A deterministic database failure after the normal validation boundary.
+        await db.Database.ExecuteSqlRawAsync($"""ALTER TABLE "ServiceUserProfileRevisions" ADD CONSTRAINT "ck_regression_reject_profile_update" CHECK ("ServiceUserId" <> '{person.Id:D}'::uuid OR "BeforeJson" IS NULL)""");
+        try
+        {
+            var failed = await client.PutAsJsonAsync($"/api/phase1/service-users/{person.Id}", request with
+            { FullName = "Must not persist", Contact = request.Contact! with { EmergencyContactName = "Must not persist" } });
+            Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("""ALTER TABLE "ServiceUserProfileRevisions" DROP CONSTRAINT "ck_regression_reject_profile_update"""");
+        }
+        using var verify = factory.Services.CreateScope();
+        var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
+        Assert.Equal(person, await verifyDb.ServiceUsers.AsNoTracking().SingleAsync(item => item.Id == person.Id));
+        Assert.Equal(request.Contact!.EmergencyContactName, (await verifyDb.ProfileContactDetails.SingleAsync(item => item.SubjectId == person.Id)).EmergencyContactName);
+        Assert.Equal(1, await verifyDb.ServiceUserProfileRevisions.CountAsync(item => item.ServiceUserId == person.Id));
+        Assert.False(await verifyDb.AuditEvents.AnyAsync(item => item.Action == "service_user.updated" && item.EntityId == person.Id));
+    }
+
     private static CreateServiceUserRequest Request() => new(
         $"Fictional onboarding person {Guid.NewGuid():N}", new DateOnly(1945, 6, 7), "+441234567890",
         "Support washing and meals", "Fictional daughter", "Fictional preferred worker", "1 Fictional Street",

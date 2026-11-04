@@ -57,6 +57,10 @@ public sealed record PersonRecordRevision(
     Guid OrganizationId,
     Guid? BranchId);
 
+public sealed record ServiceUserProfileRevision(
+    Guid Id, Guid ServiceUserId, string Actor, DateTimeOffset RecordedAt,
+    string? BeforeJson, string AfterJson, Guid OrganizationId, Guid? BranchId);
+
 public sealed record CareAssessment(
     Guid Id,
     Guid ServiceUserId,

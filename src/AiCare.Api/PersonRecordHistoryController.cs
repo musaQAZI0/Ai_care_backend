@@ -11,6 +11,21 @@ namespace AiCare.Api;
 [Route("api/phase1/service-users/{serviceUserId:guid}/person-record/history")]
 public sealed class PersonRecordHistoryController(CareDbContext db, ITenantContext tenant, ICurrentUserContext user) : ControllerBase
 {
+    [HttpGet("~/api/phase1/service-users/{serviceUserId:guid}/profile/history")]
+    public async Task<IActionResult> GetProfile(Guid serviceUserId, CancellationToken token)
+    {
+        var person = await db.ServiceUsers.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == serviceUserId && item.OrganizationId == tenant.OrganizationId, token);
+        if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return NotFound();
+        var revisions = await db.ServiceUserProfileRevisions.AsNoTracking()
+            .Where(item => item.OrganizationId == tenant.OrganizationId && item.ServiceUserId == serviceUserId)
+            .OrderByDescending(item => item.RecordedAt).ThenBy(item => item.Id).ToListAsync(token);
+        db.AuditEvents.Add(new(Guid.NewGuid(), "service_user.history_viewed", user.UserName,
+            "ServiceUser", serviceUserId, DateTimeOffset.UtcNow, person.OrganizationId, person.BranchId));
+        await db.SaveChangesAsync(token);
+        return Ok(revisions);
+    }
+
     [HttpGet]
     public async Task<IActionResult> Get(Guid serviceUserId, CancellationToken token)
     {

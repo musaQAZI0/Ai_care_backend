@@ -99,24 +99,32 @@ public sealed class PersonExportRegressionTests(PostgresRegressionFactory factor
         {
             var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
             foreach (var person in new[] { data.Local, data.OtherBranch, data.Foreign })
+            {
                 db.PersonRecordRevisions.Add(new PersonRecordRevision(Guid.NewGuid(), person.Id, Guid.NewGuid(), "History author",
                     DateTimeOffset.UtcNow, null, "{\"PreferredName\":\"Sensitive fictional history\"}", person.OrganizationId!.Value, person.BranchId));
+                db.ServiceUserProfileRevisions.Add(new ServiceUserProfileRevision(Guid.NewGuid(), person.Id, "History author",
+                    DateTimeOffset.UtcNow, null, "{\"Profile\":{\"FullName\":\"Sensitive fictional history\"}}", person.OrganizationId.Value, person.BranchId));
+            }
             await db.SaveChangesAsync();
         }
         using var client = await Login(data.Actor);
-        var local = await client.GetAsync(HistoryPath(data.Local.Id));
-        Assert.Equal(expected, local.StatusCode);
-        var localBody = await local.Content.ReadAsStringAsync();
-        if (expected == HttpStatusCode.OK) Assert.Contains("Sensitive fictional history", localBody);
-        else Assert.DoesNotContain("Sensitive fictional history", localBody);
+        foreach (var profile in new[] { false, true })
+        {
+            string ScopedHistory(Guid id) => profile ? $"/api/phase1/service-users/{id}/profile/history" : HistoryPath(id);
+            var local = await client.GetAsync(ScopedHistory(data.Local.Id));
+            Assert.Equal(expected, local.StatusCode);
+            var localBody = await local.Content.ReadAsStringAsync();
+            if (expected == HttpStatusCode.OK) Assert.Contains("Sensitive fictional history", localBody);
+            else Assert.DoesNotContain("Sensitive fictional history", localBody);
 
-        var foreign = await client.GetAsync(HistoryPath(data.Foreign.Id));
-        Assert.Equal(expected == HttpStatusCode.OK ? HttpStatusCode.NotFound : HttpStatusCode.Forbidden, foreign.StatusCode);
-        Assert.DoesNotContain("Sensitive fictional history", await foreign.Content.ReadAsStringAsync());
-        var other = await client.GetAsync(HistoryPath(data.OtherBranch.Id));
-        Assert.Equal(role == UserRole.Administrator ? HttpStatusCode.OK
-            : expected == HttpStatusCode.OK ? HttpStatusCode.NotFound : HttpStatusCode.Forbidden, other.StatusCode);
-        if (role != UserRole.Administrator) Assert.DoesNotContain("Sensitive fictional history", await other.Content.ReadAsStringAsync());
+            var foreign = await client.GetAsync(ScopedHistory(data.Foreign.Id));
+            Assert.Equal(expected == HttpStatusCode.OK ? HttpStatusCode.NotFound : HttpStatusCode.Forbidden, foreign.StatusCode);
+            Assert.DoesNotContain("Sensitive fictional history", await foreign.Content.ReadAsStringAsync());
+            var other = await client.GetAsync(ScopedHistory(data.OtherBranch.Id));
+            Assert.Equal(role == UserRole.Administrator ? HttpStatusCode.OK
+                : expected == HttpStatusCode.OK ? HttpStatusCode.NotFound : HttpStatusCode.Forbidden, other.StatusCode);
+            if (role != UserRole.Administrator) Assert.DoesNotContain("Sensitive fictional history", await other.Content.ReadAsStringAsync());
+        }
 
         if (role is not (UserRole.Administrator or UserRole.CareManager))
         {
@@ -128,6 +136,7 @@ public sealed class PersonExportRegressionTests(PostgresRegressionFactory factor
         using var verify = factory.Services.CreateScope();
         var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
         Assert.False(await verifyDb.AuditEvents.AnyAsync(item => item.Action == "person_record.history_viewed" && item.EntityId == data.Foreign.Id));
+        Assert.False(await verifyDb.AuditEvents.AnyAsync(item => item.Action == "service_user.history_viewed" && item.EntityId == data.Foreign.Id));
         if (expected != HttpStatusCode.OK)
             Assert.False(await verifyDb.AuditEvents.AnyAsync(item => item.Action == "person_record.history_viewed" && item.EntityId == data.Local.Id));
     }
@@ -142,9 +151,13 @@ public sealed class PersonExportRegressionTests(PostgresRegressionFactory factor
             var local = await db.ServiceUsers.SingleAsync(item => item.Id == data.Local.Id);
             db.Entry(local).CurrentValues.SetValues(local with { Status = "Discharged" });
             foreach (var person in new[] { data.Local, data.Foreign })
+            {
                 db.PersonRecordRevisions.Add(new PersonRecordRevision(Guid.NewGuid(), person.Id, Guid.NewGuid(), data.Actor,
                     DateTimeOffset.UtcNow, "{\"PreferredName\":\"Old sensitive name\"}", "{\"PreferredName\":\"New sensitive name\"}",
                     person.OrganizationId!.Value, person.BranchId));
+                db.ServiceUserProfileRevisions.Add(new ServiceUserProfileRevision(Guid.NewGuid(), person.Id, data.Actor,
+                    DateTimeOffset.UtcNow, null, "{\"Profile\":{\"FullName\":\"New sensitive name\"}}", person.OrganizationId.Value, person.BranchId));
+            }
             await db.SaveChangesAsync();
         }
         using var client = await Login(data.Actor);
@@ -163,6 +176,11 @@ public sealed class PersonExportRegressionTests(PostgresRegressionFactory factor
         Assert.Contains("New sensitive name", foreign.AfterJson);
         var history = await client.GetStringAsync(HistoryPath(data.Local.Id));
         Assert.DoesNotContain("sensitive name", history);
+        var profile = await verifyDb.ServiceUserProfileRevisions.SingleAsync(item => item.ServiceUserId == data.Local.Id);
+        Assert.Null(profile.BeforeJson);
+        using var profileJson = JsonDocument.Parse(profile.AfterJson);
+        Assert.Empty(profileJson.RootElement.EnumerateObject());
+        Assert.Contains("sensitive name", (await verifyDb.ServiceUserProfileRevisions.SingleAsync(item => item.ServiceUserId == data.Foreign.Id)).AfterJson);
     }
 
     [Theory]
