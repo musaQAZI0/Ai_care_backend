@@ -483,9 +483,9 @@ phase1.MapPut("/service-users/{id:guid}/person-record", async (Guid id, UpsertPe
     var person = context.ServiceUsers.FirstOrDefault(item => item.Id == id && item.OrganizationId == tenant.OrganizationId);
     if (person is null || !tenant.CanAccess(person.OrganizationId, person.BranchId)) return Results.NotFound();
     var existing = context.PersonRecords.FirstOrDefault(item => item.ServiceUserId == id && item.OrganizationId == tenant.OrganizationId);
-    var updated = new PersonRecord(existing?.Id ?? Guid.NewGuid(), id, request.PreferredName, request.Pronouns, request.HealthIdentifier, request.GpDetails, request.PharmacyDetails, request.LegalRepresentative, request.ConsentStatus, request.MentalCapacityStatus, request.CommunicationPassport, request.PersonalHistory, request.WhatMattersToMe, request.DesiredOutcomes, request.AdvanceCareWishes, request.AdmittedAt, request.DischargedAt, DateTimeOffset.UtcNow, tenant.OrganizationId, tenant.BranchId ?? TenantDefaults.BranchId);
+    var updated = new PersonRecord(existing?.Id ?? Guid.NewGuid(), id, request.PreferredName, request.Pronouns, request.HealthIdentifier, request.GpDetails, request.PharmacyDetails, request.LegalRepresentative, request.ConsentStatus, request.MentalCapacityStatus, request.CommunicationPassport, request.PersonalHistory, request.WhatMattersToMe, request.DesiredOutcomes, request.AdvanceCareWishes, request.AdmittedAt, request.DischargedAt, DateTimeOffset.UtcNow, person.OrganizationId, person.BranchId);
     if (existing is null) context.PersonRecords.Add(updated); else context.Entry(existing).CurrentValues.SetValues(updated);
-    AddAudit(context, tenant, currentUser, existing is null ? "person_record.created" : "person_record.updated", nameof(PersonRecord), updated.Id);
+    AddAudit(context, tenant, currentUser, existing is null ? "person_record.created" : "person_record.updated", nameof(PersonRecord), updated.Id, person.OrganizationId, person.BranchId);
     context.SaveChanges();
     return Results.Ok(updated);
 });
