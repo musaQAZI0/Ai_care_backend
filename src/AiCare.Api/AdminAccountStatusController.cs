@@ -142,19 +142,25 @@ public sealed class AdminAccountStatusController(CareDbContext db, ITenantContex
             return Conflict(new { message = request.Active ? "Account is already active." : "Account is already suspended." });
         if (request.Active && await HasUnacceptedInvitation(id, token))
             return Conflict(new { message = "An invitation must be accepted before this account can be activated." });
-        if (!request.Active && account.Role == UserRole.Administrator && !await AnotherActiveAdministrator(id, token))
-            return Conflict(new { message = "The organization must retain an active administrator." });
-
         var strategy = db.Database.CreateExecutionStrategy();
-        await strategy.ExecuteAsync(async () =>
+        var changed = await strategy.ExecuteAsync(async () =>
         {
             await using var transaction = await db.Database.BeginTransactionAsync(token);
+            if (!request.Active && account.Role == UserRole.Administrator)
+            {
+                if (db.Database.IsNpgsql())
+                    await db.Database.ExecuteSqlInterpolatedAsync($"select pg_advisory_xact_lock(hashtext({tenant.OrganizationId.ToString()}))", token);
+                if (!await db.AppUsers.AnyAsync(user => user.OrganizationId == tenant.OrganizationId && user.Id != id && user.IsActive && user.Role == UserRole.Administrator, token))
+                    return false;
+            }
             db.Entry(account).CurrentValues.SetValues(account with { IsActive = request.Active });
             if (!request.Active) await RevokeSessions(id, request.Reason.Trim(), token);
             db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), request.Active ? "admin.account_unblocked" : "admin.account_suspended", currentUser.UserName, nameof(AppUser), id, DateTimeOffset.UtcNow, tenant.OrganizationId, account.BranchId ?? TenantDefaults.BranchId));
             await db.SaveChangesAsync(token);
             await transaction.CommitAsync(token);
+            return true;
         });
+        if (!changed) return Conflict(new { message = "The organization must retain an active administrator." });
         return Ok(new { account.Id, status = request.Active ? "Active" : "Suspended" });
     }
 
@@ -189,9 +195,6 @@ public sealed class AdminAccountStatusController(CareDbContext db, ITenantContex
     }
 
     private IQueryable<AppUser> VisibleAccounts() => db.AppUsers.Where(user => user.OrganizationId == tenant.OrganizationId && user.Role != UserRole.BackOffice && (tenant.IsOrganizationWide || tenant.BranchId == null || user.BranchId == tenant.BranchId));
-
-    private Task<bool> AnotherActiveAdministrator(Guid id, CancellationToken token) =>
-        VisibleAccounts().AnyAsync(user => user.Id != id && user.IsActive && user.Role == UserRole.Administrator, token);
 
     private async Task<bool> HasUnacceptedInvitation(Guid id, CancellationToken token)
     {
