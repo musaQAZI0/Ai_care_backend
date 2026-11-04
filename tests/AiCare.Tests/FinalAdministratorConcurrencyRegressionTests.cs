@@ -34,6 +34,8 @@ public sealed class FinalAdministratorConcurrencyRegressionTests(PostgresRegress
 
         using var first = await Login(firstName);
         using var second = await Login(secondName);
+        await StepUpTestGrants.GrantAsync(factory, first, "admin");
+        await StepUpTestGrants.GrantAsync(factory, second, "admin");
         var responses = await Task.WhenAll(
             first.PatchAsJsonAsync($"/api/phase1/admin/accounts/{secondId}/status", new { active = false, reason = "Concurrent administrator suspension one" }),
             second.PatchAsJsonAsync($"/api/phase1/admin/accounts/{firstId}/status", new { active = false, reason = "Concurrent administrator suspension two" }));
