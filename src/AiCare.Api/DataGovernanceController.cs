@@ -62,6 +62,7 @@ public sealed class DataGovernanceController(
     }
 
     [HttpGet("service-users/{serviceUserId:guid}/export")]
+    [ResponseCache(Location = ResponseCacheLocation.None, NoStore = true)]
     public async Task<IActionResult> ExportSubjectData(Guid serviceUserId, CancellationToken ct)
     {
         if (!IsGovernanceStaff()) return Forbid();

@@ -22,6 +22,7 @@ public sealed class PersonExportRegressionTests(PostgresRegressionFactory factor
         using var client = await Login(data.Actor);
         var response = await client.GetAsync(ExportPath(data.Local.Id));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore == true);
         var payload = (await response.Content.ReadFromJsonAsync<JsonElement>());
         Assert.Equal(data.Local.Id, payload.GetProperty("serviceUser").GetProperty("id").GetGuid());
         Assert.Equal(data.Local.FullName, payload.GetProperty("serviceUser").GetProperty("fullName").GetString());
@@ -162,6 +163,29 @@ public sealed class PersonExportRegressionTests(PostgresRegressionFactory factor
         Assert.Contains("New sensitive name", foreign.AfterJson);
         var history = await client.GetStringAsync(HistoryPath(data.Local.Id));
         Assert.DoesNotContain("sensitive name", history);
+    }
+
+    [Theory]
+    [InlineData(UserRole.Administrator)]
+    [InlineData(UserRole.CareManager)]
+    public async Task ActiveProcessingRestrictionBlocksDirectExportWithoutSuccessfulDisclosureEvidence(UserRole role)
+    {
+        var data = await Seed(role);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"insert into processing_restrictions(id,organization_id,branch_id,service_user_id,scope,reason,status,applied_by) values({Guid.NewGuid()},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{data.Local.Id},{"Exports"},{"Synthetic disputed record"},{"Active"},{data.Actor})");
+        }
+        using var client = await Login(data.Actor);
+        var response = await client.GetAsync(ExportPath(data.Local.Id));
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("processing restriction", body);
+        Assert.DoesNotContain(data.Local.FullName, body);
+        await AssertNoExport(data.Local.Id);
+        // A restriction is person-scoped, not a blanket ban on the manager's branch.
+        var unrelated = await client.GetAsync(ExportPath(RegressionIds.ServiceUserId));
+        Assert.Equal(HttpStatusCode.OK, unrelated.StatusCode);
     }
 
     private static string HistoryPath(Guid id) => $"/api/phase1/service-users/{id}/person-record/history";
