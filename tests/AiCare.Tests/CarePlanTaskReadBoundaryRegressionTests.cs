@@ -33,18 +33,28 @@ public sealed class CarePlanTaskReadBoundaryRegressionTests(PostgresRegressionFa
                 "Independent", "Independent", "Verbal", "Routine", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             db.AppUsers.Add(new(Guid.NewGuid(), actor, $"{actor}@example.test", PasswordHasher.HashPassword("Admin123!"),
                 role, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
-            foreach (var status in new[] { "Draft", "Active", "Superseded", "Withdrawn" })
+            await db.SaveChangesAsync();
+            foreach (var status in new[] { "Draft", "Approved", "Active", "Superseded" })
             {
                 var id = Guid.NewGuid(); plans.Add(status, id);
-                db.CarePlans.Add(new(id, person, status, status, "Support", "Prompts", "Support", "Meals",
+                db.CarePlans.Add(new(id, person, "v1", "Draft", "Support", "Prompts", "Support", "Meals",
                     DateTimeOffset.UtcNow.AddMonths(1), TenantDefaults.OrganizationId, TenantDefaults.BranchId));
-            }
-            await db.SaveChangesAsync();
-            foreach (var plan in plans)
+                // Lifecycle registration is deferred until commit. Save each draft
+                // before inserting the next so its version number is visible.
+                await db.SaveChangesAsync();
                 await db.Database.ExecuteSqlInterpolatedAsync($"""
                     insert into care_plan_tasks(id,care_plan_id,service_user_id,organization_id,branch_id,title,instructions)
-                    values({Guid.NewGuid()},{plan.Value},{person},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{plan.Key + " private task"},{"Private plan instructions"})
+                    values({Guid.NewGuid()},{id},{person},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{status + " private task"},{"Private plan instructions"})
                     """);
+                // Seed read-boundary states only after draft-only child creation.
+                // Lifecycle transition behavior is tested by the existing lifecycle suites.
+                if (status != "Draft")
+                {
+                    await db.Database.ExecuteSqlInterpolatedAsync($"update care_plan_versions set status={status} where care_plan_id={id}");
+                    await db.Database.ExecuteSqlInterpolatedAsync($"""update "CarePlans" set "Status"={status} where "Id"={id}""");
+                }
+                Assert.Equal(status, (await db.CarePlans.AsNoTracking().SingleAsync(item => item.Id == id)).Status);
+            }
         }
         using var client = factory.CreateClient();
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName = actor, password = "Admin123!", mfaCode = (string?)null });
