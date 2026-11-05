@@ -211,7 +211,10 @@ public sealed class PersonOnboardingRegressionTests(PostgresRegressionFactory fa
         using var setup = factory.Services.CreateScope();
         var db = setup.ServiceProvider.GetRequiredService<CareDbContext>();
         // A deterministic database failure after the normal validation boundary.
-        await db.Database.ExecuteSqlRawAsync($"""ALTER TABLE "ServiceUserProfileRevisions" ADD CONSTRAINT "ck_regression_reject_profile_update" CHECK ("ServiceUserId" <> '{person.Id:D}'::uuid OR "BeforeJson" IS NULL)""");
+        await db.Database.ExecuteSqlRawAsync($"""
+            ALTER TABLE "ServiceUserProfileRevisions" ADD CONSTRAINT "ck_regression_reject_profile_update"
+            CHECK ("ServiceUserId" <> '{person.Id:D}'::uuid OR "BeforeJson" IS NULL)
+            """);
         try
         {
             var failed = await client.PutAsJsonAsync($"/api/phase1/service-users/{person.Id}", request with
@@ -220,7 +223,9 @@ public sealed class PersonOnboardingRegressionTests(PostgresRegressionFactory fa
         }
         finally
         {
-            await db.Database.ExecuteSqlRawAsync("""ALTER TABLE "ServiceUserProfileRevisions" DROP CONSTRAINT "ck_regression_reject_profile_update"""");
+            await db.Database.ExecuteSqlRawAsync("""
+                ALTER TABLE "ServiceUserProfileRevisions" DROP CONSTRAINT "ck_regression_reject_profile_update"
+                """);
         }
         using var verify = factory.Services.CreateScope();
         var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
