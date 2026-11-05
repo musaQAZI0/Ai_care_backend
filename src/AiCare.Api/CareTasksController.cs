@@ -113,24 +113,24 @@ public sealed class CareTasksController : ControllerBase
         }, cancellationToken);
         if (existing > 0) return;
 
-        var plan = await _context.CarePlans
-            .Where(item => item.ServiceUserId == visit.ServiceUserId && item.Status == "Active")
-            .OrderByDescending(item => item.ReviewDueAt)
-            .FirstOrDefaultAsync(cancellationToken);
-        if (plan is null) return;
-
         await Execute("""
             insert into visit_tasks
               (id,visit_id,care_plan_task_id,service_user_id,care_worker_id,organization_id,branch_id,title,category,instructions,is_required,status,outcome,exception_reason,completed_at,created_at)
             select gen_random_uuid(), @visit, task.id, @person, @worker, @organization, @branch,
                    task.title, task.category, task.instructions, task.is_required, 'Pending', '', '', null, now()
             from care_plan_tasks task
-            where task.care_plan_id=@plan and task.organization_id=@organization and task.status='Active'
+            join "CarePlans" plan on plan."Id"=task.care_plan_id
+            join care_plan_versions version on version.care_plan_id=plan."Id"
+            where plan."ServiceUserId"=@person and plan."OrganizationId"=@organization and plan."BranchId"=@branch
+              and plan."Status"='Active' and version.status='Active'
+              and version.service_user_id=@person and version.organization_id=@organization and version.branch_id=@branch
+              and task.service_user_id=@person and task.organization_id=@organization and task.branch_id=@branch
+              and task.status='Active'
             on conflict (visit_id, care_plan_task_id) where care_plan_task_id is not null do nothing
             """, command =>
         {
             Add(command,"visit",visit.Id); Add(command,"person",visit.ServiceUserId); Add(command,"worker",visit.CareWorkerId);
-            Add(command,"organization",visit.OrganizationId ?? _tenant.OrganizationId); Add(command,"branch",visit.BranchId ?? _tenant.BranchId ?? TenantDefaults.BranchId); Add(command,"plan",plan.Id);
+            Add(command,"organization",visit.OrganizationId ?? _tenant.OrganizationId); Add(command,"branch",visit.BranchId ?? _tenant.BranchId ?? TenantDefaults.BranchId);
         }, cancellationToken);
     }
 
