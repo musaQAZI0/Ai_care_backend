@@ -167,6 +167,67 @@ public sealed class VisitTaskPlanScopeRegressionTests(PostgresRegressionFactory 
         await Assert.ThrowsAnyAsync<Exception>(() => verifyDb.Database.ExecuteSqlInterpolatedAsync($"update visit_task_reconciliations set reason='Rewritten historical review' where visit_id={visit}"));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OutcomeIsRecordedOnceAndRollsBackWithEscalationIfAuditFails(bool rejectAudit)
+    {
+        await factory.EnsureClinicalSeedAsync();
+        var person = Guid.NewGuid(); var worker = Guid.NewGuid(); var visit = Guid.NewGuid();
+        var actor = $"atomic.task.{Guid.NewGuid():N}";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.ServiceUsers.Add(new(person, "Fictional atomic task person", new DateOnly(1945, 1, 1), "123", "Support", "Contact", "", RiskLevel.Low,
+                "Active", "Address", "None", "None", "Private", "", "", "Independent", "Independent", "Verbal", "Routine", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.CareWorkers.Add(new(worker, "Atomic task worker", "Care", "Flexible", 0, 0, "Valid", "Compliant", "Local", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.Visits.Add(new(visit, person, worker, DateTimeOffset.UtcNow.AddHours(-1), "Care", 30, "Care", VisitStatus.Scheduled,
+                null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.AppUsers.Add(new(Guid.NewGuid(), actor, $"{actor}@example.test", PasswordHasher.HashPassword("Admin123!"), UserRole.CareWorker,
+                true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, worker));
+            await db.SaveChangesAsync();
+            var plan = await Plan(db, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, 1);
+            await TaskRow(db, plan, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, "Atomic task");
+            await SetState(db, plan, "Active");
+        }
+        using var client = await ReviewClient(actor);
+        var tasks = await client.GetFromJsonAsync<JsonElement>($"/api/phase1/visits/{visit}/tasks");
+        var task = Assert.Single(tasks.EnumerateArray()).GetProperty("id").GetGuid();
+        var path = $"/api/phase1/visits/{visit}/tasks/{task}/outcome";
+        using var verify = factory.Services.CreateScope();
+        var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
+        if (rejectAudit)
+        {
+            await verifyDb.Database.ExecuteSqlRawAsync($"""
+                ALTER TABLE "AuditEvents" ADD CONSTRAINT "ck_regression_outcome_audit"
+                CHECK ("EntityId" IS DISTINCT FROM '{task:D}'::uuid OR "Action"<>'visit_task.outcome_recorded')
+                """);
+            try
+            {
+                var failed = await client.PostAsJsonAsync(path, new { outcome = "Refused", exceptionReason = "Synthetic refusal requiring manager escalation" });
+                Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+            }
+            finally
+            {
+                await verifyDb.Database.ExecuteSqlRawAsync("""
+                    ALTER TABLE "AuditEvents" DROP CONSTRAINT "ck_regression_outcome_audit"
+                    """);
+            }
+            var remaining = await verifyDb.Database.SqlQuery<string>($"""select status as "Value" from visit_tasks where id={task}""").SingleAsync();
+            Assert.Equal("Pending", remaining);
+            Assert.Equal(0, await verifyDb.Database.SqlQuery<int>($"""select count(*)::integer as "Value" from visit_exceptions where visit_id={visit}""").SingleAsync());
+            Assert.False(await verifyDb.AuditEvents.AnyAsync(item => item.EntityId == task && item.Action == "visit_task.outcome_recorded"));
+        }
+        else
+        {
+            var responses = await Task.WhenAll(client.PostAsJsonAsync(path, new { outcome = "Completed", exceptionReason = "" }),
+                client.PostAsJsonAsync(path, new { outcome = "Completed", exceptionReason = "" }));
+            Assert.Single(responses, response => response.StatusCode == HttpStatusCode.OK);
+            Assert.Single(responses, response => response.StatusCode == HttpStatusCode.Conflict);
+            Assert.Equal(1, await verifyDb.AuditEvents.CountAsync(item => item.EntityId == task && item.Action == "visit_task.outcome_recorded"));
+        }
+    }
+
     private async Task<HttpClient> ReviewClient(string name)
     {
         var client = factory.CreateClient();

@@ -113,16 +113,34 @@ public sealed class CareTasksController : ControllerBase
     }
 
     [HttpPost("api/phase1/visits/{visitId:guid}/tasks/{taskId:guid}/outcome")]
+    [TransactionalAction]
     public async Task<IActionResult> RecordOutcome(Guid visitId, Guid taskId, RecordVisitTaskOutcomeRequest request, CancellationToken cancellationToken)
     {
         var visit = await FindVisit(visitId, cancellationToken);
         if (visit is null) return NotFound();
         if (!CanCompleteVisit(visit)) return Forbid();
+        await Execute("""select "Id" from "Visits" where "Id"=@visit and "OrganizationId"=@org for update""",
+            c => { Add(c,"visit",visit.Id); Add(c,"org",visit.OrganizationId); }, cancellationToken);
+        visit = await FindVisit(visitId, cancellationToken);
+        if (visit is null || !CanCompleteVisit(visit)) return NotFound();
         var allowed = new[] { "Completed", "Partially completed", "Refused", "Not required", "Unable to complete" };
         if (!allowed.Contains(request.Outcome, StringComparer.OrdinalIgnoreCase)) return BadRequest(new { message = "Unsupported task outcome." });
         if (!request.Outcome.Equals("Completed", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(request.ExceptionReason))
             return BadRequest(new { message = "A reason is required when a task is not fully completed." });
 
+        // Activation/supersession also locks the lifecycle row. Hold shared locks
+        // through outcome/audit commit, then recheck Active state in the UPDATE.
+        await Query("""
+            select version.care_plan_id from visit_tasks task
+            join care_plan_tasks source on source.id=task.care_plan_task_id
+            join care_plan_versions version on version.care_plan_id=source.care_plan_id
+            join "CarePlans" plan on plan."Id"=version.care_plan_id
+            where task.id=@task and task.visit_id=@visit and task.organization_id=@org
+              and source.service_user_id=task.service_user_id and source.organization_id=task.organization_id and source.branch_id=task.branch_id
+              and version.service_user_id=task.service_user_id and version.organization_id=task.organization_id and version.branch_id=task.branch_id
+              and plan."ServiceUserId"=task.service_user_id and plan."OrganizationId"=task.organization_id and plan."BranchId"=task.branch_id
+            for share of version,plan
+            """, c => { Add(c,"task",taskId); Add(c,"visit",visit.Id); Add(c,"org",visit.OrganizationId); }, r => r.GetGuid(0), cancellationToken);
         var affected = await Execute("""
             update visit_tasks set status='Completed', outcome=@outcome, exception_reason=@reason, completed_at=now()
             where id=@task and visit_id=@visit and organization_id=@organization
