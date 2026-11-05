@@ -75,20 +75,28 @@ public sealed class VisitTaskPlanScopeRegressionTests(PostgresRegressionFactory 
         Assert.Equal(expected, stored);
     }
 
-    [Fact]
-    public async Task SupersessionBlocksPendingSnapshotsAndPreservesCompletedEvidence()
+    [Theory]
+    [InlineData(UserRole.CareManager)]
+    [InlineData(UserRole.Administrator)]
+    public async Task SupersessionBlocksPendingSnapshotsAndPreservesCompletedEvidence(UserRole reviewerRole)
     {
         await factory.EnsureClinicalSeedAsync();
         var person = Guid.NewGuid(); var worker = Guid.NewGuid(); var visit = Guid.NewGuid(); var freshVisit = Guid.NewGuid();
-        var actor = $"snapshot.worker.{Guid.NewGuid():N}"; Guid plan;
+        var actor = $"snapshot.worker.{Guid.NewGuid():N}"; Guid plan; Guid replacementPlan;
+        var reviewer = actor + ".reviewer"; var otherManager = actor + ".other"; var otherBranch = Guid.NewGuid();
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.Branches.Add(new(otherBranch, TenantDefaults.OrganizationId, "Other reconciliation branch", "North", "Active"));
             db.ServiceUsers.Add(new(person, "Fictional snapshot person", new DateOnly(1945, 1, 1), "123", "Support", "Contact", "", RiskLevel.Low,
                 "Active", "Address", "None", "None", "Private", "", "", "Independent", "Independent", "Verbal", "Routine", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             db.CareWorkers.Add(new(worker, "Snapshot worker", "Care", "Flexible", 0, 0, "Valid", "Compliant", "Local", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             db.AppUsers.Add(new(Guid.NewGuid(), actor, $"{actor}@example.test", PasswordHasher.HashPassword("Admin123!"), UserRole.CareWorker,
                 true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, worker));
+            db.AppUsers.Add(new(Guid.NewGuid(), reviewer, $"{reviewer}@example.test", PasswordHasher.HashPassword("Admin123!"), reviewerRole,
+                true, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.AppUsers.Add(new(Guid.NewGuid(), otherManager, $"{otherManager}@example.test", PasswordHasher.HashPassword("Admin123!"), UserRole.CareManager,
+                true, TenantDefaults.OrganizationId, otherBranch));
             foreach (var id in new[] { visit, freshVisit })
                 db.Visits.Add(new(id, person, worker, DateTimeOffset.UtcNow.AddHours(id == visit ? -1 : -2), "Care", 30, "Care", VisitStatus.Scheduled,
                     null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
@@ -110,9 +118,9 @@ public sealed class VisitTaskPlanScopeRegressionTests(PostgresRegressionFactory 
         {
             var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
             await SetState(db, plan, "Superseded");
-            var replacement = await Plan(db, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, 2);
-            await TaskRow(db, replacement, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, "REPLACEMENT INSTRUCTION");
-            await SetState(db, replacement, "Active");
+            replacementPlan = await Plan(db, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, 2);
+            await TaskRow(db, replacementPlan, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, "REPLACEMENT INSTRUCTION");
+            await SetState(db, replacementPlan, "Active");
         }
         var response = await client.GetAsync($"/api/phase1/visits/{visit}/tasks");
         var text = await response.Content.ReadAsStringAsync();
@@ -127,12 +135,45 @@ public sealed class VisitTaskPlanScopeRegressionTests(PostgresRegressionFactory 
         var fresh = await client.GetStringAsync($"/api/phase1/visits/{freshVisit}/tasks");
         Assert.Contains("REPLACEMENT INSTRUCTION", fresh);
         Assert.DoesNotContain("OLD INSTRUCTION", fresh);
+        var reviewPath = $"/api/phase1/visits/{visit}/tasks/reconcile";
+        var request = new { carePlanId = replacementPlan, reason = "Reviewed replacement plan against completed visit evidence" };
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(reviewPath, request)).StatusCode);
+        using var manager = await ReviewClient(reviewer);
+        using var other = await ReviewClient(otherManager);
+        Assert.Equal(HttpStatusCode.NotFound, (await other.PostAsJsonAsync(reviewPath, request)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await manager.PostAsJsonAsync(reviewPath, request with { reason = "short" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await manager.PostAsJsonAsync(reviewPath, request with { carePlanId = plan })).StatusCode);
+        var reconciled = await manager.PostAsJsonAsync(reviewPath, request);
+        Assert.Equal(HttpStatusCode.OK, reconciled.StatusCode);
+        var reviewedRows = (await reconciled.Content.ReadFromJsonAsync<JsonElement>()).EnumerateArray().ToArray();
+        Assert.Equal("Retired", reviewedRows.Single(item => item.GetProperty("id").GetGuid() == pending).GetProperty("status").GetString());
+        Assert.Equal("Completed", reviewedRows.Single(item => item.GetProperty("id").GetGuid() == completed).GetProperty("status").GetString());
+        Assert.Single(reviewedRows, item => item.GetProperty("status").GetString() == "Pending" && item.GetProperty("instructions").GetString() == "REPLACEMENT INSTRUCTION");
+        Assert.Equal(HttpStatusCode.Conflict, (await manager.PostAsJsonAsync(reviewPath, request)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/phase1/visits/{visit}/tasks/{pending}/outcome", new { outcome = "Completed", exceptionReason = "" })).StatusCode);
         using var verify = factory.Services.CreateScope();
         var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
         var stored = await verifyDb.Database.SqlQuery<string>($"""select instructions as "Value" from visit_tasks where id={pending}""").SingleAsync();
         Assert.Equal("PENDING OLD INSTRUCTION", stored);
         Assert.False(await verifyDb.AuditEvents.AnyAsync(item => item.EntityId == pending && item.Action == "visit_task.outcome_recorded"));
         Assert.Equal(1, await verifyDb.AuditEvents.CountAsync(item => item.EntityId == completed && item.Action == "visit_task.outcome_recorded"));
+        var closed = await verifyDb.Visits.SingleAsync(item => item.Id == visit);
+        verifyDb.Entry(closed).CurrentValues.SetValues(closed with { Status = VisitStatus.Completed });
+        await verifyDb.SaveChangesAsync();
+        Assert.Equal(HttpStatusCode.Conflict, (await manager.PostAsJsonAsync(reviewPath, request)).StatusCode);
+        Assert.Equal(1, await verifyDb.AuditEvents.CountAsync(item => item.EntityId == visit && item.Action == "visit_tasks.reconciled" && item.Actor == reviewer));
+        var reviewReason = await verifyDb.Database.SqlQuery<string>($"""select reason as "Value" from visit_task_reconciliations where visit_id={visit}""").SingleAsync();
+        Assert.Equal(request.reason, reviewReason);
+        await Assert.ThrowsAnyAsync<Exception>(() => verifyDb.Database.ExecuteSqlInterpolatedAsync($"update visit_task_reconciliations set reason='Rewritten historical review' where visit_id={visit}"));
+    }
+
+    private async Task<HttpClient> ReviewClient(string name)
+    {
+        var client = factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/auth/login", new { userName = name, password = "Admin123!", mfaCode = (string?)null });
+        response.EnsureSuccessStatusCode();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await response.Content.ReadFromJsonAsync<Login>())!.Token);
+        return client;
     }
 
     private static async Task<Guid> Plan(CareDbContext db, Guid person, Guid org, Guid branch, int reviewMonths)

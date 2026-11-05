@@ -6,6 +6,7 @@ using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AiCare.Api;
 
@@ -72,6 +73,45 @@ public sealed class CareTasksController : ControllerBase
         return Ok(await QueryVisitTasks(visit.Id, cancellationToken));
     }
 
+    [HttpPost("api/phase1/visits/{visitId:guid}/tasks/reconcile")]
+    [Authorize(Roles = "CareManager,Administrator")]
+    public async Task<IActionResult> Reconcile(Guid visitId, ReconcileVisitTasksRequest request, CancellationToken token)
+    {
+        if (request.CarePlanId == Guid.Empty || string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length is < 10 or > 2000)
+            return BadRequest(new { message = "Select the current Active plan and enter a review reason of 10–2000 characters." });
+        return await _context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await using var tx = await _context.Database.BeginTransactionAsync(token);
+            await Execute("""
+                select "Id" from "Visits" where "Id"=@visit and "OrganizationId"=@org and (@wide or "BranchId"=@branch) for update
+                """, c => { Add(c,"visit",visitId); Add(c,"org",_tenant.OrganizationId); Add(c,"wide",_tenant.IsOrganizationWide); Add(c,"branch",_tenant.BranchId); }, token);
+            var visit = await FindVisit(visitId, token);
+            if (visit is null) return (IActionResult)NotFound();
+            if (visit.Status is not (VisitStatus.Scheduled or VisitStatus.InProgress)) return (IActionResult)Conflict(new { message = "Only open visits can have their pending task plan reconciled." });
+            var selected = await Query("""
+                select v.care_plan_id from care_plan_versions v join "CarePlans" p on p."Id"=v.care_plan_id
+                where v.care_plan_id=@plan and v.service_user_id=@person and v.organization_id=@org and v.branch_id=@branch
+                  and v.status='Active' and p."Status"='Active' and p."ServiceUserId"=@person and p."OrganizationId"=@org and p."BranchId"=@branch
+                for share of v,p
+                """, c => { Add(c,"plan",request.CarePlanId); Add(c,"person",visit.ServiceUserId); Add(c,"org",visit.OrganizationId); Add(c,"branch",visit.BranchId); }, r => r.GetGuid(0), token);
+            if (selected.Count != 1) return (IActionResult)Conflict(new { message = "The selected plan is no longer the visit's current Active plan. Reload before reviewing." });
+            var blocked = (await QueryVisitTasks(visit.Id, token)).Where(item => item.Status == "RequiresReview").Select(item => item.Id).ToArray();
+            if (blocked.Length == 0) return (IActionResult)Conflict(new { message = "This visit has no pending tasks requiring plan review." });
+            var changed = await Execute("update visit_tasks set status='Retired' where visit_id=@visit and id=any(@ids) and status='Pending'", c => { Add(c,"visit",visit.Id); Add(c,"ids",blocked); }, token);
+            if (changed != blocked.Length) return (IActionResult)Conflict(new { message = "Tasks changed during review. Reload the visit." });
+            await MaterializeVisitTasks(visit, token, force: true);
+            await Execute("""
+                insert into visit_task_reconciliations(id,visit_id,care_plan_id,organization_id,branch_id,reason,retired_task_ids,performed_by,performed_at)
+                values(@id,@visit,@plan,@org,@branch,@reason,@ids,@actor,now())
+                """, c => { Add(c,"id",Guid.NewGuid()); Add(c,"visit",visit.Id); Add(c,"plan",request.CarePlanId); Add(c,"org",visit.OrganizationId); Add(c,"branch",visit.BranchId); Add(c,"reason",request.Reason.Trim()); Add(c,"ids",blocked); Add(c,"actor",_currentUser.UserName); }, token);
+            Audit("visit_tasks.reconciled","Visit",visit.Id,visit.OrganizationId,visit.BranchId);
+            await _context.SaveChangesAsync(token);
+            var result = await QueryVisitTasks(visit.Id, token);
+            await tx.CommitAsync(token);
+            return (IActionResult)Ok(result);
+        });
+    }
+
     [HttpPost("api/phase1/visits/{visitId:guid}/tasks/{taskId:guid}/outcome")]
     public async Task<IActionResult> RecordOutcome(Guid visitId, Guid taskId, RecordVisitTaskOutcomeRequest request, CancellationToken cancellationToken)
     {
@@ -86,7 +126,7 @@ public sealed class CareTasksController : ControllerBase
         var affected = await Execute("""
             update visit_tasks set status='Completed', outcome=@outcome, exception_reason=@reason, completed_at=now()
             where id=@task and visit_id=@visit and organization_id=@organization
-              and status<>'Completed'
+              and status not in ('Completed','Retired')
               and (care_plan_task_id is null or exists (
                 select 1 from care_plan_tasks source
                 join "CarePlans" plan on plan."Id"=source.care_plan_id
@@ -118,13 +158,13 @@ public sealed class CareTasksController : ControllerBase
         return Ok((await QueryVisitTasks(visit.Id, cancellationToken)).Single(item => item.Id == taskId));
     }
 
-    private async Task MaterializeVisitTasks(Visit visit, CancellationToken cancellationToken)
+    private async Task MaterializeVisitTasks(Visit visit, CancellationToken cancellationToken, bool force = false)
     {
         var existing = await Scalar("select count(*) from visit_tasks where visit_id=@visit and organization_id=@organization", command =>
         {
             Add(command,"visit",visit.Id); Add(command,"organization",visit.OrganizationId ?? _tenant.OrganizationId);
         }, cancellationToken);
-        if (existing > 0) return;
+        if (existing > 0 && !force) return;
 
         await Execute("""
             insert into visit_tasks
@@ -155,7 +195,7 @@ public sealed class CareTasksController : ControllerBase
 
     private async Task<Visit?> FindVisit(Guid id, CancellationToken cancellationToken)
     {
-        var visit = await _context.Visits.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
+        var visit = await _context.Visits.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
         return visit is not null && _tenant.CanAccess(visit.OrganizationId, visit.BranchId) ? visit : null;
     }
 
@@ -189,9 +229,10 @@ public sealed class CareTasksController : ControllerBase
         command => { Add(command,"visit",visitId); Add(command,"organization",_tenant.OrganizationId); },
         reader =>
         {
-            var review = reader.GetString(9) != "Completed" && !reader.GetBoolean(13);
+            var retired = reader.GetString(9) == "Retired";
+            var review = reader.GetString(9) != "Completed" && !retired && !reader.GetBoolean(13);
             return new VisitTaskResponse(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetGuid(3),reader.GetGuid(4),
-                review ? "Previous plan task — manager review required" : reader.GetString(5),reader.GetString(6),review ? "" : reader.GetString(7),reader.GetBoolean(8),
+                retired ? "Previous plan task — retired by manager review" : review ? "Previous plan task — manager review required" : reader.GetString(5),reader.GetString(6),review || retired ? "" : reader.GetString(7),reader.GetBoolean(8),
                 review ? "RequiresReview" : reader.GetString(9),reader.GetString(10),reader.GetString(11),reader.IsDBNull(12)?null:reader.GetDateTime(12));
         }, cancellationToken);
 
@@ -199,21 +240,21 @@ public sealed class CareTasksController : ControllerBase
     {
         var result = new List<T>(); var connection = _context.Database.GetDbConnection(); var opened = connection.State != ConnectionState.Open;
         if (opened) await connection.OpenAsync(cancellationToken);
-        try { await using var command=connection.CreateCommand(); command.CommandText=sql; bind(command); await using var reader=await command.ExecuteReaderAsync(cancellationToken); while(await reader.ReadAsync(cancellationToken)) result.Add(map(reader)); return result; }
+        try { await using var command=connection.CreateCommand(); command.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction(); command.CommandText=sql; bind(command); await using var reader=await command.ExecuteReaderAsync(cancellationToken); while(await reader.ReadAsync(cancellationToken)) result.Add(map(reader)); return result; }
         finally { if(opened) await connection.CloseAsync(); }
     }
 
     private async Task<int> Execute(string sql, Action<DbCommand> bind, CancellationToken cancellationToken)
     {
         var connection=_context.Database.GetDbConnection(); var opened=connection.State!=ConnectionState.Open; if(opened) await connection.OpenAsync(cancellationToken);
-        try { await using var command=connection.CreateCommand(); command.CommandText=sql; bind(command); return await command.ExecuteNonQueryAsync(cancellationToken); }
+        try { await using var command=connection.CreateCommand(); command.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction(); command.CommandText=sql; bind(command); return await command.ExecuteNonQueryAsync(cancellationToken); }
         finally { if(opened) await connection.CloseAsync(); }
     }
 
     private async Task<int> Scalar(string sql, Action<DbCommand> bind, CancellationToken cancellationToken)
     {
         var connection=_context.Database.GetDbConnection(); var opened=connection.State!=ConnectionState.Open; if(opened) await connection.OpenAsync(cancellationToken);
-        try { await using var command=connection.CreateCommand(); command.CommandText=sql; bind(command); return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)); }
+        try { await using var command=connection.CreateCommand(); command.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction(); command.CommandText=sql; bind(command); return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)); }
         finally { if(opened) await connection.CloseAsync(); }
     }
 
@@ -222,6 +263,7 @@ public sealed class CareTasksController : ControllerBase
 }
 
 public sealed record CreateCarePlanTaskRequest(string Title,string? Category,string? Instructions,bool IsRequired=true,string? Frequency="Every visit");
+public sealed record ReconcileVisitTasksRequest(Guid CarePlanId, string Reason);
 public sealed record RecordVisitTaskOutcomeRequest(string Outcome,string? ExceptionReason);
 public sealed record CarePlanTaskResponse(Guid Id,Guid CarePlanId,Guid ServiceUserId,string Title,string Category,string Instructions,bool IsRequired,string Frequency,string Status);
 public sealed record VisitTaskResponse(Guid Id,Guid VisitId,Guid? CarePlanTaskId,Guid ServiceUserId,Guid CareWorkerId,string Title,string Category,string Instructions,bool IsRequired,string Status,string Outcome,string ExceptionReason,DateTimeOffset? CompletedAt);
