@@ -25,6 +25,7 @@ public sealed class CareTasksController : ControllerBase
     }
 
     [HttpGet("api/phase1/care-plans/{carePlanId:guid}/tasks")]
+    [Authorize(Roles = "CareCoordinator,CareManager,Administrator")]
     public async Task<IActionResult> GetPlanTasks(Guid carePlanId, CancellationToken cancellationToken)
     {
         var plan = await FindPlan(carePlanId, cancellationToken);
