@@ -75,6 +75,66 @@ public sealed class VisitTaskPlanScopeRegressionTests(PostgresRegressionFactory 
         Assert.Equal(expected, stored);
     }
 
+    [Fact]
+    public async Task SupersessionBlocksPendingSnapshotsAndPreservesCompletedEvidence()
+    {
+        await factory.EnsureClinicalSeedAsync();
+        var person = Guid.NewGuid(); var worker = Guid.NewGuid(); var visit = Guid.NewGuid(); var freshVisit = Guid.NewGuid();
+        var actor = $"snapshot.worker.{Guid.NewGuid():N}"; Guid plan;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.ServiceUsers.Add(new(person, "Fictional snapshot person", new DateOnly(1945, 1, 1), "123", "Support", "Contact", "", RiskLevel.Low,
+                "Active", "Address", "None", "None", "Private", "", "", "Independent", "Independent", "Verbal", "Routine", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.CareWorkers.Add(new(worker, "Snapshot worker", "Care", "Flexible", 0, 0, "Valid", "Compliant", "Local", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            db.AppUsers.Add(new(Guid.NewGuid(), actor, $"{actor}@example.test", PasswordHasher.HashPassword("Admin123!"), UserRole.CareWorker,
+                true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, worker));
+            foreach (var id in new[] { visit, freshVisit })
+                db.Visits.Add(new(id, person, worker, DateTimeOffset.UtcNow.AddHours(id == visit ? -1 : -2), "Care", 30, "Care", VisitStatus.Scheduled,
+                    null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+            plan = await Plan(db, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, 1);
+            await TaskRow(db, plan, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, "PENDING OLD INSTRUCTION");
+            await TaskRow(db, plan, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, "COMPLETED HISTORICAL INSTRUCTION");
+            await SetState(db, plan, "Active");
+        }
+        using var client = factory.CreateClient();
+        var login = await client.PostAsJsonAsync("/api/auth/login", new { userName = actor, password = "Admin123!", mfaCode = (string?)null });
+        login.EnsureSuccessStatusCode();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await login.Content.ReadFromJsonAsync<Login>())!.Token);
+        var rows = await client.GetFromJsonAsync<JsonElement>($"/api/phase1/visits/{visit}/tasks");
+        var pending = rows.EnumerateArray().Single(item => item.GetProperty("title").GetString() == "PENDING OLD INSTRUCTION").GetProperty("id").GetGuid();
+        var completed = rows.EnumerateArray().Single(item => item.GetProperty("title").GetString() == "COMPLETED HISTORICAL INSTRUCTION").GetProperty("id").GetGuid();
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/phase1/visits/{visit}/tasks/{completed}/outcome", new { outcome = "Completed", exceptionReason = "" })).StatusCode);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            await SetState(db, plan, "Superseded");
+            var replacement = await Plan(db, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, 2);
+            await TaskRow(db, replacement, person, TenantDefaults.OrganizationId, TenantDefaults.BranchId, "REPLACEMENT INSTRUCTION");
+            await SetState(db, replacement, "Active");
+        }
+        var response = await client.GetAsync($"/api/phase1/visits/{visit}/tasks");
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("PENDING OLD INSTRUCTION", text);
+        Assert.Contains("COMPLETED HISTORICAL INSTRUCTION", text);
+        var after = JsonSerializer.Deserialize<JsonElement>(text).EnumerateArray().ToArray();
+        Assert.Equal("RequiresReview", after.Single(item => item.GetProperty("id").GetGuid() == pending).GetProperty("status").GetString());
+        Assert.Equal("", after.Single(item => item.GetProperty("id").GetGuid() == pending).GetProperty("instructions").GetString());
+        Assert.Equal("Completed", after.Single(item => item.GetProperty("id").GetGuid() == completed).GetProperty("status").GetString());
+        foreach (var id in new[] { pending, completed })
+            Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/phase1/visits/{visit}/tasks/{id}/outcome", new { outcome = "Completed", exceptionReason = "" })).StatusCode);
+        var fresh = await client.GetStringAsync($"/api/phase1/visits/{freshVisit}/tasks");
+        Assert.Contains("REPLACEMENT INSTRUCTION", fresh);
+        Assert.DoesNotContain("OLD INSTRUCTION", fresh);
+        using var verify = factory.Services.CreateScope();
+        var verifyDb = verify.ServiceProvider.GetRequiredService<CareDbContext>();
+        var stored = await verifyDb.Database.SqlQuery<string>($"""select instructions as "Value" from visit_tasks where id={pending}""").SingleAsync();
+        Assert.Equal("PENDING OLD INSTRUCTION", stored);
+        Assert.False(await verifyDb.AuditEvents.AnyAsync(item => item.EntityId == pending && item.Action == "visit_task.outcome_recorded"));
+        Assert.Equal(1, await verifyDb.AuditEvents.CountAsync(item => item.EntityId == completed && item.Action == "visit_task.outcome_recorded"));
+    }
+
     private static async Task<Guid> Plan(CareDbContext db, Guid person, Guid org, Guid branch, int reviewMonths)
     {
         var id = Guid.NewGuid();

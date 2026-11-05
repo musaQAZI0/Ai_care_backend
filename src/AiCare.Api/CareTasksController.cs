@@ -86,12 +86,25 @@ public sealed class CareTasksController : ControllerBase
         var affected = await Execute("""
             update visit_tasks set status='Completed', outcome=@outcome, exception_reason=@reason, completed_at=now()
             where id=@task and visit_id=@visit and organization_id=@organization
+              and status<>'Completed'
+              and (care_plan_task_id is null or exists (
+                select 1 from care_plan_tasks source
+                join "CarePlans" plan on plan."Id"=source.care_plan_id
+                join care_plan_versions version on version.care_plan_id=plan."Id"
+                where source.id=visit_tasks.care_plan_task_id and source.status='Active'
+                  and source.service_user_id=visit_tasks.service_user_id and source.organization_id=visit_tasks.organization_id and source.branch_id=visit_tasks.branch_id
+                  and plan."ServiceUserId"=visit_tasks.service_user_id and plan."OrganizationId"=visit_tasks.organization_id and plan."BranchId"=visit_tasks.branch_id and plan."Status"='Active'
+                  and version.service_user_id=visit_tasks.service_user_id and version.organization_id=visit_tasks.organization_id and version.branch_id=visit_tasks.branch_id and version.status='Active'))
             """, command =>
         {
             Add(command,"task",taskId); Add(command,"visit",visit.Id); Add(command,"organization",visit.OrganizationId ?? _tenant.OrganizationId);
             Add(command,"outcome",request.Outcome.Trim()); Add(command,"reason",request.ExceptionReason?.Trim() ?? "");
         }, cancellationToken);
-        if (affected == 0) return NotFound();
+        if (affected == 0)
+        {
+            var task = (await QueryVisitTasks(visit.Id, cancellationToken)).SingleOrDefault(item => item.Id == taskId);
+            return task is null ? NotFound() : Conflict(new { message = "This task is already recorded or its plan requires review. Reload the visit and contact your manager." });
+        }
 
         if (!request.Outcome.Equals("Completed", StringComparison.OrdinalIgnoreCase) && !request.Outcome.Equals("Not required", StringComparison.OrdinalIgnoreCase))
         {
@@ -160,9 +173,27 @@ public sealed class CareTasksController : ControllerBase
         reader => new CarePlanTaskResponse(reader.GetGuid(0),reader.GetGuid(1),reader.GetGuid(2),reader.GetString(3),reader.GetString(4),reader.GetString(5),reader.GetBoolean(6),reader.GetString(7),reader.GetString(8)), cancellationToken);
 
     private async Task<List<VisitTaskResponse>> QueryVisitTasks(Guid visitId, CancellationToken cancellationToken) => await Query(
-        "select id,visit_id,care_plan_task_id,service_user_id,care_worker_id,title,category,instructions,is_required,status,outcome,exception_reason,completed_at from visit_tasks where visit_id=@visit and organization_id=@organization order by created_at",
+        """
+        select task.id,task.visit_id,task.care_plan_task_id,task.service_user_id,task.care_worker_id,task.title,task.category,
+               task.instructions,task.is_required,task.status,task.outcome,task.exception_reason,task.completed_at,
+               (task.care_plan_task_id is null or exists (
+                 select 1 from care_plan_tasks source
+                 join "CarePlans" plan on plan."Id"=source.care_plan_id
+                 join care_plan_versions version on version.care_plan_id=plan."Id"
+                 where source.id=task.care_plan_task_id and source.status='Active'
+                   and source.service_user_id=task.service_user_id and source.organization_id=task.organization_id and source.branch_id=task.branch_id
+                   and plan."ServiceUserId"=task.service_user_id and plan."OrganizationId"=task.organization_id and plan."BranchId"=task.branch_id and plan."Status"='Active'
+                   and version.service_user_id=task.service_user_id and version.organization_id=task.organization_id and version.branch_id=task.branch_id and version.status='Active')) source_current
+        from visit_tasks task where task.visit_id=@visit and task.organization_id=@organization order by task.created_at
+        """,
         command => { Add(command,"visit",visitId); Add(command,"organization",_tenant.OrganizationId); },
-        reader => new VisitTaskResponse(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetGuid(3),reader.GetGuid(4),reader.GetString(5),reader.GetString(6),reader.GetString(7),reader.GetBoolean(8),reader.GetString(9),reader.GetString(10),reader.GetString(11),reader.IsDBNull(12)?null:reader.GetDateTime(12)), cancellationToken);
+        reader =>
+        {
+            var review = reader.GetString(9) != "Completed" && !reader.GetBoolean(13);
+            return new VisitTaskResponse(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetGuid(3),reader.GetGuid(4),
+                review ? "Previous plan task — manager review required" : reader.GetString(5),reader.GetString(6),review ? "" : reader.GetString(7),reader.GetBoolean(8),
+                review ? "RequiresReview" : reader.GetString(9),reader.GetString(10),reader.GetString(11),reader.IsDBNull(12)?null:reader.GetDateTime(12));
+        }, cancellationToken);
 
     private async Task<List<T>> Query<T>(string sql, Action<DbCommand> bind, Func<DbDataReader,T> map, CancellationToken cancellationToken)
     {
