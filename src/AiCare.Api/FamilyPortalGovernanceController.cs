@@ -1,6 +1,8 @@
 using AiCare.Application;
 using AiCare.Application.FamilyPortal;
 using AiCare.Domain;
+using AiCare.Infrastructure;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -14,12 +16,15 @@ public sealed class FamilyAccessAdminController(
     ITenantContext tenant,
     ICurrentUserContext currentUser,
     IConfiguration configuration,
-    IWebHostEnvironment environment) : ControllerBase
+    IWebHostEnvironment environment,
+    CareDbContext db) : ControllerBase
 {
     [HttpGet("{familyMemberId:guid}")]
     public async Task<IActionResult> Get(Guid familyMemberId, CancellationToken ct)
     {
         if (!IsStaff()) return Forbid();
+        var member = await ScopedMember(familyMemberId, ct);
+        if (member is null) return NotFound();
         var result = await familyPortal.GetAccessAsync(tenant.OrganizationId, familyMemberId, ct);
         return result is null ? NotFound() : Ok(result);
     }
@@ -28,11 +33,13 @@ public sealed class FamilyAccessAdminController(
     public async Task<IActionResult> Configure(Guid familyMemberId, ConfigureFamilyAccessRequest request, CancellationToken ct)
     {
         if (!IsStaff()) return Forbid();
+        var member = await ScopedMember(familyMemberId, ct);
+        if (member is null) return NotFound();
         try
         {
             var result = await familyPortal.ConfigureAccessAsync(
                 tenant.OrganizationId,
-                tenant.BranchId,
+                member.BranchId,
                 ActorId(),
                 currentUser.UserName,
                 new ConfigureFamilyAccessCommand(
@@ -59,10 +66,12 @@ public sealed class FamilyAccessAdminController(
     public async Task<IActionResult> Invite(Guid familyMemberId, CancellationToken ct)
     {
         if (!IsStaff()) return Forbid();
+        var member = await ScopedMember(familyMemberId, ct);
+        if (member is null) return NotFound();
         try
         {
             var baseUrl = configuration["FamilyPortal:FrontendBaseUrl"] ?? configuration["Frontend:BaseUrl"] ?? "http://localhost:5173";
-            var result = await familyPortal.InviteAsync(tenant.OrganizationId, tenant.BranchId, ActorId(), currentUser.UserName, familyMemberId, baseUrl, ct);
+            var result = await familyPortal.InviteAsync(tenant.OrganizationId, member.BranchId, ActorId(), currentUser.UserName, familyMemberId, baseUrl, ct);
             if (!environment.IsDevelopment() && !environment.IsEnvironment("Testing"))
                 result = result with { DevelopmentActivationUrl = null };
             return Ok(result);
@@ -85,6 +94,8 @@ public sealed class FamilyAccessAdminController(
     private async Task<IActionResult> SetStatus(Guid familyMemberId, string status, CancellationToken ct)
     {
         if (!IsStaff()) return Forbid();
+        var member = await ScopedMember(familyMemberId, ct);
+        if (member is null) return NotFound();
         try
         {
             await familyPortal.SetAccessStatusAsync(tenant.OrganizationId, ActorId(), currentUser.UserName, familyMemberId, status, ct);
@@ -94,6 +105,14 @@ public sealed class FamilyAccessAdminController(
         {
             return BadRequest(new { message = ex.Message });
         }
+    }
+
+    private async Task<FamilyMember?> ScopedMember(Guid id, CancellationToken ct)
+    {
+        var member = await db.FamilyMembers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.OrganizationId == tenant.OrganizationId, ct);
+        if (member is null || !tenant.CanAccess(member.OrganizationId, member.BranchId)) return null;
+        var person = await db.ServiceUsers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == member.ServiceUserId && x.OrganizationId == member.OrganizationId, ct);
+        return person is not null && person.BranchId == member.BranchId && tenant.CanAccess(person.OrganizationId, person.BranchId) ? member : null;
     }
 
     private bool IsStaff() => currentUser.HasAnyRole(UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator);
