@@ -3454,7 +3454,7 @@ static VisitBookingAssessment AssessVisitBooking(CreateVisitRequest request, Car
     var workerIds = VisitWorkerIds(request.CareWorkerId, request.AdditionalCareWorkerIds);
     var conflicts = workerIds.SelectMany(id => FindVisitConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes, request.ExcludeVisitId)).ToList();
     var availabilityConflicts = workerIds.SelectMany(id => FindWorkerAvailabilityConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes)).ToList();
-    var safetyConflicts = workerIds.SelectMany(id => FindWorkerSafetyConflicts(context, tenant, id, request.StartsAt, request.RequiredSkills)).ToList();
+    var safetyConflicts = workerIds.SelectMany(id => FindWorkerSafetyConflicts(context, tenant, id, request.StartsAt, request.DurationMinutes, request.RequiredSkills)).ToList();
     var operationalConflicts = workerIds.SelectMany(id => FindWorkerOperationalConflicts(context, tenant, id, request.ServiceUserId, request.StartsAt, request.DurationMinutes, request.ExcludeVisitId)).ToList();
     var branch = context.ServiceUsers.AsNoTracking().Where(x => x.Id == request.ServiceUserId && x.OrganizationId == tenant.OrganizationId).Select(x => x.BranchId).FirstOrDefault() ?? TenantDefaults.BranchId;
     var policy = workerIds.Select(id => AppointmentWorkflow.Check(context, tenant, branch, id, request.StartsAt, request.DurationMinutes, request.ExcludeVisitId)).ToArray();
@@ -3615,7 +3615,7 @@ static List<object> FindWorkerAvailabilityConflicts(CareDbContext context, ITena
     return result;
 }
 
-static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantContext tenant, Guid careWorkerId, DateTimeOffset startsAt, string? requiredSkills)
+static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantContext tenant, Guid careWorkerId, DateTimeOffset startsAt, int durationMinutes, string? requiredSkills)
 {
     var result = new List<object>();
     var compliance = new List<(string Type, string Status, DateTimeOffset? ExpiresAt)>();
@@ -3679,10 +3679,11 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
     }
 
     var activeAt = startsAt.ToUniversalTime();
-    static bool Valid(string status, DateTimeOffset? expiresAt, DateTimeOffset activeAt) =>
-        status.Equals("Valid", StringComparison.OrdinalIgnoreCase) && (expiresAt is null || expiresAt > activeAt);
+    var visitEndsAt = activeAt.AddMinutes(durationMinutes);
+    static bool Valid(string status, DateTimeOffset? expiresAt, DateTimeOffset requiredUntil) =>
+        status.Equals("Valid", StringComparison.OrdinalIgnoreCase) && (expiresAt is null || expiresAt >= requiredUntil);
 
-    foreach (var restriction in restrictions.Where(x => x.StartsAt <= activeAt && (x.EndsAt is null || x.EndsAt > activeAt)))
+    foreach (var restriction in restrictions.Where(x => x.StartsAt < visitEndsAt && (x.EndsAt is null || x.EndsAt > activeAt)))
     {
         var matches = restriction.Type != "Skill" || string.IsNullOrWhiteSpace(restriction.Skill) || (requiredSkills ?? "").Contains(restriction.Skill,StringComparison.OrdinalIgnoreCase);
         if (matches) result.Add(new { careWorkerId, category = "Restriction", code = restriction.Type == "Medication" ? "medication-restricted" : "assignment-restricted", skill = restriction.Skill, reason = restriction.Reason });
@@ -3691,16 +3692,16 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
     foreach (var complianceType in new[] { "DBS", "Right to Work" })
     {
         var records = compliance.Where(item => item.Type.Equals(complianceType, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (records.Count > 0 && !records.Any(item => Valid(item.Status, item.ExpiresAt, activeAt)))
+        if (records.Count > 0 && !records.Any(item => Valid(item.Status, item.ExpiresAt, visitEndsAt)))
         {
-            result.Add(new { careWorkerId, category = "Compliance", code = complianceType == "DBS" ? "dbs-invalid" : "right-to-work-invalid", reason = $"{complianceType} evidence is expired or invalid at the visit time." });
+            result.Add(new { careWorkerId, category = "Compliance", code = complianceType == "DBS" ? "dbs-invalid" : "right-to-work-invalid", reason = $"{complianceType} evidence is expired or invalid for the full visit interval." });
         }
     }
 
     var mandatoryTraining = training.Where(item => item.Category.Equals("Mandatory", StringComparison.OrdinalIgnoreCase)).ToList();
-    if (mandatoryTraining.Count > 0 && !mandatoryTraining.Any(item => Valid(item.Status, item.ExpiresAt, activeAt)))
+    if (mandatoryTraining.Count > 0 && !mandatoryTraining.Any(item => Valid(item.Status, item.ExpiresAt, visitEndsAt)))
     {
-        result.Add(new { careWorkerId, category = "Compliance", code = "mandatory-training-invalid", reason = "All recorded mandatory training is expired or invalid at the visit time." });
+        result.Add(new { careWorkerId, category = "Compliance", code = "mandatory-training-invalid", reason = "All recorded mandatory training is expired or invalid for the full visit interval." });
     }
 
     var required = (requiredSkills ?? "")
@@ -3710,9 +3711,9 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
     if (required.Count == 0) return result;
 
     var validEvidence = competencies
-        .Where(item => Valid(item.Status, item.ExpiresAt, activeAt))
+        .Where(item => Valid(item.Status, item.ExpiresAt, visitEndsAt))
         .Select(item => item.Name)
-        .Concat(training.Where(item => Valid(item.Status, item.ExpiresAt, activeAt)).Select(item => item.Name))
+        .Concat(training.Where(item => Valid(item.Status, item.ExpiresAt, visitEndsAt)).Select(item => item.Name))
         .ToList();
     var worker = context.CareWorkers.AsNoTracking().FirstOrDefault(item => item.Id == careWorkerId);
     if (worker is not null) validEvidence.Add(worker.Specialization);
