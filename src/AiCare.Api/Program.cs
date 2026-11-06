@@ -3584,7 +3584,10 @@ static List<object> FindWorkerAvailabilityConflicts(CareDbContext context, ITena
     }
     catch (System.Data.Common.DbException)
     {
-        // Compatibility fallback while older/test databases are awaiting the workforce migration.
+        // Unknown safety state must block assignment, including during schema or
+        // database failures. Do not turn unavailable evidence into eligibility.
+        result.Add(new { careWorkerId, category = "Safety", code = "safety-data-unavailable",
+            reason = "Worker safety checks are unavailable. Restore workforce data access before booking this visit." });
         return result;
     }
     finally
