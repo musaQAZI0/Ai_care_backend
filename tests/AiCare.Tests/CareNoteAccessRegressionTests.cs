@@ -32,6 +32,8 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
             if (allowed) Assert.Contains(data.Summary, body); else Assert.DoesNotContain(data.Summary, body);
         }
         if (allowed) return;
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/phase1/care-documentation/service-users/{data.Person}/timeline")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/phase1/care-documentation/visits/{data.Visit}/alerts")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/phase1/care-notes", Request(data, data.Visit))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"/api/phase1/care-notes/{data.Note}", Request(data, data.Visit))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"/api/phase1/care-notes/{data.Note}")).StatusCode);
@@ -59,6 +61,17 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
         Assert.DoesNotContain(data.OtherSummary, observationBody);
         if (unpublished) Assert.DoesNotContain(data.Summary, observationBody);
         else Assert.Contains(data.Summary, observationBody);
+        var visit = unpublished ? data.Visit : data.OtherVisit;
+        var alerts = await client.GetAsync($"/api/phase1/care-documentation/visits/{visit}/alerts");
+        Assert.Equal(HttpStatusCode.NotFound, alerts.StatusCode);
+        var amendment = await client.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{id}/amendments", new {
+            reason = "Attempted publication bypass", summary = "Attempted correction", personalCare = "Care", mealsAndHydration = "Fluids",
+            medication = "None", concerns = "None", requiresReview = true
+        });
+        Assert.Equal(HttpStatusCode.NotFound, amendment.StatusCode);
+        if (unpublished)
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/phase1/care-documentation/service-users/{data.Person}/timeline")).StatusCode);
+        await Unchanged(data);
     }
 
     [Fact]
@@ -83,7 +96,11 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
         Assert.Equal(data.OtherSummary, other.Summary); Assert.Equal(data.OtherVisit, other.VisitId);
         Assert.Equal(data.Worker, own.CareWorkerId); Assert.NotEqual(data.Worker, other.CareWorkerId);
         Assert.Equal(2, await db.CareNotes.CountAsync(n => n.ServiceUserId == data.Person));
-        Assert.False(await db.AuditEvents.AnyAsync(a => a.Actor == data.Actor && a.EntityType == nameof(CareNote)));
+        Assert.False(await db.AuditEvents.AnyAsync(a => a.Actor == data.Actor &&
+            (a.EntityType == nameof(CareNote) || a.EntityType == "CareDocumentation")));
+        Assert.Equal(0, await db.Database.SqlQuery<int>($"""
+            select count(*)::integer as "Value" from care_note_amendments where care_note_id in ({data.Note},{data.OtherNote})
+            """).SingleAsync());
     }
 
     private static object Request(Fixture data, Guid visit) => new {
