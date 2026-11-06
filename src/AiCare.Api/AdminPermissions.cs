@@ -73,6 +73,7 @@ public sealed class AdminPermissionGateMiddleware(RequestDelegate next)
         if (path == "/api/phase1/admin/appointment-start-variance" && method == "PUT") return "settings.manage";
         if (path.StartsWith("/api/phase1/admin/bank-holidays", StringComparison.Ordinal) && method != "GET") return "settings.manage";
         if (path == "/api/phase1/admin/company-profile" && method == "PUT") return "settings.manage";
+        if (path == "/api/phase1/mobile-browser-settings" && method == "PUT") return "settings.manage";
         if (path.StartsWith("/api/phase1/admin/regions", StringComparison.Ordinal) && method != "GET") return "settings.manage";
         if (path.StartsWith("/api/phase1/admin/login-attempts", StringComparison.Ordinal)) return "users.read";
         if (path.StartsWith("/api/phase1/admin/appointment-configuration/visits/", StringComparison.Ordinal) && method == "PUT") return "visits.schedule";
