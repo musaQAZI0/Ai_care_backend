@@ -20,16 +20,17 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
     [InlineData(UserRole.FamilyMember, false)]
     [InlineData(UserRole.ServiceUser, false)]
     [InlineData(UserRole.BackOffice, false)]
-    public async Task RawNotesAndObservationsRequireACareDeliveryRole(UserRole role, bool allowed)
+    public async Task RawCareRecordsRequireACareDeliveryRole(UserRole role, bool allowed)
     {
         var data = await Setup(role);
         using var client = await Client(data.Actor);
-        foreach (var path in new[] { "/api/phase1/care-notes", $"/api/phase1/care-notes/{data.Note}", "/api/phase1/observations" })
+        foreach (var path in new[] { "/api/phase1/care-notes", $"/api/phase1/care-notes/{data.Note}", "/api/phase1/observations", "/api/phase1/incidents", $"/api/phase1/incidents/{data.Note}" })
         {
             var response = await client.GetAsync(path);
             Assert.Equal(allowed ? HttpStatusCode.OK : HttpStatusCode.Forbidden, response.StatusCode);
             var body = await response.Content.ReadAsStringAsync();
             if (allowed) Assert.Contains(data.Summary, body); else Assert.DoesNotContain(data.Summary, body);
+            if (role == UserRole.CareWorker) Assert.DoesNotContain(data.OtherSummary, body);
         }
         if (allowed) return;
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/phase1/care-documentation/service-users/{data.Person}/timeline")).StatusCode);
@@ -37,6 +38,9 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/phase1/care-notes", Request(data, data.Visit))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"/api/phase1/care-notes/{data.Note}", Request(data, data.Visit))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"/api/phase1/care-notes/{data.Note}")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/phase1/incidents", IncidentRequest(data, data.Visit))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"/api/phase1/incidents/{data.Note}", IncidentRequest(data, data.Visit))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"/api/phase1/incidents/{data.Note}")).StatusCode);
         await Unchanged(data);
     }
 
@@ -52,6 +56,12 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
         var response = await client.GetAsync($"/api/phase1/care-notes/{id}");
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.DoesNotContain(summary, await response.Content.ReadAsStringAsync());
+        var incident = await client.GetAsync($"/api/phase1/incidents/{id}");
+        Assert.Equal(HttpStatusCode.NotFound, incident.StatusCode);
+        Assert.DoesNotContain(summary, await incident.Content.ReadAsStringAsync());
+        var incidentList = await client.GetAsync("/api/phase1/incidents");
+        Assert.Equal(HttpStatusCode.OK, incidentList.StatusCode);
+        Assert.DoesNotContain(summary, await incidentList.Content.ReadAsStringAsync());
         var listing = await client.GetAsync("/api/phase1/care-notes");
         Assert.Equal(HttpStatusCode.OK, listing.StatusCode);
         Assert.DoesNotContain(summary, await listing.Content.ReadAsStringAsync());
@@ -83,6 +93,9 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"/api/phase1/care-notes/{data.OtherNote}", Request(data, data.Visit))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"/api/phase1/care-notes/{data.OtherNote}")).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"/api/phase1/care-notes/{data.Note}", Request(data, data.OtherVisit))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"/api/phase1/incidents/{data.OtherNote}", IncidentRequest(data, data.Visit))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"/api/phase1/incidents/{data.OtherNote}")).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"/api/phase1/incidents/{data.Note}", IncidentRequest(data, data.OtherVisit))).StatusCode);
         await Unchanged(data);
     }
 
@@ -96,6 +109,14 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
         Assert.Equal(data.OtherSummary, other.Summary); Assert.Equal(data.OtherVisit, other.VisitId);
         Assert.Equal(data.Worker, own.CareWorkerId); Assert.NotEqual(data.Worker, other.CareWorkerId);
         Assert.Equal(2, await db.CareNotes.CountAsync(n => n.ServiceUserId == data.Person));
+        var ownIncident = await db.Incidents.AsNoTracking().SingleAsync(i => i.Id == data.Note);
+        var otherIncident = await db.Incidents.AsNoTracking().SingleAsync(i => i.Id == data.OtherNote);
+        Assert.Equal(data.Summary, ownIncident.Description); Assert.Equal(data.Visit, ownIncident.VisitId);
+        Assert.Equal(data.OtherSummary, otherIncident.Description); Assert.Equal(data.OtherVisit, otherIncident.VisitId);
+        Assert.Equal("Reported", ownIncident.Status); Assert.Equal("Reported", otherIncident.Status);
+        Assert.Equal(2, await db.Incidents.CountAsync(i => i.ServiceUserId == data.Person));
+        Assert.False(await db.AuditEvents.AnyAsync(a => a.EntityType == nameof(Incident) &&
+            (a.EntityId == data.Note || a.EntityId == data.OtherNote)));
         Assert.False(await db.AuditEvents.AnyAsync(a => a.Actor == data.Actor &&
             (a.EntityType == nameof(CareNote) || a.EntityType == "CareDocumentation")));
         Assert.Equal(0, await db.Database.SqlQuery<int>($"""
@@ -106,6 +127,9 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
     private static object Request(Fixture data, Guid visit) => new {
         visitId = visit, serviceUserId = data.Person, careWorkerId = data.Worker, summary = "Attempted overwrite",
         personalCare = "Care", mealsAndHydration = "Fluids", medication = "None", concerns = "None", requiresReview = true
+    };
+    private static object IncidentRequest(Fixture data, Guid visit) => new {
+        serviceUserId = data.Person, visitId = visit, category = "Fall", severity = "Low", description = "Attempted overwrite"
     };
 
     private async Task<Fixture> Setup(UserRole role, bool unpublished = false)
@@ -128,6 +152,8 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
             null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         db.CareNotes.Add(new(note, visit, person, worker, summary, "Care", "Fluids", "None", "None", false, DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         db.CareNotes.Add(new(otherNote, otherVisit, person, other, otherSummary, "Care", "Fluids", "None", "None", false, DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+        db.Incidents.Add(new(note, person, visit, "Fall", "Low", summary, "Reported", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+        db.Incidents.Add(new(otherNote, person, otherVisit, "Fall", "Low", otherSummary, "Reported", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         db.HealthObservations.Add(new(Guid.NewGuid(), visit, person, "Mood", "Settled", "", summary, DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         db.HealthObservations.Add(new(Guid.NewGuid(), otherVisit, person, "Mood", "Settled", "", otherSummary, DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         db.AppUsers.Add(new(Guid.NewGuid(), actor, actor + "@test.invalid", PasswordHasher.HashPassword("Admin123!"), role,

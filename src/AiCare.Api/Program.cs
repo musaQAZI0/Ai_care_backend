@@ -2115,8 +2115,10 @@ phase1.MapGet("/observations", async (ICareRepository repository, ICurrentUserCo
     }
     return Results.Ok(visible);
 });
-phase1.MapGet("/incidents", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapGet("/incidents", async (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
 {
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
     if (!currentUser.IsCareWorker)
     {
         return Results.Ok(repository.GetIncidents());
@@ -2136,15 +2138,30 @@ phase1.MapGet("/incidents", (ICareRepository repository, CareDbContext context, 
     var incidents = context.Incidents.AsNoTracking()
         .Where(incident => incident.VisitId != null && assignedVisitIds.Contains(incident.VisitId.Value))
         .ToList();
-    return Results.Ok(incidents);
+    var visible = new List<Incident>();
+    var visitAccess = new Dictionary<Guid, bool>();
+    foreach (var incident in incidents.Where(item => tenant.CanAccess(item.OrganizationId, item.BranchId)))
+    {
+        var visitId = incident.VisitId!.Value;
+        if (!visitAccess.TryGetValue(visitId, out var canRead))
+            visitAccess[visitId] = canRead = await authorization.CanOperateVisitAsync(visitId);
+        if (canRead) visible.Add(incident);
+    }
+    return Results.Ok(visible);
 });
-phase1.MapGet("/incidents/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/incidents/{id:guid}", async (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
 {
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
     var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    return incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId) ? Results.NotFound() : Results.Ok(incident);
+    if (incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId)) return Results.NotFound();
+    if (currentUser.IsCareWorker && (incident.VisitId is not Guid visitId || !await authorization.CanOperateVisitAsync(visitId))) return Results.NotFound();
+    return Results.Ok(incident);
 });
 phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
     if (request.ServiceUserId == Guid.Empty || Missing(request.Category, request.Severity, request.Description))
     {
         return Error("Service user, category, severity, and description are required.");
@@ -2161,8 +2178,15 @@ phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository rep
 });
 phase1.MapPut("/incidents/{id:guid}", (Guid id, CreateIncidentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
     var incidentToUpdate = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
     if (incidentToUpdate is null || !tenant.CanAccess(incidentToUpdate.OrganizationId, incidentToUpdate.BranchId)) return Results.NotFound();
+    var sourceDenied = RequireIncidentAccessForCareWorker(new CreateIncidentRequest(incidentToUpdate.ServiceUserId, incidentToUpdate.VisitId,
+        incidentToUpdate.Category, incidentToUpdate.Severity, incidentToUpdate.Description), context, tenant, currentUser);
+    if (sourceDenied is not null) return sourceDenied;
+    if (incidentToUpdate.ServiceUserId != request.ServiceUserId || incidentToUpdate.VisitId != request.VisitId)
+        return Results.Conflict(new { message = "An incident cannot be moved to another person or visit." });
 
     var denied = RequireIncidentAccessForCareWorker(request, context, tenant, currentUser);
     if (denied is not null) return denied;
@@ -2172,6 +2196,8 @@ phase1.MapPut("/incidents/{id:guid}", (Guid id, CreateIncidentRequest request, I
 });
 phase1.MapDelete("/incidents/{id:guid}", (Guid id, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
     var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
     if (incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId)) return Results.NotFound();
 
