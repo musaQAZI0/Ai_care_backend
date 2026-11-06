@@ -55,6 +55,32 @@ public sealed class VisitCoverRegressionTests(PostgresRegressionFactory factory)
         Assert.DoesNotContain(offerId.ToString(), await other.GetStringAsync("/api/phase1/visit-cover/offers/mine"), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(HttpStatusCode.NotFound, (await other.PostAsync($"/api/phase1/visit-cover/offers/{offerId}/accept", null)).StatusCode);
 
+        var restrictionId = Guid.NewGuid();
+        using (var restrictionScope = factory.Services.CreateScope())
+        {
+            var db = restrictionScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                insert into worker_assignment_restrictions(id,care_worker_id,organization_id,branch_id,restriction_type,reason,evidence_reference,starts_at,ends_at,approved_by)
+                values({restrictionId},{replacementWorkerId},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{"Assignment"},{"Synthetic restriction after offer"},{"TEST"},{startsAt.AddMinutes(15)},{startsAt.AddHours(1)},{managerName})
+                """);
+        }
+        var blockedAcceptance = await replacement.PostAsync($"/api/phase1/visit-cover/offers/{offerId}/accept", null);
+        Assert.Equal(HttpStatusCode.Conflict, blockedAcceptance.StatusCode);
+        Assert.Contains("assignment-restricted", await blockedAcceptance.Content.ReadAsStringAsync());
+        using (var blockedScope = factory.Services.CreateScope())
+        {
+            var db = blockedScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            Assert.Equal(originalWorkerId, (await db.Visits.AsNoTracking().SingleAsync(v => v.Id == visitId)).CareWorkerId);
+            Assert.Equal("Pending", await db.Database.SqlQuery<string>($"""
+                select status as "Value" from visit_cover_offers where id={offerId}
+                """).SingleAsync());
+            Assert.Equal("Open", await db.Database.SqlQuery<string>($"""
+                select status as "Value" from visit_cover_requests where id={coverId}
+                """).SingleAsync());
+            Assert.False(await db.AuditEvents.AnyAsync(a => a.EntityId == offerId && a.Action == "visit_cover.accepted"));
+            await db.Database.ExecuteSqlInterpolatedAsync($"update worker_assignment_restrictions set status={"Lifted"} where id={restrictionId}");
+        }
+
         var accepted = await replacement.PostAsync($"/api/phase1/visit-cover/offers/{offerId}/accept", null);
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await replacement.PostAsync($"/api/phase1/visit-cover/offers/{offerId}/accept", null)).StatusCode);

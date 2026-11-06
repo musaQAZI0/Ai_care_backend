@@ -43,6 +43,30 @@ public sealed class RecurringSeriesRegressionTests(PostgresRegressionFactory fac
         var seriesId = body.GetProperty("seriesId").GetGuid();
         var visitIds = body.GetProperty("visits").EnumerateArray().Select(item => item.GetProperty("id").GetGuid()).ToArray();
         Assert.Contains(seriesId.ToString(), await client.GetStringAsync("/api/phase1/visits/recurring-series"), StringComparison.OrdinalIgnoreCase);
+        var restrictionId = Guid.NewGuid();
+        using (var restrictionScope = factory.Services.CreateScope())
+        {
+            var db = restrictionScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            var last = await db.Visits.AsNoTracking().Where(v => visitIds.Contains(v.Id)).OrderByDescending(v => v.StartsAt).FirstAsync();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                insert into worker_assignment_restrictions(id,care_worker_id,organization_id,branch_id,restriction_type,reason,evidence_reference,starts_at,ends_at,approved_by)
+                values({restrictionId},{nextWorkerId},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{"Assignment"},{"Synthetic restriction on final series visit"},{"TEST"},{last.StartsAt.AddMinutes(15)},{last.StartsAt.AddHours(1)},{managerName})
+                """);
+        }
+        var blockedEdit = await client.PutAsJsonAsync($"/api/phase1/visits/recurring-series/{seriesId}", new {
+            careWorkerId = nextWorkerId, visitType = "Blocked series edit", durationMinutes = 45, requiredSkills = "", changeReason = "Verify all members before saving"
+        });
+        Assert.Equal(HttpStatusCode.Conflict, blockedEdit.StatusCode);
+        Assert.Contains("assignment-restricted", await blockedEdit.Content.ReadAsStringAsync());
+        using (var blockedScope = factory.Services.CreateScope())
+        {
+            var db = blockedScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            var unchanged = await db.Visits.AsNoTracking().Where(v => visitIds.Contains(v.Id)).ToListAsync();
+            Assert.Equal(3, unchanged.Count);
+            Assert.All(unchanged, v => { Assert.Equal(firstWorkerId, v.CareWorkerId); Assert.Equal(30, v.DurationMinutes); Assert.Equal("Morning care", v.VisitType); });
+            Assert.False(await db.AuditEvents.AnyAsync(a => a.Actor == managerName && a.Action == "visit.recurring_series_updated"));
+            await db.Database.ExecuteSqlInterpolatedAsync($"update worker_assignment_restrictions set status={"Lifted"} where id={restrictionId}");
+        }
         var edited = await client.PutAsJsonAsync($"/api/phase1/visits/recurring-series/{seriesId}", new { careWorkerId = nextWorkerId, visitType = "Evening care", durationMinutes = 45, requiredSkills = "", startTime = "14:30", changeReason = "Care plan changed" });
         Assert.True(edited.StatusCode == HttpStatusCode.OK, $"Edit returned {(int)edited.StatusCode}: {await edited.Content.ReadAsStringAsync()}\n{factory.LastServerException}");
         Assert.Equal(3, (await edited.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("updatedCount").GetInt32());
