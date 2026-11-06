@@ -20,11 +20,11 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
     [InlineData(UserRole.FamilyMember, false)]
     [InlineData(UserRole.ServiceUser, false)]
     [InlineData(UserRole.BackOffice, false)]
-    public async Task RawNotesRequireACareDeliveryRole(UserRole role, bool allowed)
+    public async Task RawNotesAndObservationsRequireACareDeliveryRole(UserRole role, bool allowed)
     {
         var data = await Setup(role);
         using var client = await Client(data.Actor);
-        foreach (var path in new[] { "/api/phase1/care-notes", $"/api/phase1/care-notes/{data.Note}" })
+        foreach (var path in new[] { "/api/phase1/care-notes", $"/api/phase1/care-notes/{data.Note}", "/api/phase1/observations" })
         {
             var response = await client.GetAsync(path);
             Assert.Equal(allowed ? HttpStatusCode.OK : HttpStatusCode.Forbidden, response.StatusCode);
@@ -53,6 +53,12 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
         var listing = await client.GetAsync("/api/phase1/care-notes");
         Assert.Equal(HttpStatusCode.OK, listing.StatusCode);
         Assert.DoesNotContain(summary, await listing.Content.ReadAsStringAsync());
+        var observations = await client.GetAsync("/api/phase1/observations");
+        Assert.Equal(HttpStatusCode.OK, observations.StatusCode);
+        var observationBody = await observations.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(data.OtherSummary, observationBody);
+        if (unpublished) Assert.DoesNotContain(data.Summary, observationBody);
+        else Assert.Contains(data.Summary, observationBody);
     }
 
     [Fact]
@@ -105,6 +111,8 @@ public sealed class CareNoteAccessRegressionTests(PostgresRegressionFactory fact
             null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         db.CareNotes.Add(new(note, visit, person, worker, summary, "Care", "Fluids", "None", "None", false, DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         db.CareNotes.Add(new(otherNote, otherVisit, person, other, otherSummary, "Care", "Fluids", "None", "None", false, DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+        db.HealthObservations.Add(new(Guid.NewGuid(), visit, person, "Mood", "Settled", "", summary, DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+        db.HealthObservations.Add(new(Guid.NewGuid(), otherVisit, person, "Mood", "Settled", "", otherSummary, DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         db.AppUsers.Add(new(Guid.NewGuid(), actor, actor + "@test.invalid", PasswordHasher.HashPassword("Admin123!"), role,
             true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, role == UserRole.CareWorker ? worker : null));
         await db.SaveChangesAsync();

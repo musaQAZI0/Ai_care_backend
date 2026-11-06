@@ -2099,7 +2099,22 @@ phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITena
     context.SaveChanges();
     return Results.NoContent();
 });
-phase1.MapGet("/observations", (ICareRepository repository) => Results.Ok(repository.GetHealthObservations()));
+phase1.MapGet("/observations", async (ICareRepository repository, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
+{
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (denied is not null) return denied;
+    var observations = repository.GetHealthObservations();
+    if (!currentUser.IsCareWorker) return Results.Ok(observations);
+    var visible = new List<HealthObservation>();
+    var visitAccess = new Dictionary<Guid, bool>();
+    foreach (var observation in observations)
+    {
+        if (!visitAccess.TryGetValue(observation.VisitId, out var canRead))
+            visitAccess[observation.VisitId] = canRead = await authorization.CanOperateVisitAsync(observation.VisitId);
+        if (canRead) visible.Add(observation);
+    }
+    return Results.Ok(visible);
+});
 phase1.MapGet("/incidents", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
     if (!currentUser.IsCareWorker)
