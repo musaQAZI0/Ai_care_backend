@@ -108,6 +108,8 @@ public sealed class AppointmentConfigurationController(CareDbContext db, ITenant
         var devices = monitoring.DeviceOptions ?? [];
         if (devices.Any(x => x is not ("Mobile app" or "Manual entry"))) return BadRequest(new { message = "Only Mobile app and Manual entry are supported. No external device integration is available." });
         var json = JsonSerializer.Serialize(config, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async () =>
+        {
         await using var transaction = await db.Database.BeginTransactionAsync(token);
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             insert into appointment_configuration(organization_id,branch_id,configuration,updated_by)
@@ -117,6 +119,7 @@ public sealed class AppointmentConfigurationController(CareDbContext db, ITenant
         Audit("appointments.configuration_updated", request.BranchId, request.BranchId);
         await db.SaveChangesAsync(token); await transaction.CommitAsync(token);
         return NoContent();
+        });
     }
 
     [HttpGet("presets")]
@@ -131,9 +134,12 @@ public sealed class AppointmentConfigurationController(CareDbContext db, ITenant
     {
         if (!BranchAllowed(request.BranchId)) return NotFound();
         if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.VisitType) || request.DurationMinutes is < 1 or > 1440) return BadRequest(new { message = "Name, visit type and duration from 1 to 1440 minutes are required." });
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async () =>
+        {
         await using var transaction = await db.Database.BeginTransactionAsync(token); await EnsureConfig(request.BranchId, token);
         var changed = await db.Database.ExecuteSqlInterpolatedAsync($"""insert into appointment_presets(id,organization_id,branch_id,name,visit_type,duration_minutes,required_skills,active,updated_by) values({id},{tenant.OrganizationId},{request.BranchId},{request.Name.Trim()},{request.VisitType.Trim()},{request.DurationMinutes},{request.RequiredSkills ?? ""},{request.Active},{user.UserName}) on conflict(id) do update set name=excluded.name,visit_type=excluded.visit_type,duration_minutes=excluded.duration_minutes,required_skills=excluded.required_skills,active=excluded.active,updated_by=excluded.updated_by,updated_at=now() where appointment_presets.organization_id={tenant.OrganizationId} and appointment_presets.branch_id={request.BranchId}""", token);
         if (changed == 0) return NotFound(); Audit("appointments.preset_saved", id, request.BranchId); await db.SaveChangesAsync(token); await transaction.CommitAsync(token); return NoContent();
+        });
     }
 
     [HttpGet("runs"), Authorize(Roles = "Administrator,CareManager,CareCoordinator")]
@@ -147,9 +153,12 @@ public sealed class AppointmentConfigurationController(CareDbContext db, ITenant
     {
         if (!BranchAllowed(request.BranchId)) return NotFound();
         if (string.IsNullOrWhiteSpace(request.Name)) return BadRequest(new { message = "Run name is required." });
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async () =>
+        {
         await using var transaction = await db.Database.BeginTransactionAsync(token); await EnsureConfig(request.BranchId, token);
         var changed = await db.Database.ExecuteSqlInterpolatedAsync($"""insert into appointment_runs(id,organization_id,branch_id,name,active,updated_by) values({id},{tenant.OrganizationId},{request.BranchId},{request.Name.Trim()},{request.Active},{user.UserName}) on conflict(id) do update set name=excluded.name,active=excluded.active,updated_by=excluded.updated_by,updated_at=now() where appointment_runs.organization_id={tenant.OrganizationId} and appointment_runs.branch_id={request.BranchId}""", token);
         if (changed == 0) return NotFound(); Audit("appointments.run_saved", id, request.BranchId); await db.SaveChangesAsync(token); await transaction.CommitAsync(token); return NoContent();
+        });
     }
 
     [HttpPut("visits/{visitId:guid}/run"), Authorize(Roles = "Administrator,CareManager,CareCoordinator")]
@@ -159,9 +168,12 @@ public sealed class AppointmentConfigurationController(CareDbContext db, ITenant
         if (visit?.BranchId is not Guid branch || !BranchAllowed(branch)) return NotFound();
         var run = await db.Database.SqlQuery<Guid>($"""select id as "Value" from appointment_runs where id={request.RunId} and organization_id={tenant.OrganizationId} and branch_id={branch} and active=true""").SingleOrDefaultAsync(token);
         if (run == Guid.Empty) return NotFound();
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async () =>
+        {
         await using var transaction = await db.Database.BeginTransactionAsync(token);
         await db.Database.ExecuteSqlInterpolatedAsync($"""insert into appointment_run_visits(visit_id,run_id,organization_id,branch_id) values({visitId},{run},{tenant.OrganizationId},{branch}) on conflict(visit_id) do update set run_id=excluded.run_id where appointment_run_visits.organization_id={tenant.OrganizationId} and appointment_run_visits.branch_id={branch}""", token);
         Audit("appointments.run_assigned", visitId, branch); await db.SaveChangesAsync(token); await transaction.CommitAsync(token); return NoContent();
+        });
     }
 
     [HttpGet("breaks"), Authorize(Roles = "Administrator,CareManager,CareCoordinator")]
@@ -181,18 +193,24 @@ public sealed class AppointmentConfigurationController(CareDbContext db, ITenant
         var assigned = AppointmentWorkflow.AssignedVisitIds(db, tenant.OrganizationId, request.BranchId, request.CareWorkerId);
         var overlap = (await db.Visits.AsNoTracking().Where(x => x.OrganizationId == tenant.OrganizationId && x.BranchId == request.BranchId && (x.CareWorkerId == request.CareWorkerId || assigned.Contains(x.Id)) && x.Status != VisitStatus.Cancelled && x.StartsAt < request.EndsAt).ToListAsync(token)).Any(x => x.StartsAt.AddMinutes(x.DurationMinutes) > request.StartsAt);
         if (overlap || AppointmentConfigurationStore.HasBreak(db, tenant.OrganizationId, request.BranchId, request.CareWorkerId, request.StartsAt, (int)(request.EndsAt-request.StartsAt).TotalMinutes)) return Conflict(new { message = "Break overlaps a visit or another break." });
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async () =>
+        {
         await using var transaction = await db.Database.BeginTransactionAsync(token);
         var id = Guid.NewGuid(); await db.Database.ExecuteSqlInterpolatedAsync($"""insert into appointment_breaks(id,organization_id,branch_id,care_worker_id,starts_at,ends_at,note,created_by) values({id},{tenant.OrganizationId},{request.BranchId},{request.CareWorkerId},{request.StartsAt},{request.EndsAt},{request.Note ?? ""},{user.UserName})""", token);
         Audit("appointments.break_created", id, request.BranchId); await db.SaveChangesAsync(token); await transaction.CommitAsync(token); return Created($"/api/phase1/admin/appointment-configuration/breaks/{id}", new { id });
+        });
     }
     [HttpDelete("breaks/{id:guid}"), Authorize(Roles = "Administrator,CareManager,CareCoordinator")]
     public async Task<IActionResult> CancelBreak(Guid id, CancellationToken token)
     {
         var branch = await db.Database.SqlQuery<Guid>($"""select branch_id as "Value" from appointment_breaks where id={id} and organization_id={tenant.OrganizationId} and cancelled_at is null""").SingleOrDefaultAsync(token);
         if (branch == Guid.Empty || !BranchAllowed(branch)) return NotFound();
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async () =>
+        {
         await using var transaction = await db.Database.BeginTransactionAsync(token);
         await db.Database.ExecuteSqlInterpolatedAsync($"""update appointment_breaks set cancelled_at=now() where id={id} and organization_id={tenant.OrganizationId} and branch_id={branch}""", token);
         Audit("appointments.break_cancelled", id, branch); await db.SaveChangesAsync(token); await transaction.CommitAsync(token); return NoContent();
+        });
     }
 
     [HttpPost("recommendations"), Authorize(Roles = "Administrator,CareManager,CareCoordinator")]

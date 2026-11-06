@@ -38,7 +38,7 @@ public sealed class AppointmentConfigurationAcceptanceRegressionTests(PostgresRe
             configuration=new{
                 rules=new{maxWorkerVisitsPerDay=cap,warnWorkerVisitsPerDay=0,warnShortNoticeHours=0},
                 appearance=new{label="Acceptance visit",colour="#2563eb",warnUnassigned=true,warnConflicts=true},
-                breaksEnabled=false,
+                breaksEnabled=true,
                 monitoring=new{lateMinutes=15,missedMinutes=30,shortenedMinutes=15,deviceOptions=new[]{"Mobile app","Manual entry"}},
                 weights=new{availability=40,skills=30,continuity=20,workload=10}
             }
@@ -78,6 +78,24 @@ public sealed class AppointmentConfigurationAcceptanceRegressionTests(PostgresRe
         var audits=await db.AuditEvents.AsNoTracking().Where(a=>a.EntityId==branch&&a.Action=="appointments.configuration_updated").ToListAsync();
         Assert.Equal(rejectAudit?1:2,audits.Count);
         Assert.All(audits,a=>{Assert.Equal(actor,a.Actor);Assert.Equal(branch,a.BranchId);});
+        if (!rejectAudit)
+        {
+            var preset=Guid.NewGuid(); var run=Guid.NewGuid();
+            var presetSave=await client.PutAsJsonAsync($"{path}/presets/{preset}",new{branchId=branch,name="Synthetic preset",visitType="Care",durationMinutes=30,requiredSkills="",active=true});
+            Assert.True(presetSave.StatusCode==HttpStatusCode.NoContent,await presetSave.Content.ReadAsStringAsync());
+            var runSave=await client.PutAsJsonAsync($"{path}/runs/{run}",new{branchId=branch,name="Synthetic run",active=true});
+            Assert.True(runSave.StatusCode==HttpStatusCode.NoContent,await runSave.Content.ReadAsStringAsync());
+            var visitId=await db.Visits.Where(v=>v.ServiceUserId==person).OrderBy(v=>v.StartsAt).Select(v=>v.Id).FirstAsync();
+            var assigned=await client.PutAsJsonAsync($"{path}/visits/{visitId}/run",new{runId=run});
+            Assert.True(assigned.StatusCode==HttpStatusCode.NoContent,await assigned.Content.ReadAsStringAsync());
+            var breakSave=await client.PostAsJsonAsync(path+"/breaks",new{branchId=branch,careWorkerId=worker,startsAt=starts.AddHours(5),endsAt=starts.AddHours(5.5),note="Synthetic break"});
+            Assert.True(breakSave.StatusCode==HttpStatusCode.Created,await breakSave.Content.ReadAsStringAsync());
+            var breakId=(await breakSave.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
+            var cancelled=await client.DeleteAsync($"{path}/breaks/{breakId}");
+            Assert.True(cancelled.StatusCode==HttpStatusCode.NoContent,await cancelled.Content.ReadAsStringAsync());
+            Assert.Equal(5,await db.AuditEvents.CountAsync(a=>a.Actor==actor&&
+                (a.Action=="appointments.preset_saved"||a.Action=="appointments.run_saved"||a.Action=="appointments.run_assigned"||a.Action=="appointments.break_created"||a.Action=="appointments.break_cancelled")));
+        }
     }
     private sealed record Login(string Token);
 }
