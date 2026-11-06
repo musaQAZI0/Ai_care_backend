@@ -20,15 +20,17 @@ public sealed class OrganizationProfileController(CareDbContext db, ITenantConte
     public async Task<IActionResult> Get(CancellationToken token)
     {
         var organization = await db.Organizations.AsNoTracking().SingleAsync(item => item.Id == tenant.OrganizationId, token);
-        await using var command = await Command("""
+        CompanyProfileRow? profile = null;
+        await using (var command = await Command("""
             select legal_name,display_name,address,business_phone,contact_email,logo_content_type,logo_bytes,updated_by,updated_at
             from organization_profiles where organization_id=@organization
-            """, token);
-        await using var reader = await command.ExecuteReaderAsync(token);
-        CompanyProfileRow? profile = null;
-        if (await reader.ReadAsync(token))
-            profile = new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : (byte[])reader[6], reader.GetString(7), reader.GetFieldValue<DateTimeOffset>(8));
+            """, token))
+        await using (var reader = await command.ExecuteReaderAsync(token))
+        {
+            if (await reader.ReadAsync(token))
+                profile = new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : (byte[])reader[6], reader.GetString(7), reader.GetFieldValue<DateTimeOffset>(8));
+        }
 
         var branches = await db.Branches.AsNoTracking()
             .Where(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || item.Id == tenant.BranchId))
