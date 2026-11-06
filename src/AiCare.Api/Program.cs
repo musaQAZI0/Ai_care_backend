@@ -1367,6 +1367,9 @@ phase1.MapPut("/visits/recurring-series/{id:guid}", async (Guid id, EditRecurrin
     if (ids.Count == 0) return Results.Conflict(new { message = "This series has no future scheduled visits to edit." });
     var visits = await context.Visits.AsNoTracking().Where(visit => ids.Contains(visit.Id)).ToListAsync(cancellationToken);
     var changes = new List<(Visit Previous, Guid[] Additional, DateTimeOffset StartsAt)>();
+    var maxStartChange = await context.Database.SqlQuery<int>($"""
+        select coalesce(max_change_minutes,0) as "Value" from appointment_start_variance_settings where organization_id={tenant.OrganizationId}
+        """).SingleOrDefaultAsync(cancellationToken);
     foreach (var visit in visits)
     {
         var startsAt = visit.StartsAt;
@@ -1377,6 +1380,8 @@ phase1.MapPut("/visits/recurring-series/{id:guid}", async (Guid id, EditRecurrin
                 return Error($"{localDate:yyyy-MM-dd} at {request.StartTime} does not exist in UK time because the clocks change.");
             if (startsAt <= DateTimeOffset.UtcNow) return Error("All edited visits must remain in the future.");
         }
+        if (maxStartChange > 0 && Math.Abs((startsAt - visit.StartsAt).TotalMinutes) > maxStartChange)
+            return Error($"The new start is more than {maxStartChange} minutes from the scheduled start. Adjust the series or ask an administrator to change the appointment variance setting.");
         var additional = request.AdditionalCareWorkerIds?.Distinct().ToArray() ?? await context.Database.SqlQuery<Guid>($"""
             select care_worker_id as "Value" from visit_care_worker_assignments
             where visit_id={visit.Id} and organization_id={tenant.OrganizationId}
