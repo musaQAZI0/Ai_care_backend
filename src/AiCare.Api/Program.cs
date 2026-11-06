@@ -1998,8 +1998,10 @@ phase1.MapPost("/mar/{id:guid}/missed", (Guid id, CompleteMedicationAdministrati
     CompleteMedicationAdministration(id, "Missed", request, context, tenant, currentUser, configuration));
 phase1.MapPost("/mar/{id:guid}/held", (Guid id, CompleteMedicationAdministrationRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IConfiguration configuration) =>
     CompleteMedicationAdministration(id, "Held", request, context, tenant, currentUser, configuration));
-phase1.MapGet("/care-notes", (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapGet("/care-notes", async (ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (denied is not null) return denied;
     if (!currentUser.IsCareWorker)
     {
         return Results.Ok(repository.GetCareNotes());
@@ -2015,15 +2017,28 @@ phase1.MapGet("/care-notes", (ICareRepository repository, CareDbContext context,
         .AsEnumerable()
         .Where(note => TenantVisible(tenant, note.OrganizationId, note.BranchId))
         .ToList();
-    return Results.Ok(notes);
+    var visible = new List<CareNote>();
+    var visitAccess = new Dictionary<Guid, bool>();
+    foreach (var note in notes)
+    {
+        if (!visitAccess.TryGetValue(note.VisitId, out var canRead))
+            visitAccess[note.VisitId] = canRead = await authorization.CanOperateVisitAsync(note.VisitId);
+        if (canRead) visible.Add(note);
+    }
+    return Results.Ok(visible);
 });
-phase1.MapGet("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant) =>
+phase1.MapGet("/care-notes/{id:guid}", async (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
 {
+    var denied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (denied is not null) return denied;
     var note = context.CareNotes.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    return note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId) ? Results.NotFound() : Results.Ok(note);
+    if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
+    return await authorization.CanOperateVisitAsync(note.VisitId) ? Results.Ok(note) : Results.NotFound();
 });
 phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
     if (request.VisitId == Guid.Empty || request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || Missing(request.Summary))
     {
         return Error("Visit, service user, care worker, and summary are required.");
@@ -2040,6 +2055,14 @@ phase1.MapPost("/care-notes", (CreateCareNoteRequest request, ICareRepository re
 });
 phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
+    var note = context.CareNotes.Find(id);
+    if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
+    var sourceDenied = RequireAssignedVisitForCareWorker(note.VisitId, context, tenant, currentUser);
+    if (sourceDenied is not null) return sourceDenied;
+    if (note.VisitId != request.VisitId || note.ServiceUserId != request.ServiceUserId || note.CareWorkerId != request.CareWorkerId)
+        return Results.Conflict(new { message = "A care note cannot be moved to a different visit, person or author. Use the governed amendment workflow." });
     if (request.VisitId == Guid.Empty || request.ServiceUserId == Guid.Empty || request.CareWorkerId == Guid.Empty || Missing(request.Summary))
     {
         return Error("Visit, service user, care worker, and summary are required.");
@@ -2048,16 +2071,8 @@ phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, 
     var validation = ValidateCareNoteReferences(request.VisitId, request.ServiceUserId, request.CareWorkerId, context, tenant);
     if (validation is not null) return validation;
 
-    var denied = RequireAssignedVisitForCareWorker(request.VisitId, context, tenant, currentUser);
-    if (denied is not null) return denied;
-
-    var note = context.CareNotes.Find(id);
-    if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
     var updated = note with
     {
-        VisitId = request.VisitId,
-        ServiceUserId = request.ServiceUserId,
-        CareWorkerId = request.CareWorkerId,
         Summary = request.Summary,
         PersonalCare = request.PersonalCare,
         MealsAndHydration = request.MealsAndHydration,
@@ -2072,6 +2087,8 @@ phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, 
 });
 phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
 {
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
     var note = context.CareNotes.Find(id);
     if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
     var denied = RequireAssignedVisitForCareWorker(note.VisitId, context, tenant, currentUser);
