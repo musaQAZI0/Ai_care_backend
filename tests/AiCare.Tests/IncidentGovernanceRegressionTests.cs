@@ -53,6 +53,17 @@ public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory 
         Assert.Equal("Closed", workspace!.Incident.Status);
         Assert.Single(workspace.Actions);
         Assert.True(workspace.History.Length >= 3);
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.PutAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/investigation", investigation)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/actions", new { actionType="Preventive",detail="Attempted closed-case change",owner="Manager",dueAt=DateTimeOffset.UtcNow.AddDays(3) })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/actions/{actionId}/complete", new { completionEvidence="Attempted overwrite" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/close", new { closureSummary="Duplicate closure" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.PutAsJsonAsync($"/api/phase1/incidents/{incidentId}", new {
+            serviceUserId=RegressionIds.ServiceUserId,visitId=(Guid?)null,category="Fall",severity="Low",description="Attempted legacy overwrite"
+        })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.DeleteAsync($"/api/phase1/incidents/{incidentId}")).StatusCode);
+        var retained=await admin.GetFromJsonAsync<WorkspaceResponse>($"/api/phase1/incident-governance/incidents/{incidentId}");
+        Assert.Equal("Closed",retained!.Incident.Status);
+        Assert.Equal(workspace.History.Length,retained.History.Length);
     }
 
     private sealed record LoginResponse(string Token);

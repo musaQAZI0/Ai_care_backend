@@ -2182,6 +2182,7 @@ phase1.MapPut("/incidents/{id:guid}", (Guid id, CreateIncidentRequest request, I
     if (roleDenied is not null) return roleDenied;
     var incidentToUpdate = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
     if (incidentToUpdate is null || !tenant.CanAccess(incidentToUpdate.OrganizationId, incidentToUpdate.BranchId)) return Results.NotFound();
+    if (incidentToUpdate.Status == "Closed") return Results.Conflict(new { message = "Closed incidents cannot be changed through the legacy route." });
     var sourceDenied = RequireIncidentAccessForCareWorker(new CreateIncidentRequest(incidentToUpdate.ServiceUserId, incidentToUpdate.VisitId,
         incidentToUpdate.Category, incidentToUpdate.Severity, incidentToUpdate.Description), context, tenant, currentUser);
     if (sourceDenied is not null) return sourceDenied;
@@ -2200,6 +2201,7 @@ phase1.MapDelete("/incidents/{id:guid}", (Guid id, ICareRepository repository, C
     if (roleDenied is not null) return roleDenied;
     var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
     if (incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId)) return Results.NotFound();
+    if (incident.Status == "Closed") return Results.Conflict(new { message = "Closed incidents cannot be withdrawn through the legacy route." });
 
     if (incident.VisitId is null && currentUser.IsCareWorker)
     {
