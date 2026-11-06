@@ -220,7 +220,8 @@ public sealed class CareTasksController : ControllerBase
     private bool CanAccessVisit(Visit visit)
     {
         if (_currentUser.IsAdministrator || _currentUser.IsCareManager || _currentUser.IsCareCoordinator) return true;
-        return _currentUser.IsCareWorker && _currentUser.CareWorkerId == visit.CareWorkerId;
+        return _currentUser.IsCareWorker && _currentUser.CareWorkerId == visit.CareWorkerId
+            && PublishedRotaAccess.IsVisibleToWorker(_context, _tenant, visit, _currentUser.CareWorkerId.Value);
     }
 
     private bool CanCompleteVisit(Visit visit) => CanAccessVisit(visit) && (!_currentUser.IsCareWorker || _currentUser.CareWorkerId == visit.CareWorkerId);
