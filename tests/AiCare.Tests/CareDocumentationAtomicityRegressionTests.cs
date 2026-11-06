@@ -96,34 +96,101 @@ public sealed class CareDocumentationAtomicityRegressionTests(PostgresRegression
         Assert.Equal(2, await db.AuditEvents.CountAsync(a => a.Actor == data.Actor && a.Action == "care_note.amended"));
     }
 
+    [Theory]
+    [InlineData("success")]
+    [InlineData("threshold-failure")]
+    [InlineData("observation-audit-failure")]
+    [InlineData("location-audit-failure")]
+    public async Task DeliveryEvidenceAndRequiredAlertsCommitTogether(string mode)
+    {
+        var data = await Setup();
+        using var client = await Client(data.Actor);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            insert into observation_thresholds(id,organization_id,branch_id,observation_type,maximum_value,severity,instructions)
+            values({Guid.NewGuid()},{TenantDefaults.OrganizationId},{data.Branch},{"Temperature"},{38m},{"High"},{"Contact the manager"})
+            """);
+        var constraint = "ck_delivery_" + Guid.NewGuid().ToString("N");
+        var thresholdFailure = mode == "threshold-failure";
+        var location = mode == "location-audit-failure";
+        var failing = mode != "success";
+        var table = thresholdFailure ? "deterioration_alerts" : "\"AuditEvents\"";
+        if (failing)
+        {
+            if (thresholdFailure)
+                await db.Database.ExecuteSqlRawAsync($"""
+                    ALTER TABLE deterioration_alerts ADD CONSTRAINT "{constraint}"
+                    CHECK (visit_id<>'{data.Visit:D}'::uuid OR observation_id IS NULL)
+                    """);
+            else
+            {
+                var action = location ? "visit.location_evidence" : "visit.observation_recorded";
+                await db.Database.ExecuteSqlRawAsync($"""
+                    ALTER TABLE "AuditEvents" ADD CONSTRAINT "{constraint}"
+                    CHECK ("Actor"<>'{data.Actor}' OR "Action"<>'{action}')
+                    """);
+            }
+        }
+        try
+        {
+            var response = location
+                ? await client.PostAsJsonAsync($"/api/phase1/visits/{data.Visit}/delivery/location", new {
+                    eventType = "Evidence", latitude = 51.5m, longitude = -0.1m, accuracyMeters = 5m,
+                    capturedAt = DateTimeOffset.UtcNow, source = "Synthetic regression", notes = "Rollback check"
+                })
+                : await client.PostAsJsonAsync($"/api/phase1/visits/{data.Visit}/delivery/observations", new {
+                    observationType = "Temperature", value = "39.2", unit = "C", notes = "Synthetic threshold check", recordedAt = (DateTimeOffset?)null
+                });
+            Assert.Equal(failing ? HttpStatusCode.InternalServerError : HttpStatusCode.Created, response.StatusCode);
+        }
+        finally
+        {
+            if (failing)
+                await db.Database.ExecuteSqlRawAsync($"""
+                    ALTER TABLE {table} DROP CONSTRAINT "{constraint}"
+                    """);
+        }
+        Assert.Equal(failing ? 0 : 1, await db.HealthObservations.CountAsync(o => o.VisitId == data.Visit));
+        Assert.Equal(failing ? 0 : 1, await db.Database.SqlQuery<int>($"""
+            select count(*)::integer as "Value" from deterioration_alerts where visit_id={data.Visit} and observation_id is not null
+            """).SingleAsync());
+        Assert.Equal(0, await db.Database.SqlQuery<int>($"""
+            select count(*)::integer as "Value" from visit_location_events where visit_id={data.Visit}
+            """).SingleAsync());
+        Assert.Equal(failing ? 0 : 1, await db.AuditEvents.CountAsync(a => a.Actor == data.Actor &&
+            (a.Action == "visit.observation_recorded" || a.Action == "visit.location_evidence")));
+    }
+
     private const string Root = "/api/phase1/care-documentation";
     private static object Amendment(string summary) => new {
         reason = "Fictional correction with source evidence", summary, personalCare = "Care", mealsAndHydration = "Fluids",
         medication = "None", concerns = "Follow up", requiresReview = true
     };
 
-    private async Task<(Guid Note, Guid Alert, string Actor)> Setup()
+    private async Task<(Guid Note, Guid Alert, string Actor, Guid Visit, Guid Branch)> Setup()
     {
         await factory.EnsureClinicalSeedAsync();
-        var person = Guid.NewGuid(); var worker = Guid.NewGuid(); var visit = Guid.NewGuid();
+        var person = Guid.NewGuid(); var worker = Guid.NewGuid(); var visit = Guid.NewGuid(); var branch = Guid.NewGuid();
         var note = Guid.NewGuid(); var alert = Guid.NewGuid(); var actor = $"documentation.atomic.{Guid.NewGuid():N}";
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+        db.Branches.Add(new Branch(branch,TenantDefaults.OrganizationId,"Atomic documentation branch","Test","Active"));
         db.ServiceUsers.Add(new ServiceUser(person, "Fictional atomic documentation person", new DateOnly(1950, 1, 1), "1", "Care", "Contact", "",
-            RiskLevel.Low, "Active", "Address", "None", "None", "Private", "", "", "Independent", "Independent", "Verbal", "Routine", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
-        db.CareWorkers.Add(new CareWorker(worker, "Documentation worker", "Care", "Flexible", 0, 0, "Valid", "Compliant", "Local", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            RiskLevel.Low, "Active", "Address", "None", "None", "Private", "", "", "Independent", "Independent", "Verbal", "Routine", "Standard", TenantDefaults.OrganizationId, branch));
+        db.CareWorkers.Add(new CareWorker(worker, "Documentation worker", "Care", "Flexible", 0, 0, "Valid", "Compliant", "Local", TenantDefaults.OrganizationId, branch));
         db.Visits.Add(new Visit(visit, person, worker, DateTimeOffset.UtcNow, "Documentation", 30, "Care", VisitStatus.Scheduled,
-            null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            null, null, null, null, null, null, TenantDefaults.OrganizationId, branch));
         db.CareNotes.Add(new CareNote(note, visit, person, worker, "Original note", "Care", "Fluids", "None", "Concern", true,
-            DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, branch));
         db.AppUsers.Add(new AppUser(Guid.NewGuid(), actor, actor + "@test.invalid", PasswordHasher.HashPassword("Admin123!"),
-            UserRole.CareManager, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            UserRole.CareManager, true, TenantDefaults.OrganizationId, branch));
         await db.SaveChangesAsync();
         await db.Database.ExecuteSqlInterpolatedAsync($"""
             insert into deterioration_alerts(id,visit_id,service_user_id,organization_id,branch_id,alert_type,severity,detail)
-            values({alert},{visit},{person},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{"Atomic regression"},{"High"},{"Fictional concern"})
+            values({alert},{visit},{person},{TenantDefaults.OrganizationId},{branch},{"Atomic regression"},{"High"},{"Fictional concern"})
             """);
-        return (note, alert, actor);
+        return (note, alert, actor, visit, branch);
     }
 
     private async Task<HttpClient> Client(string actor)

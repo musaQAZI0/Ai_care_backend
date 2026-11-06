@@ -6,6 +6,7 @@ using AiCare.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AiCare.Api;
 
@@ -28,6 +29,7 @@ public sealed class VisitDeliveryController : ControllerBase
     }
 
     [HttpPost("location")]
+    [TransactionalAction]
     public async Task<IActionResult> RecordLocation(Guid visitId, RecordVisitLocationRequest request, CancellationToken cancellationToken)
     {
         var visit = await FindVisit(visitId, cancellationToken);
@@ -81,6 +83,7 @@ public sealed class VisitDeliveryController : ControllerBase
     }
 
     [HttpPost("observations")]
+    [TransactionalAction]
     public async Task<IActionResult> RecordObservation(Guid visitId, CreateStructuredObservationRequest request, CancellationToken cancellationToken)
     {
         var visit = await FindVisit(visitId, cancellationToken);
@@ -107,8 +110,8 @@ public sealed class VisitDeliveryController : ControllerBase
     {
         if (!decimal.TryParse(observation.Value, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var value)) return;
         var connection=_context.Database.GetDbConnection();var opened=connection.State!=ConnectionState.Open;if(opened)await connection.OpenAsync(cancellationToken);
-        try{await using var command=connection.CreateCommand();command.CommandText="select minimum_value,maximum_value,severity,instructions from observation_thresholds where organization_id=@organization and branch_id=@branch and lower(observation_type)=lower(@type) and active=true";Add(command,"organization",visit.OrganizationId);Add(command,"branch",visit.BranchId);Add(command,"type",observation.ObservationType);await using var reader=await command.ExecuteReaderAsync(cancellationToken);if(!await reader.ReadAsync(cancellationToken))return;decimal? min=reader.IsDBNull(0)?null:reader.GetDecimal(0);decimal? max=reader.IsDBNull(1)?null:reader.GetDecimal(1);var severity=reader.GetString(2);var instructions=reader.GetString(3);if((min is null||value>=min)&&(max is null||value<=max))return;await reader.DisposeAsync();await using var insert=connection.CreateCommand();insert.CommandText="insert into deterioration_alerts(id,observation_id,visit_id,service_user_id,organization_id,branch_id,alert_type,severity,detail,immediate_action,status) values(@id,@observation,@visit,@person,@organization,@branch,@type,@severity,@detail,@instructions,'Open')";Add(insert,"id",Guid.NewGuid());Add(insert,"observation",observation.Id);Add(insert,"visit",visit.Id);Add(insert,"person",visit.ServiceUserId);Add(insert,"organization",visit.OrganizationId);Add(insert,"branch",visit.BranchId);Add(insert,"type",observation.ObservationType);Add(insert,"severity",severity);Add(insert,"detail",$"{observation.ObservationType} value {observation.Value} {observation.Unit} is outside the configured range.");Add(insert,"instructions",instructions);await insert.ExecuteNonQueryAsync(cancellationToken);}
-        catch(DbException){return;}finally{if(opened)await connection.CloseAsync();}
+        try{await using var command=connection.CreateCommand();command.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction();command.CommandText="select minimum_value,maximum_value,severity,instructions from observation_thresholds where organization_id=@organization and branch_id=@branch and lower(observation_type)=lower(@type) and active=true";Add(command,"organization",visit.OrganizationId);Add(command,"branch",visit.BranchId);Add(command,"type",observation.ObservationType);await using var reader=await command.ExecuteReaderAsync(cancellationToken);if(!await reader.ReadAsync(cancellationToken))return;decimal? min=reader.IsDBNull(0)?null:reader.GetDecimal(0);decimal? max=reader.IsDBNull(1)?null:reader.GetDecimal(1);var severity=reader.GetString(2);var instructions=reader.GetString(3);if((min is null||value>=min)&&(max is null||value<=max))return;await reader.DisposeAsync();await using var insert=connection.CreateCommand();insert.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction();insert.CommandText="insert into deterioration_alerts(id,observation_id,visit_id,service_user_id,organization_id,branch_id,alert_type,severity,detail,immediate_action,status) values(@id,@observation,@visit,@person,@organization,@branch,@type,@severity,@detail,@instructions,'Open')";Add(insert,"id",Guid.NewGuid());Add(insert,"observation",observation.Id);Add(insert,"visit",visit.Id);Add(insert,"person",visit.ServiceUserId);Add(insert,"organization",visit.OrganizationId);Add(insert,"branch",visit.BranchId);Add(insert,"type",observation.ObservationType);Add(insert,"severity",severity);Add(insert,"detail",$"{observation.ObservationType} value {observation.Value} {observation.Unit} is outside the configured range.");Add(insert,"instructions",instructions);await insert.ExecuteNonQueryAsync(cancellationToken);}
+        finally{if(opened)await connection.CloseAsync();}
     }
 
     private async Task<Visit?> FindVisit(Guid id, CancellationToken cancellationToken)
@@ -137,7 +140,7 @@ public sealed class VisitDeliveryController : ControllerBase
     private async Task Execute(string sql, Action<DbCommand> bind, CancellationToken cancellationToken)
     {
         var connection=_context.Database.GetDbConnection(); var opened=connection.State!=ConnectionState.Open; if(opened) await connection.OpenAsync(cancellationToken);
-        try { await using var command=connection.CreateCommand(); command.CommandText=sql; bind(command); await command.ExecuteNonQueryAsync(cancellationToken); }
+        try { await using var command=connection.CreateCommand(); command.Transaction=_context.Database.CurrentTransaction?.GetDbTransaction(); command.CommandText=sql; bind(command); await command.ExecuteNonQueryAsync(cancellationToken); }
         finally { if(opened) await connection.CloseAsync(); }
     }
 
