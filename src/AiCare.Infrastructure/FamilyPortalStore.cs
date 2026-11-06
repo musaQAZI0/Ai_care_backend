@@ -223,6 +223,20 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
 
     public async Task SetAccessStatusAsync(Guid organizationId, Guid actorUserId, string actorName, Guid familyMemberId, string status, CancellationToken cancellationToken)
     {
+        var strategy = _db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+            await _db.Database.ExecuteSqlInterpolatedAsync($"select id from family_access_grants where organization_id={organizationId} and family_member_id={familyMemberId} for update", cancellationToken);
+            await SetAccessStatusCore(organizationId, actorUserId, actorName, familyMemberId, status, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        });
+    }
+
+    private async Task SetAccessStatusCore(Guid organizationId, Guid actorUserId, string actorName, Guid familyMemberId, string status, CancellationToken cancellationToken)
+    {
+        var member = await _db.FamilyMembers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == familyMemberId && x.OrganizationId == organizationId, cancellationToken)
+            ?? throw new InvalidOperationException("Family member was not found.");
         var grant = await ReadGrantAsync(organizationId, familyMemberId, cancellationToken)
             ?? throw new InvalidOperationException("Family access was not found.");
         if (status == "Active" && !string.Equals(grant.VerificationStatus, "Verified", StringComparison.OrdinalIgnoreCase))
@@ -243,7 +257,7 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
         if (user is not null)
             _db.Entry(user).CurrentValues.SetValues(user with { IsActive = status == "Active" });
 
-        AddAudit(organizationId, null, actorName, $"family.access_{status.ToLowerInvariant()}", "FamilyMember", familyMemberId);
+        AddAudit(organizationId, member.BranchId, actorName, $"family.access_{status.ToLowerInvariant()}", "FamilyMember", familyMemberId);
         await _db.SaveChangesAsync(cancellationToken);
     }
 
