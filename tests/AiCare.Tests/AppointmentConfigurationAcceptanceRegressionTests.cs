@@ -33,8 +33,19 @@ public sealed class AppointmentConfigurationAcceptanceRegressionTests(PostgresRe
         login.EnsureSuccessStatusCode();
         client.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",(await login.Content.ReadFromJsonAsync<Login>())!.Token);
         const string path="/api/phase1/admin/appointment-configuration";
-        object Config(int cap)=>new{branchId=branch,configuration=new{rules=new{maxWorkerVisitsPerDay=cap}}};
-        Assert.Equal(HttpStatusCode.NoContent,(await client.PutAsJsonAsync(path,Config(1))).StatusCode);
+        object Config(int cap)=>new{
+            branchId=branch,
+            configuration=new{
+                rules=new{maxWorkerVisitsPerDay=cap,warnWorkerVisitsPerDay=0,warnShortNoticeHours=0},
+                appearance=new{label="Acceptance visit",colour="#2563eb",warnUnassigned=true,warnConflicts=true},
+                breaksEnabled=false,
+                monitoring=new{lateMinutes=15,missedMinutes=30,shortenedMinutes=15,deviceOptions=new[]{"Mobile app","Manual entry"}},
+                weights=new{availability=40,skills=30,continuity=20,workload=10}
+            }
+        };
+        var initialSave=await client.PutAsJsonAsync(path,Config(1));
+        Assert.True(initialSave.StatusCode==HttpStatusCode.NoContent,
+            $"Initial configuration save returned {(int)initialSave.StatusCode}: {await initialSave.Content.ReadAsStringAsync()}");
         var starts=new DateTimeOffset(DateTime.UtcNow.Date.AddDays(70).AddHours(10),TimeSpan.Zero);
         object Visit(DateTimeOffset at)=>new{serviceUserId=person,careWorkerId=worker,startsAt=at,visitType="Configuration acceptance",durationMinutes=30,requiredSkills=""};
         Assert.Equal(HttpStatusCode.Created,(await client.PostAsJsonAsync("/api/phase1/visits",Visit(starts))).StatusCode);
@@ -47,7 +58,10 @@ public sealed class AppointmentConfigurationAcceptanceRegressionTests(PostgresRe
                 """);
         try
         {
-            Assert.Equal(rejectAudit?HttpStatusCode.InternalServerError:HttpStatusCode.NoContent,(await client.PutAsJsonAsync(path,Config(2))).StatusCode);
+            var update=await client.PutAsJsonAsync(path,Config(2));
+            var expected=rejectAudit?HttpStatusCode.InternalServerError:HttpStatusCode.NoContent;
+            Assert.True(update.StatusCode==expected,
+                $"Configuration update expected {(int)expected}, returned {(int)update.StatusCode}: {await update.Content.ReadAsStringAsync()}");
         }
         finally
         {
