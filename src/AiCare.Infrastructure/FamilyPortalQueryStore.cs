@@ -45,13 +45,18 @@ public sealed class FamilyPortalQueryStore(CareDbContext db) : IFamilyPortalQuer
             items.AddRange(visits.Select(x => new FamilyTimelineItem("Visit", x.VisitType, x.Status, x.StartsAt)));
         }
 
-        var notes = await db.CareNotes.AsNoTracking()
-            .Where(x => x.OrganizationId == organizationId && x.ServiceUserId == serviceUserId)
-            .OrderByDescending(x => x.CreatedAt)
-            .Take(30)
-            .Select(x => new FamilyTimelineItem("Care note", x.Summary, "Care update", x.CreatedAt))
-            .ToListAsync(cancellationToken);
-        items.AddRange(notes);
+        // Timeline permission is not approval to disclose free-text staff notes.
+        // Show only a generic event when care-summary access is also granted.
+        if (permissions.Contains(FamilyPermissions.ViewCareSummary))
+        {
+            var notes = await db.CareNotes.AsNoTracking()
+                .Where(x => x.OrganizationId == organizationId && x.ServiceUserId == serviceUserId)
+                .OrderByDescending(x => x.CreatedAt)
+                .Take(30)
+                .Select(x => new FamilyTimelineItem("Care note", "Care update recorded", "Care update", x.CreatedAt))
+                .ToListAsync(cancellationToken);
+            items.AddRange(notes);
+        }
 
         if (permissions.Contains(FamilyPermissions.ViewIncidentSummary))
         {
@@ -73,7 +78,8 @@ public sealed class FamilyPortalQueryStore(CareDbContext db) : IFamilyPortalQuer
         if (permissions.Contains(FamilyPermissions.ViewCarePlan))
         {
             var plans = await db.CarePlans.AsNoTracking()
-                .Where(x => x.OrganizationId == organizationId && x.ServiceUserId == serviceUserId)
+                .Where(x => x.OrganizationId == organizationId && x.ServiceUserId == serviceUserId
+                    && (x.Status == "Approved" || x.Status == "Signed" || x.Status == "Active"))
                 .OrderByDescending(x => x.ReviewDueAt)
                 .Take(10)
                 .Select(x => new FamilyTimelineItem("Care plan", x.Version, x.Status, x.ReviewDueAt))

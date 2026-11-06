@@ -144,6 +144,44 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
         var wrongOverview = await family.GetAsync($"/api/family/service-users/{Guid.NewGuid()}/overview");
         Assert.Equal(HttpStatusCode.Forbidden, wrongOverview.StatusCode);
 
+        var staffOnlyText=$"Staff-only narrative {Guid.NewGuid():N}";
+        var internalIncidentText=$"Internal incident narrative {Guid.NewGuid():N}";
+        using(var disclosureScope=_factory.Services.CreateScope())
+        {
+            var db=disclosureScope.ServiceProvider.GetRequiredService<CareDbContext>();
+            var worker=Guid.NewGuid(); var visit=Guid.NewGuid();
+            db.CareWorkers.Add(new(worker,"Fictional disclosure worker","Care","Flexible",0,0,"Valid","Compliant","Local",TenantDefaults.OrganizationId,TenantDefaults.BranchId));
+            db.Visits.Add(new(visit,seed.PersonId,worker,DateTimeOffset.UtcNow.AddDays(-2),"Fictional disclosure visit",30,"Care",VisitStatus.Completed,
+                null,null,null,null,null,null,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
+            db.CareNotes.Add(new(Guid.NewGuid(),visit,seed.PersonId,worker,staffOnlyText,staffOnlyText,staffOnlyText,staffOnlyText,staffOnlyText,true,DateTimeOffset.UtcNow,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
+            db.Incidents.Add(new(Guid.NewGuid(),seed.PersonId,visit,"Safeguarding concern","High",internalIncidentText,"Reported",DateTimeOffset.UtcNow,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+        }
+        var draft=await admin.PostAsJsonAsync("/api/phase1/care-plans",new{
+            serviceUserId=seed.PersonId,personalCare="Internal draft",medicationSupport="Prompts",mobilityAndTransfers="Support",nutrition="Meals",reviewDueAt=DateTimeOffset.UtcNow.AddMonths(3)
+        });
+        Assert.Equal(HttpStatusCode.Created,draft.StatusCode);
+        var timelineUrl=$"/api/family/service-users/{seed.PersonId}/timeline";
+        var timelineText=await family.GetStringAsync(timelineUrl);
+        Assert.DoesNotContain(staffOnlyText,timelineText);
+        Assert.DoesNotContain(internalIncidentText,timelineText);
+        using(var timeline=JsonDocument.Parse(timelineText))
+        {
+            var rows=timeline.RootElement.EnumerateArray().ToArray();
+            Assert.Contains(rows,x=>x.GetProperty("type").GetString()=="Care note"&&x.GetProperty("title").GetString()=="Care update recorded");
+            Assert.DoesNotContain(rows,x=>x.GetProperty("type").GetString() is "Care plan" or "Incident");
+        }
+        var originalPermissions=configured.Permissions.ToArray();
+        configured=await ConfigureAccess(admin,seed.FamilyMemberId,configured.Revision,originalPermissions.Append("ViewIncidentSummary").ToArray());
+        timelineText=await family.GetStringAsync(timelineUrl);
+        Assert.DoesNotContain(internalIncidentText,timelineText);
+        using(var timeline=JsonDocument.Parse(timelineText))
+            Assert.Contains(timeline.RootElement.EnumerateArray(),x=>x.GetProperty("type").GetString()=="Incident");
+        configured=await ConfigureAccess(admin,seed.FamilyMemberId,configured.Revision,new[]{"ViewTimeline"});
+        using(var restricted=JsonDocument.Parse(await family.GetStringAsync(timelineUrl)))
+            Assert.DoesNotContain(restricted.RootElement.EnumerateArray(),x=>x.GetProperty("type").GetString()=="Care note");
+        configured=await ConfigureAccess(admin,seed.FamilyMemberId,configured.Revision,originalPermissions);
+
         var feedback = await family.PostAsJsonAsync("/api/family/feedback", new
         {
             serviceUserId = seed.PersonId,
@@ -155,6 +193,8 @@ public sealed class FamilyPortalProductionRegressionTests : IClassFixture<Postgr
         Assert.Equal(HttpStatusCode.Created, feedback.StatusCode);
 
         var plan = await CreateApprovedManagerSignedPlan(admin, seed.PersonId);
+        using(var approvedTimeline=JsonDocument.Parse(await family.GetStringAsync(timelineUrl)))
+            Assert.Contains(approvedTimeline.RootElement.EnumerateArray(),x=>x.GetProperty("type").GetString()=="Care plan");
         using (var permissionScope = _factory.Services.CreateScope())
         {
             var permissionService = permissionScope.ServiceProvider.GetRequiredService<IFamilyPortalService>();
