@@ -17,12 +17,14 @@ public sealed class VisitDeliveryController : ControllerBase
     private readonly CareDbContext _context;
     private readonly ITenantContext _tenant;
     private readonly ICurrentUserContext _currentUser;
+    private readonly IContextualAuthorization _authorization;
 
-    public VisitDeliveryController(CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser)
+    public VisitDeliveryController(CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, IContextualAuthorization authorization)
     {
         _context = context;
         _tenant = tenant;
         _currentUser = currentUser;
+        _authorization = authorization;
     }
 
     [HttpPost("location")]
@@ -30,7 +32,7 @@ public sealed class VisitDeliveryController : ControllerBase
     {
         var visit = await FindVisit(visitId, cancellationToken);
         if (visit is null) return NotFound();
-        if (!CanDeliver(visit)) return Forbid();
+        if (!await _authorization.CanOperateVisitAsync(visit.Id, cancellationToken)) return Forbid();
         if (request.Latitude is < -90 or > 90 || request.Longitude is < -180 or > 180)
             return BadRequest(new { message = "Coordinates are invalid." });
         if (request.AccuracyMeters is < 0) return BadRequest(new { message = "Location accuracy cannot be negative." });
@@ -61,7 +63,7 @@ public sealed class VisitDeliveryController : ControllerBase
     {
         var visit = await FindVisit(visitId, cancellationToken);
         if (visit is null) return NotFound();
-        if (!CanView(visit)) return Forbid();
+        if (!await _authorization.CanOperateVisitAsync(visit.Id, cancellationToken)) return Forbid();
         return Ok(await QueryLocations(visitId, cancellationToken));
     }
 
@@ -70,7 +72,7 @@ public sealed class VisitDeliveryController : ControllerBase
     {
         var visit = await FindVisit(visitId, cancellationToken);
         if (visit is null) return NotFound();
-        if (!CanView(visit)) return Forbid();
+        if (!await _authorization.CanOperateVisitAsync(visit.Id, cancellationToken)) return Forbid();
         var observations = await _context.HealthObservations
             .Where(item => item.VisitId == visitId && item.OrganizationId == visit.OrganizationId)
             .OrderByDescending(item => item.RecordedAt)
@@ -83,7 +85,7 @@ public sealed class VisitDeliveryController : ControllerBase
     {
         var visit = await FindVisit(visitId, cancellationToken);
         if (visit is null) return NotFound();
-        if (!CanDeliver(visit)) return Forbid();
+        if (!await _authorization.CanOperateVisitAsync(visit.Id, cancellationToken)) return Forbid();
         if (string.IsNullOrWhiteSpace(request.ObservationType) || string.IsNullOrWhiteSpace(request.Value))
             return BadRequest(new { message = "Observation type and value are required." });
 
@@ -114,9 +116,6 @@ public sealed class VisitDeliveryController : ControllerBase
         var visit = await _context.Visits.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
         return visit is not null && _tenant.CanAccess(visit.OrganizationId, visit.BranchId) ? visit : null;
     }
-
-    private bool CanDeliver(Visit visit) => _currentUser.IsAdministrator || _currentUser.IsCareManager || _currentUser.IsCareCoordinator || (_currentUser.IsCareWorker && _currentUser.CareWorkerId == visit.CareWorkerId);
-    private bool CanView(Visit visit) => CanDeliver(visit);
 
     private async Task<List<VisitLocationResponse>> QueryLocations(Guid visitId, CancellationToken cancellationToken)
     {

@@ -44,6 +44,8 @@ public sealed class RotaPublicationRegressionTests(PostgresRegressionFactory fac
         Assert.DoesNotContain(visitId.ToString(), await worker.GetStringAsync("/api/phase1/visits"), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(visitId.ToString(), await additionalWorker.GetStringAsync("/api/phase1/visits"), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(HttpStatusCode.NotFound, (await worker.GetAsync($"/api/phase1/visits/{visitId}")).StatusCode);
+        await AssertDeliveryAccess(worker, visitId, false);
+        await AssertDeliveryAccess(additionalWorker, visitId, false);
         var first = await manager.PostAsJsonAsync("/api/phase1/rota-publications", new { branchId = TenantDefaults.BranchId, weekStart = monday });
         Assert.True(first.StatusCode == HttpStatusCode.Created, $"Publish returned {(int)first.StatusCode}: {await first.Content.ReadAsStringAsync()}\n{factory.LastServerException}");
         var firstId = (await first.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetGuid();
@@ -51,12 +53,16 @@ public sealed class RotaPublicationRegressionTests(PostgresRegressionFactory fac
         Assert.Contains(visitId.ToString(), await additionalWorker.GetStringAsync("/api/phase1/visits"), StringComparison.OrdinalIgnoreCase);
         Assert.Contains(personId.ToString(), await additionalWorker.GetStringAsync("/api/phase1/service-users"), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(HttpStatusCode.OK, (await worker.GetAsync($"/api/phase1/visits/{visitId}")).StatusCode);
+        await AssertDeliveryAccess(worker, visitId, true);
+        await AssertDeliveryAccess(additionalWorker, visitId, true);
         Assert.Contains(firstId.ToString(), await worker.GetStringAsync("/api/phase1/rota-publications/mine"), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(HttpStatusCode.NoContent, (await worker.PostAsync($"/api/phase1/rota-publications/{firstId}/acknowledge", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await worker.PostAsync($"/api/phase1/rota-publications/{firstId}/acknowledge", null)).StatusCode);
 
         var moved = await manager.PostAsJsonAsync($"/api/phase1/visits/{visitId}/move", new { expectedStartsAt = startsAt, startsAt = startsAt.AddMinutes(30) });
         Assert.Equal(HttpStatusCode.OK, moved.StatusCode);
+        await AssertDeliveryAccess(worker, visitId, false);
+        await AssertDeliveryAccess(additionalWorker, visitId, false);
         var summary = await manager.GetStringAsync("/api/phase1/rota-publications");
         Assert.Contains("\"needsRepublish\":true", summary, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(visitId.ToString(), await worker.GetStringAsync("/api/phase1/visits"), StringComparison.OrdinalIgnoreCase);
@@ -72,6 +78,8 @@ public sealed class RotaPublicationRegressionTests(PostgresRegressionFactory fac
         Assert.Contains(visitId.ToString(), await worker.GetStringAsync("/api/phase1/visits"), StringComparison.OrdinalIgnoreCase);
         Assert.Contains(visitId.ToString(), await additionalWorker.GetStringAsync("/api/phase1/visits"), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(HttpStatusCode.NoContent, (await worker.PostAsync($"/api/phase1/rota-publications/{secondId}/acknowledge", null)).StatusCode);
+        await AssertDeliveryAccess(worker, visitId, true);
+        await AssertDeliveryAccess(additionalWorker, visitId, true);
         using (var changeScope = factory.Services.CreateScope())
         {
             var db = changeScope.ServiceProvider.GetRequiredService<CareDbContext>();
@@ -80,11 +88,24 @@ public sealed class RotaPublicationRegressionTests(PostgresRegressionFactory fac
         Assert.DoesNotContain(visitId.ToString(), await worker.GetStringAsync("/api/phase1/visits"), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(secondId.ToString(), await worker.GetStringAsync("/api/phase1/rota-publications/mine"), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(HttpStatusCode.Conflict, (await additionalWorker.PostAsync($"/api/phase1/rota-publications/{secondId}/acknowledge", null)).StatusCode);
+        await AssertDeliveryAccess(worker, visitId, false);
+        await AssertDeliveryAccess(additionalWorker, visitId, false);
         var reassigned = await manager.PostAsJsonAsync($"/api/phase1/visits/{visitId}/move", new { expectedStartsAt = startsAt.AddMinutes(30), startsAt = startsAt.AddMinutes(45), careWorkerId = additionalWorkerId });
         Assert.True(reassigned.StatusCode == HttpStatusCode.OK, $"Reassign returned {(int)reassigned.StatusCode}: {await reassigned.Content.ReadAsStringAsync()}\n{factory.LastServerException}");
         using var verifyScope = factory.Services.CreateScope();
         var verify = verifyScope.ServiceProvider.GetRequiredService<CareDbContext>();
         Assert.Equal(additionalWorkerId, (await verify.Visits.AsNoTracking().SingleAsync(visit => visit.Id == visitId)).CareWorkerId);
+    }
+
+    private static async Task AssertDeliveryAccess(HttpClient client, Guid visitId, bool allowed)
+    {
+        var root=$"/api/phase1/visits/{visitId}/delivery";
+        foreach(var suffix in new[]{"observations","location"})
+            Assert.Equal(allowed?HttpStatusCode.OK:HttpStatusCode.Forbidden,(await client.GetAsync($"{root}/{suffix}")).StatusCode);
+        var observation=await client.PostAsJsonAsync($"{root}/observations",new{observationType="Mood",value="Settled",unit="",notes="Synthetic publication access check",recordedAt=(DateTimeOffset?)null});
+        Assert.Equal(allowed?HttpStatusCode.Created:HttpStatusCode.Forbidden,observation.StatusCode);
+        var location=await client.PostAsJsonAsync($"{root}/location",new{eventType="Evidence",latitude=51.5m,longitude=-0.1m,accuracyMeters=5m,capturedAt=DateTimeOffset.UtcNow,source="Regression test",notes="Synthetic publication access check"});
+        Assert.Equal(allowed?HttpStatusCode.Created:HttpStatusCode.Forbidden,location.StatusCode);
     }
 
     private static AppUser User(string name, UserRole role, Guid? workerId = null) =>

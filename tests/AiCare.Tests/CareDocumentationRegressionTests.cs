@@ -34,6 +34,10 @@ public sealed class CareDocumentationRegressionTests(PostgresRegressionFactory f
         }
 
         var worker=await Client(workerName);var other=await Client(otherName);var admin=await Client(adminName);
+        var visitDay=DateOnly.FromDateTime(starts.UtcDateTime);
+        var weekStart=visitDay.AddDays(-((int)visitDay.DayOfWeek+6)%7);
+        var publication=await admin.PostAsJsonAsync("/api/phase1/rota-publications",new{branchId=TenantDefaults.BranchId,weekStart});
+        Assert.Equal(HttpStatusCode.Created,publication.StatusCode);
 
         var threshold=await admin.PutAsJsonAsync("/api/phase1/care-documentation/thresholds/Temperature",new{minimumValue=(decimal?)null,maximumValue=38m,severity="High",instructions="Call the duty manager"});
         Assert.Equal(HttpStatusCode.OK,threshold.StatusCode);
