@@ -2181,42 +2181,38 @@ phase1.MapPost("/incidents", (CreateIncidentRequest request, ICareRepository rep
     var incident = repository.AddIncident(request);
     return Results.Created($"/api/phase1/incidents/{incident.Id}", incident);
 });
-phase1.MapPut("/incidents/{id:guid}", (Guid id, CreateIncidentRequest request, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapPut("/incidents/{id:guid}", async (Guid id, CreateIncidentRequest request, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, CancellationToken token) =>
 {
     var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
     if (roleDenied is not null) return roleDenied;
-    var incidentToUpdate = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    if (incidentToUpdate is null || !tenant.CanAccess(incidentToUpdate.OrganizationId, incidentToUpdate.BranchId)) return Results.NotFound();
-    if (incidentToUpdate.Status == "Closed") return Results.Conflict(new { message = "Closed incidents cannot be changed through the legacy route." });
-    var sourceDenied = RequireIncidentAccessForCareWorker(new CreateIncidentRequest(incidentToUpdate.ServiceUserId, incidentToUpdate.VisitId,
-        incidentToUpdate.Category, incidentToUpdate.Severity, incidentToUpdate.Description), context, tenant, currentUser);
-    if (sourceDenied is not null) return sourceDenied;
-    if (incidentToUpdate.ServiceUserId != request.ServiceUserId || incidentToUpdate.VisitId != request.VisitId)
-        return Results.Conflict(new { message = "An incident cannot be moved to another person or visit." });
-
-    var denied = RequireIncidentAccessForCareWorker(request, context, tenant, currentUser);
-    if (denied is not null) return denied;
-
-    var incident = repository.UpdateIncident(id, request);
-    return incident is null ? Results.NotFound() : Results.Ok(incident);
-});
-phase1.MapDelete("/incidents/{id:guid}", (Guid id, ICareRepository repository, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
-{
-    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
-    if (roleDenied is not null) return roleDenied;
-    var incident = context.Incidents.AsNoTracking().FirstOrDefault(item => item.Id == id);
-    if (incident is null || !tenant.CanAccess(incident.OrganizationId, incident.BranchId)) return Results.NotFound();
-    if (incident.Status == "Closed") return Results.Conflict(new { message = "Closed incidents cannot be withdrawn through the legacy route." });
-
-    if (incident.VisitId is null && currentUser.IsCareWorker)
+    return await context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
     {
-        return Error("Care workers can only manage incidents linked to assigned visits.", StatusCodes.Status403Forbidden);
-    }
-
-    var denied = incident.VisitId is null ? null : RequireAssignedVisitForCareWorker(incident.VisitId.Value, context, tenant, currentUser);
-    if (denied is not null) return denied;
-
-    return repository.DeleteIncident(id) ? Results.NoContent() : Results.NotFound();
+        await using var transaction=await context.Database.BeginTransactionAsync(token);
+        var incidentToUpdate=await LockedIncident(context,id,tenant.OrganizationId,token);
+        if(incidentToUpdate is null||!tenant.CanAccess(incidentToUpdate.OrganizationId,incidentToUpdate.BranchId))return Results.NotFound();
+        if(incidentToUpdate.Status=="Closed"||await HasIncidentGovernance(context,id,tenant.OrganizationId,token))return Results.Conflict(new{message="Governed incidents cannot be changed through the legacy route."});
+        var sourceDenied=RequireIncidentAccessForCareWorker(new CreateIncidentRequest(incidentToUpdate.ServiceUserId,incidentToUpdate.VisitId,incidentToUpdate.Category,incidentToUpdate.Severity,incidentToUpdate.Description),context,tenant,currentUser);if(sourceDenied is not null)return sourceDenied;
+        if(incidentToUpdate.ServiceUserId!=request.ServiceUserId||incidentToUpdate.VisitId!=request.VisitId)return Results.Conflict(new{message="An incident cannot be moved to another person or visit."});
+        var denied=RequireIncidentAccessForCareWorker(request,context,tenant,currentUser);if(denied is not null)return denied;
+        var updated=incidentToUpdate with{Category=request.Category,Severity=request.Severity,Description=request.Description,Status="Updated"};context.Entry(incidentToUpdate).CurrentValues.SetValues(updated);
+        context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"incident.updated",currentUser.UserName,nameof(Incident),id,DateTimeOffset.UtcNow,incidentToUpdate.OrganizationId,incidentToUpdate.BranchId));
+        await context.SaveChangesAsync(token);await transaction.CommitAsync(token);return Results.Ok(updated);
+    });
+});
+phase1.MapDelete("/incidents/{id:guid}", async (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, CancellationToken token) =>
+{
+    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+    if (roleDenied is not null) return roleDenied;
+    return await context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+    {
+        await using var transaction=await context.Database.BeginTransactionAsync(token);var incident=await LockedIncident(context,id,tenant.OrganizationId,token);
+        if(incident is null||!tenant.CanAccess(incident.OrganizationId,incident.BranchId))return Results.NotFound();
+        if(incident.Status=="Closed"||await HasIncidentGovernance(context,id,tenant.OrganizationId,token))return Results.Conflict(new{message="Governed incidents cannot be withdrawn through the legacy route."});
+        if(incident.VisitId is null&&currentUser.IsCareWorker)return Error("Care workers can only manage incidents linked to assigned visits.",StatusCodes.Status403Forbidden);
+        var denied=incident.VisitId is null?null:RequireAssignedVisitForCareWorker(incident.VisitId.Value,context,tenant,currentUser);if(denied is not null)return denied;
+        context.Entry(incident).CurrentValues.SetValues(incident with{Status="Archived"});context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),"incident.archived",currentUser.UserName,nameof(Incident),id,DateTimeOffset.UtcNow,incident.OrganizationId,incident.BranchId));
+        await context.SaveChangesAsync(token);await transaction.CommitAsync(token);return Results.NoContent();
+    });
 });
 phase1.MapGet("/ai/risk-alerts", (ICareRepository repository) => Results.Ok(repository.GetAiRiskAlerts()));
 phase1.MapGet("/payroll-runs", (CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, string? status = null) =>
@@ -3496,6 +3492,16 @@ static VisitBookingAssessment AssessVisitBooking(CreateVisitRequest request, Car
         .Distinct().ToArray();
     var bookingWarnings = policy.SelectMany(x => x.Warnings).Distinct().ToArray();
     return new VisitBookingAssessment(conflicts, availabilityConflicts, safetyConflicts, operationalConflicts, bookingBlocks, bookingWarnings);
+}
+
+static Task<Incident?> LockedIncident(CareDbContext context,Guid id,Guid organizationId,CancellationToken token)=>context.Database.IsNpgsql()
+    ? context.Incidents.FromSqlInterpolated($"select * from \"Incidents\" where \"Id\"={id} and \"OrganizationId\"={organizationId} for update").SingleOrDefaultAsync(token)
+    : context.Incidents.SingleOrDefaultAsync(x=>x.Id==id&&x.OrganizationId==organizationId,token);
+
+static async Task<bool> HasIncidentGovernance(CareDbContext context,Guid id,Guid organizationId,CancellationToken token)
+{
+    if(!context.Database.IsNpgsql())return false;
+    return await context.Database.SqlQuery<int>($"""select 1 as "Value" from incident_governance_events where incident_id={id} and organization_id={organizationId} union all select 1 as "Value" from incident_investigations where incident_id={id} and organization_id={organizationId} limit 1""").AnyAsync(token);
 }
 
 static string VisitBookingError(VisitBookingAssessment assessment)

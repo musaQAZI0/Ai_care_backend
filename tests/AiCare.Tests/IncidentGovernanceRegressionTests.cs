@@ -70,6 +70,8 @@ public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory 
         var investigation = new { chronology = "Dose prepared, checked and withheld", evidenceReviewed = "MAR, prescription and witness statement", findings = "Selection error intercepted", rootCause = "Similar packaging", lessonsLearned = "Separate storage and second check", owner = "Investigation lead", complete = true, expectedRevision=0 };
         Assert.Equal(HttpStatusCode.Forbidden, (await coordinator.PutAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/investigation", investigation)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await admin.PutAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/investigation", investigation)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await admin.PutAsJsonAsync($"/api/phase1/incidents/{incidentId}",new{serviceUserId=RegressionIds.ServiceUserId,visitId=(Guid?)null,category="Fall",severity="Low",description="Legacy overwrite during governance"})).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await admin.DeleteAsync($"/api/phase1/incidents/{incidentId}")).StatusCode);
         var action = await admin.PostAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/actions", new { actionType = "Corrective", detail = "Separate look-alike medicines", owner = "Medication lead", dueAt = DateTimeOffset.UtcNow.AddDays(2) });
         Assert.Equal(HttpStatusCode.Created, action.StatusCode);
         var actionId = (await action.Content.ReadFromJsonAsync<CreatedResponse>())!.Id;
