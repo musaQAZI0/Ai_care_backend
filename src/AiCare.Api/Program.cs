@@ -3655,8 +3655,11 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
     var training = new List<(string Name, string Category, string Status, DateTimeOffset? ExpiresAt)>();
     var competencies = new List<(string Name, string Status, DateTimeOffset? ExpiresAt)>();
     var restrictions = new List<(string Type, string Skill, string Reason, DateTimeOffset StartsAt, DateTimeOffset? EndsAt)>();
+    var mandatoryCourses = new List<(string Code, string Title, bool Valid)>();
     var connection = context.Database.GetDbConnection();
     var opened = connection.State != System.Data.ConnectionState.Open;
+    var activeAt = startsAt.ToUniversalTime();
+    var visitEndsAt = activeAt.AddMinutes(durationMinutes);
 
     try
     {
@@ -3697,6 +3700,31 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
             using var reader = command.ExecuteReader();
             while (reader.Read()) restrictions.Add((reader.GetString(0),reader.GetString(1),reader.GetString(2),reader.GetFieldValue<DateTimeOffset>(3),reader.IsDBNull(4)?null:reader.GetFieldValue<DateTimeOffset>(4)));
         }
+
+        if (context.Database.IsNpgsql())
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                select c.code,c.title,exists(
+                  select 1 from worker_training_bookings b
+                  where b.organization_id=c.organization_id and b.course_id=c.id and b.care_worker_id=w."Id"
+                    and b.status in ('Attended','Completed') and (b.expires_at is null or b.expires_at>=@requiredUntil)
+                )
+                from training_catalogue_courses c
+                join "CareWorkers" w on w."Id"=@worker and w."OrganizationId"=c.organization_id
+                where c.organization_id=@organization and c.active=true and c.is_mandatory=true
+                  and (c.branch_id is null or c.branch_id=w."BranchId")
+                  and (cardinality(c.required_job_titles)=0 or exists(
+                    select 1 from worker_employment_profiles ep
+                    where ep.care_worker_id=w."Id" and ep.organization_id=w."OrganizationId"
+                      and ep.branch_id=w."BranchId" and trim(ep.job_title)=any(c.required_job_titles)))
+                """;
+            AddParameter(command, "worker", careWorkerId);
+            AddParameter(command, "organization", tenant.OrganizationId);
+            AddParameter(command, "requiredUntil", visitEndsAt);
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) mandatoryCourses.Add((reader.GetString(0),reader.GetString(1),reader.GetBoolean(2)));
+        }
     }
     catch (System.Data.Common.DbException)
     {
@@ -3711,8 +3739,6 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
         if (opened && connection.State == System.Data.ConnectionState.Open) connection.Close();
     }
 
-    var activeAt = startsAt.ToUniversalTime();
-    var visitEndsAt = activeAt.AddMinutes(durationMinutes);
     static bool Valid(string status, DateTimeOffset? expiresAt, DateTimeOffset requiredUntil) =>
         status.Equals("Valid", StringComparison.OrdinalIgnoreCase) && (expiresAt is null || expiresAt >= requiredUntil);
 
@@ -3731,8 +3757,14 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
         }
     }
 
+    foreach (var course in mandatoryCourses.Where(course => !course.Valid))
+    {
+        result.Add(new { careWorkerId, category = "Compliance", code = "mandatory-course-missing", courseCode = course.Code,
+            courseTitle = course.Title, reason = $"Mandatory course '{course.Title}' has no current completed evidence covering the full visit interval." });
+    }
+
     var mandatoryTraining = training.Where(item => item.Category.Equals("Mandatory", StringComparison.OrdinalIgnoreCase)).ToList();
-    if (mandatoryTraining.Count > 0 && !mandatoryTraining.Any(item => Valid(item.Status, item.ExpiresAt, visitEndsAt)))
+    if (mandatoryCourses.Count == 0 && mandatoryTraining.Count > 0 && !mandatoryTraining.Any(item => Valid(item.Status, item.ExpiresAt, visitEndsAt)))
     {
         result.Add(new { careWorkerId, category = "Compliance", code = "mandatory-training-invalid", reason = "All recorded mandatory training is expired or invalid for the full visit interval." });
     }
@@ -3748,9 +3780,6 @@ static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantCont
         .Select(item => item.Name)
         .Concat(training.Where(item => Valid(item.Status, item.ExpiresAt, visitEndsAt)).Select(item => item.Name))
         .ToList();
-    var worker = context.CareWorkers.AsNoTracking().FirstOrDefault(item => item.Id == careWorkerId);
-    if (worker is not null) validEvidence.Add(worker.Specialization);
-
     foreach (var skill in required.Where(skill => !validEvidence.Any(evidence => evidence.Contains(skill, StringComparison.OrdinalIgnoreCase))))
     {
         result.Add(new { careWorkerId, category = "Skill", code = "skill-gap", skill, reason = $"No current competency or training evidence matches required skill '{skill}'." });

@@ -31,6 +31,9 @@ public sealed class IdempotencyRegressionTests(PostgresRegressionFactory factory
                 insert into worker_availability_rules
                   (id,care_worker_id,organization_id,branch_id,day_of_week,start_time,end_time,is_available,effective_from,effective_to,notes,created_at)
                 values ({Guid.NewGuid()},{workerId},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{(int)startsAt.DayOfWeek},{new TimeOnly(8, 0)},{new TimeOnly(18, 0)},true,{DateOnly.FromDateTime(startsAt.Date.AddDays(-1))},null,'Idempotency regression',now())
+                ;
+                insert into worker_competency_records(id,care_worker_id,organization_id,branch_id,competency,status,assessed_by,assessed_at,expires_at)
+                values ({Guid.NewGuid()},{workerId},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},'Personal care','Valid','Regression',{startsAt.AddDays(-1)},{startsAt.AddYears(1)})
                 """);
         }
 

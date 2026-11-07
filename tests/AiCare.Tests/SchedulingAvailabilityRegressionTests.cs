@@ -33,6 +33,7 @@ public sealed class SchedulingAvailabilityRegressionTests : IClassFixture<Postgr
             db.ServiceUsers.Add(new ServiceUser(personId, "Manager Scheduling Person", new DateOnly(1970, 1, 1), "+10000000003", "Personal care", "Regression contact", "", RiskLevel.Low, "Onboarded", "Regression address", "None", "None", "Private", "Regression", "", "Independent", "Independent", "Verbal", "None", "Standard", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             db.AppUsers.Add(new AppUser(Guid.NewGuid(), managerName, $"{managerName}@aicare.local", PasswordHasher.HashPassword("Manager123!"), UserRole.CareManager, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId, null, null));
             await db.SaveChangesAsync();
+            await AddCompetency(db,workerId,"Personal care",managerName,startsAt);
         }
 
         var client = _factory.CreateClient();
@@ -83,6 +84,7 @@ public sealed class SchedulingAvailabilityRegressionTests : IClassFixture<Postgr
             db.Visits.Add(new Visit(cancelledId, personId, workerId, startsAt, "Cancelled care", 30, "Personal care", VisitStatus.Cancelled, null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             db.Visits.Add(new Visit(activeId, personId, workerId, startsAt.AddHours(2), "Active care", 30, "Personal care", VisitStatus.Scheduled, null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             await db.SaveChangesAsync();
+            await AddCompetency(db,workerId,"Personal care",userName,startsAt);
         }
 
         var client = _factory.CreateClient();
@@ -123,6 +125,7 @@ public sealed class SchedulingAvailabilityRegressionTests : IClassFixture<Postgr
                 "None", "None", "Private", "Regression", "", "Independent", "Independent", "Verbal", "None", "Standard",
                 TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             await db.SaveChangesAsync();
+            await AddCompetency(db,workerId,"Personal care",adminUserName,availableStart);
 
             var effectiveFrom = DateOnly.FromDateTime(visitDate.AddDays(-1));
             await db.Database.ExecuteSqlInterpolatedAsync($"""
@@ -242,4 +245,8 @@ public sealed class SchedulingAvailabilityRegressionTests : IClassFixture<Postgr
     }
 
     private sealed record LoginResponse(string Token);
+    private static Task AddCompetency(CareDbContext db,Guid worker,string competency,string actor,DateTimeOffset reference)=>db.Database.ExecuteSqlInterpolatedAsync($"""
+        insert into worker_competency_records(id,care_worker_id,organization_id,branch_id,competency,status,assessed_by,assessed_at,expires_at)
+        values({Guid.NewGuid()},{worker},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{competency},'Valid',{actor},{reference.AddDays(-1)},{reference.AddYears(1)})
+        """);
 }

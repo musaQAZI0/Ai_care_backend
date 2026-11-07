@@ -451,6 +451,14 @@ public sealed class PostgresRegressionFactory : WebApplicationFactory<Program>, 
         if (await db.MedicationAdministrationRecords.FindAsync(RegressionIds.MarId) is null)
             db.MedicationAdministrationRecords.Add(new MedicationAdministrationRecord(RegressionIds.MarId, RegressionIds.MedicationId, RegressionIds.VisitId, RegressionIds.WorkerId, DateTimeOffset.UtcNow.AddHours(1), null, "Scheduled", "", TenantDefaults.OrganizationId, TenantDefaults.BranchId));
         await db.SaveChangesAsync();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            insert into worker_competency_records(id,care_worker_id,organization_id,branch_id,competency,status,assessed_by,assessed_at)
+            select {Guid.NewGuid()},{RegressionIds.WorkerId},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{"Medication support"},'Valid','Regression seed',now()
+            where not exists(select 1 from worker_competency_records where care_worker_id={RegressionIds.WorkerId} and organization_id={TenantDefaults.OrganizationId} and competency={"Medication support"} and status='Valid');
+            insert into worker_competency_records(id,care_worker_id,organization_id,branch_id,competency,status,assessed_by,assessed_at)
+            select {Guid.NewGuid()},{RegressionIds.WorkerId},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{"Personal care"},'Valid','Regression seed',now()
+            where not exists(select 1 from worker_competency_records where care_worker_id={RegressionIds.WorkerId} and organization_id={TenantDefaults.OrganizationId} and competency={"Personal care"} and status='Valid')
+            """);
         await db.Database.ExecuteSqlRawAsync("update auth_user_security set failed_attempts=0, lockout_until=null where user_id in (select \"Id\" from \"AppUsers\")");
     }
     public async Task SeedCarePlanActivationPrerequisitesAsync(Guid personId)

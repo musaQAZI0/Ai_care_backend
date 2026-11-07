@@ -32,6 +32,11 @@ public sealed class AdvancedSchedulingRegressionTests(PostgresRegressionFactory 
             db.Visits.Add(new Visit(Guid.NewGuid(),people[0],workers[2],baseTime.AddHours(-3),"Daily hours",150,"",VisitStatus.Scheduled,null,null,null,null,null,null,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
             db.Visits.Add(new Visit(Guid.NewGuid(),people[0],workers[3],baseTime.AddHours(-13),"Previous day shift",60,"",VisitStatus.Scheduled,null,null,null,null,null,null,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
             await db.SaveChangesAsync();
+            foreach(var worker in workers)
+                await db.Database.ExecuteSqlInterpolatedAsync($"""
+                    insert into worker_competency_records(id,care_worker_id,organization_id,branch_id,competency,status,assessed_by,assessed_at)
+                    values({Guid.NewGuid()},{worker},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},{"Medication administration"},'Valid',{userName},{baseTime.AddDays(-1)})
+                    """);
         }
 
         var client=factory.CreateClient();
