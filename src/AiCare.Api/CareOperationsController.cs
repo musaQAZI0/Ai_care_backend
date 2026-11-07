@@ -70,10 +70,11 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
               and d.event_at>=@from and d.event_at<=@to and (@category='' or d.category=@category) and (@status='' or d.status=@status)
               and (@priority='' or d.priority=@priority) and (@person is null or d.service_user_id=@person)
               and (@worker is null or d.care_worker_id=@worker) and (@creator='' or d.created_by=@creator)
+              and (@manager or not exists(select 1 from care_operation_options o where o.organization_id=d.organization_id and o.kind='DiaryCategory' and o.value=d.category and o.visibility='ManagersOnly'))
             order by case when @sort='event' then d.event_at end desc,
                      case when @sort='priority' then case d.priority when 'Critical' then 4 when 'High' then 3 when 'Medium' then 2 else 1 end end desc,
                      coalesce(d.updated_at,d.created_at) desc
-            """, command => { Add(command,"from",start); Add(command,"to",end); Add(command,"category",category?.Trim()??""); Add(command,"status",status?.Trim()??""); Add(command,"priority",priority?.Trim()??""); Add(command,"person",serviceUserId); Add(command,"worker",careWorkerId); Add(command,"creator",createdBy?.Trim()??""); Add(command,"sort",sortBy is "event" or "priority" ? sortBy : "modified"); }, token));
+            """, command => { Add(command,"from",start); Add(command,"to",end); Add(command,"category",category?.Trim()??""); Add(command,"status",status?.Trim()??""); Add(command,"priority",priority?.Trim()??""); Add(command,"person",serviceUserId); Add(command,"worker",careWorkerId); Add(command,"creator",createdBy?.Trim()??""); Add(command,"sort",sortBy is "event" or "priority" ? sortBy : "modified"); Add(command,"manager",User.IsInRole("Administrator")||User.IsInRole("CareManager")); }, token));
     }
 
     [HttpPost("diary")]
@@ -81,7 +82,7 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
     public async Task<IActionResult> AddDiary(DiaryEntryRequest request, CancellationToken token)
     {
         if (string.IsNullOrWhiteSpace(request.Category) || string.IsNullOrWhiteSpace(request.Subject) || string.IsNullOrWhiteSpace(request.Detail)) return BadRequest(new { message = "Category, subject and detail are required." });
-        if (!await OptionActive("DiaryCategory",request.Category,token)) return BadRequest(new { message = "Select an active diary category." });
+        if (!await DiaryOptionAllowed(request.Category,token)) return BadRequest(new { message = "Select an active diary category available to your role." });
         if (request.Priority is not ("Routine" or "Medium" or "High" or "Critical")) return BadRequest(new { message = "Select a valid priority." });
         if (request.ServiceUserId is Guid person && !await db.ServiceUsers.AnyAsync(x => x.Id == person && x.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || x.BranchId == tenant.BranchId), token)) return BadRequest(new { message = "The selected client is not available in this branch." });
         if (request.CareWorkerId is Guid worker && !await db.CareWorkers.AnyAsync(x => x.Id == worker && x.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || x.BranchId == tenant.BranchId), token)) return BadRequest(new { message = "The selected worker is not available in this branch." });
@@ -105,9 +106,9 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
     public async Task<IActionResult> TransitionDiary(Guid id, DiaryTransitionRequest request, CancellationToken token)
     {
         if (request.Status is not ("Open" or "InProgress" or "Resolved" or "Cancelled") || string.IsNullOrWhiteSpace(request.Reason)) return BadRequest(new { message = "A valid status and reason are required." });
-        var current = await Rows("select status from operational_diary_entries where id=@id and organization_id=@organization and (@organizationWide or branch_id=@branch)", command => Add(command,"id",id), token);
+        var current = await Rows("select status from operational_diary_entries d where id=@id and organization_id=@organization and (@organizationWide or branch_id=@branch) and (@manager or not exists(select 1 from care_operation_options o where o.organization_id=d.organization_id and o.kind='DiaryCategory' and o.value=d.category and o.visibility='ManagersOnly'))", command => { Add(command,"id",id); Add(command,"manager",User.IsInRole("Administrator")||User.IsInRole("CareManager")); }, token);
         if (current.Count == 0) return NotFound();
-        var changed = await Exec("update operational_diary_entries set status=@status,updated_by=@actor,updated_at=now() where id=@id and organization_id=@organization and (@organizationWide or branch_id=@branch)", command => { Add(command,"id",id); Add(command,"status",request.Status); }, token);
+        var changed = await Exec("update operational_diary_entries d set status=@status,updated_by=@actor,updated_at=now() where id=@id and organization_id=@organization and (@organizationWide or branch_id=@branch) and (@manager or not exists(select 1 from care_operation_options o where o.organization_id=d.organization_id and o.kind='DiaryCategory' and o.value=d.category and o.visibility='ManagersOnly'))", command => { Add(command,"id",id); Add(command,"status",request.Status); Add(command,"manager",User.IsInRole("Administrator")||User.IsInRole("CareManager")); }, token);
         if (changed == 0) return NotFound();
         await Exec("insert into operational_diary_history(id,diary_entry_id,organization_id,action,from_status,to_status,reason,actor) values(@history,@id,@organization,'Status changed',@previous,@status,@reason,@actor)", command => { Add(command,"history",Guid.NewGuid()); Add(command,"id",id); Add(command,"previous",current[0]["status"]); Add(command,"status",request.Status); Add(command,"reason",request.Reason.Trim()); }, token);
         await Audit("operations.diary_transitioned", "OperationalDiaryEntry", id, token); return NoContent();
@@ -191,6 +192,7 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
         """,_=>{},token));
 
     private async Task<bool> OptionActive(string kind,string value,CancellationToken token){var rows=await Rows("select id from care_operation_options where organization_id=@organization and kind=@kind and value=@value and active=true limit 1",command=>{Add(command,"kind",kind);Add(command,"value",value.Trim());},token);return rows.Count>0;}
+    private async Task<bool> DiaryOptionAllowed(string value,CancellationToken token){var rows=await Rows("select id from care_operation_options where organization_id=@organization and kind='DiaryCategory' and value=@value and active=true and (visibility='AllStaff' or @manager) limit 1",command=>{Add(command,"value",value.Trim());Add(command,"manager",User.IsInRole("Administrator")||User.IsInRole("CareManager"));},token);return rows.Count>0;}
     private async Task<List<Dictionary<string,object?>>> Rows(string sql,Action<DbCommand> bind,CancellationToken token){var list=new List<Dictionary<string,object?>>();await using var command=await Command(sql,token);bind(command);await using var reader=await command.ExecuteReaderAsync(token);while(await reader.ReadAsync(token)){var row=new Dictionary<string,object?>();for(var i=0;i<reader.FieldCount;i++)row[Camel(reader.GetName(i))]=reader.IsDBNull(i)?null:reader.GetValue(i);list.Add(row);}return list;}
     private async Task<int> Exec(string sql,Action<DbCommand> bind,CancellationToken token){await using var command=await Command(sql,token);bind(command);return await command.ExecuteNonQueryAsync(token);}
     private async Task<DbCommand> Command(string sql,CancellationToken token){var connection=db.Database.GetDbConnection();if(connection.State!=ConnectionState.Open)await connection.OpenAsync(token);var command=connection.CreateCommand();command.CommandText=sql;Add(command,"organization",tenant.OrganizationId);Add(command,"branch",tenant.BranchId??TenantDefaults.BranchId);Add(command,"organizationWide",tenant.IsOrganizationWide);Add(command,"actor",user.UserName);return command;}

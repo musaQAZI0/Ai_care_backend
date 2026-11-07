@@ -440,6 +440,7 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         {
             var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
             var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var canReadManagerOnlyDiary = User.IsInRole("Administrator") || User.IsInRole("CareManager");
             var diary = db.Database.SqlQuery<OperationalDiaryReportRow>($"""
                 select d.id as "Id", d.event_at as "EventAt", d.category as "Category", d.priority as "Priority",
                        d.status as "Status", d.subject as "Subject", d.detail as "Detail",
@@ -451,6 +452,10 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
                   and ({query.ClientId}::uuid is null or d.service_user_id={query.ClientId})
                   and ({definition.Key == "carer-diary"} or d.service_user_id is not null)
                   and ({definition.Key == "client-diary"} or d.care_worker_id is not null)
+                  and ({canReadManagerOnlyDiary} or not exists (
+                      select 1 from care_operation_options o
+                      where o.organization_id=d.organization_id and o.kind='DiaryCategory'
+                        and o.value=d.category and o.visibility='ManagersOnly'))
                 """);
             var total = await diary.CountAsync(token);
             var records = await diary.OrderByDescending(item => item.EventAt).ThenBy(item => item.Id).Skip(skip).Take(take).ToListAsync(token);

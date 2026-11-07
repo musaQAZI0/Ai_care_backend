@@ -71,6 +71,35 @@ public sealed class CareOperationsWebRegressionTests(PostgresRegressionFactory f
     }
 
     [Fact]
+    public async Task ManagerOnlyDiaryCategoryIsEnforcedForOptionsCreationAndHistory()
+    {
+        await factory.EnsureClinicalSeedAsync();
+        var suffix = Guid.NewGuid().ToString("N"); var coordinatorName = $"diary.coordinator.{suffix}";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.AppUsers.Add(new AppUser(Guid.NewGuid(), coordinatorName, $"{coordinatorName}@example.test", PasswordHasher.HashPassword("Admin123!"), UserRole.CareCoordinator, true, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+        }
+        using var admin = await AdminClient(); var label = $"Managers {suffix}";
+        var option = await admin.PostAsJsonAsync("/api/phase1/care-operations/options", new { kind="DiaryCategory", value=label, active=true, visibility="ManagersOnly" });
+        Assert.Equal(HttpStatusCode.Created, option.StatusCode);
+        var entry = new { serviceUserId=RegressionIds.ServiceUserId, category=label, priority="Routine", subject=$"Private {suffix}", detail="Manager history", eventAt=DateTimeOffset.UtcNow };
+        var created = await admin.PostAsJsonAsync("/api/phase1/care-operations/diary", entry); Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var diaryId = (await created.Content.ReadFromJsonAsync<CreatedId>())!.Id;
+        using var coordinator = await Client(coordinatorName);
+        Assert.DoesNotContain(label, await coordinator.GetStringAsync("/api/phase1/care-operations/options"));
+        Assert.Equal(HttpStatusCode.BadRequest, (await coordinator.PostAsJsonAsync("/api/phase1/care-operations/diary", entry)).StatusCode);
+        Assert.DoesNotContain($"Private {suffix}", await coordinator.GetStringAsync($"/api/phase1/care-operations/diary?from={Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(-1).ToString("O"))}&to={Uri.EscapeDataString(DateTimeOffset.UtcNow.AddDays(1).ToString("O"))}"));
+        Assert.Equal(HttpStatusCode.NotFound, (await coordinator.GetAsync($"/api/phase1/care-operations/diary/{diaryId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await coordinator.PostAsJsonAsync($"/api/phase1/care-operations/diary/{diaryId}/comments", new { body="Denied comment" })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await coordinator.PostAsJsonAsync($"/api/phase1/care-operations/diary/{diaryId}/transition", new { status="Resolved", reason="Denied transition" })).StatusCode);
+        Assert.DoesNotContain($"Private {suffix}", await coordinator.GetStringAsync("/api/phase1/operational-reports/client-diary"));
+        Assert.Contains($"Private {suffix}", await admin.GetStringAsync($"/api/phase1/care-operations/diary/{diaryId}"));
+        Assert.Contains($"Private {suffix}", await admin.GetStringAsync("/api/phase1/operational-reports/client-diary"));
+    }
+
+    [Fact]
     public async Task TrainingCourseCanBeEditedAndDeactivatedWithoutDeletingIt()
     {
         await factory.EnsureClinicalSeedAsync();
@@ -224,6 +253,15 @@ public sealed class CareOperationsWebRegressionTests(PostgresRegressionFactory f
     {
         var client = factory.CreateClient();
         var login = await client.PostAsJsonAsync("/api/auth/login", new { userName = "admin", password = "Admin123!", mfaCode = (string?)null });
+        login.EnsureSuccessStatusCode();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await login.Content.ReadFromJsonAsync<Login>())!.Token);
+        return client;
+    }
+
+    private async Task<HttpClient> Client(string userName)
+    {
+        var client = factory.CreateClient();
+        var login = await client.PostAsJsonAsync("/api/auth/login", new { userName, password = "Admin123!", mfaCode = (string?)null });
         login.EnsureSuccessStatusCode();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await login.Content.ReadFromJsonAsync<Login>())!.Token);
         return client;
