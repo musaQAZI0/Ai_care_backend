@@ -68,13 +68,13 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
             left join "AppUsers" owner_user on owner_user."Id"=d.owner_id and owner_user."OrganizationId"=d.organization_id
             where d.organization_id=@organization and (@organizationWide or d.branch_id=@branch)
               and d.event_at>=@from and d.event_at<=@to and (@category='' or d.category=@category) and (@status='' or d.status=@status)
-              and (@priority='' or d.priority=@priority) and (@person is null or d.service_user_id=@person)
-              and (@worker is null or d.care_worker_id=@worker) and (@creator='' or d.created_by=@creator)
+              and (@priority='' or d.priority=@priority) and (@person='00000000-0000-0000-0000-000000000000'::uuid or d.service_user_id=@person)
+              and (@worker='00000000-0000-0000-0000-000000000000'::uuid or d.care_worker_id=@worker) and (@creator='' or d.created_by=@creator)
               and (@manager or not exists(select 1 from care_operation_options o where o.organization_id=d.organization_id and o.kind='DiaryCategory' and o.value=d.category and o.visibility='ManagersOnly'))
             order by case when @sort='event' then d.event_at end desc,
                      case when @sort='priority' then case d.priority when 'Critical' then 4 when 'High' then 3 when 'Medium' then 2 else 1 end end desc,
                      coalesce(d.updated_at,d.created_at) desc
-            """, command => { Add(command,"from",start); Add(command,"to",end); Add(command,"category",category?.Trim()??""); Add(command,"status",status?.Trim()??""); Add(command,"priority",priority?.Trim()??""); Add(command,"person",serviceUserId); Add(command,"worker",careWorkerId); Add(command,"creator",createdBy?.Trim()??""); Add(command,"sort",sortBy is "event" or "priority" ? sortBy : "modified"); Add(command,"manager",User.IsInRole("Administrator")||User.IsInRole("CareManager")); }, token));
+            """, command => { Add(command,"from",start); Add(command,"to",end); Add(command,"category",category?.Trim()??""); Add(command,"status",status?.Trim()??""); Add(command,"priority",priority?.Trim()??""); Add(command,"person",serviceUserId??Guid.Empty); Add(command,"worker",careWorkerId??Guid.Empty); Add(command,"creator",createdBy?.Trim()??""); Add(command,"sort",sortBy is "event" or "priority" ? sortBy : "modified"); Add(command,"manager",User.IsInRole("Administrator")||User.IsInRole("CareManager")); }, token));
     }
 
     [HttpPost("diary")]

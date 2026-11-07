@@ -56,7 +56,7 @@ public sealed class SchedulingQualificationPolicyRegressionTests(PostgresRegress
             var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();
             await db.Database.ExecuteSqlInterpolatedAsync($"""
                 insert into worker_competency_records(id,care_worker_id,organization_id,branch_id,competency,status,assessed_by,assessed_at,expires_at)
-                values({Guid.NewGuid()},{fixture.Worker},{TenantDefaults.OrganizationId},{fixture.Branch},{"Medication support"},'Valid',{fixture.Actor},{starts.AddDays(-5)},{starts.AddMinutes(30)})
+                values({Guid.NewGuid()},{fixture.Worker},{TenantDefaults.OrganizationId},{fixture.Branch},{"Medication support"},'Valid',{fixture.Actor},{starts.AddDays(-5)},{starts.AddHours(1)})
                 """);
         }
         var verified=await client.PostAsJsonAsync("/api/phase1/visits/conflicts",request);

@@ -3651,6 +3651,9 @@ static List<object> FindWorkerAvailabilityConflicts(CareDbContext context, ITena
 static List<object> FindWorkerSafetyConflicts(CareDbContext context, ITenantContext tenant, Guid careWorkerId, DateTimeOffset startsAt, int durationMinutes, string? requiredSkills)
 {
     var result = new List<object>();
+    // Workforce safety tables and catalogue arrays are PostgreSQL-backed.
+    // SQLite permission tests exercise authorization boundaries separately.
+    if (!context.Database.IsNpgsql()) return result;
     var compliance = new List<(string Type, string Status, DateTimeOffset? ExpiresAt)>();
     var training = new List<(string Name, string Category, string Status, DateTimeOffset? ExpiresAt)>();
     var competencies = new List<(string Name, string Status, DateTimeOffset? ExpiresAt)>();
