@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using AiCare.Domain;
 using AiCare.Infrastructure;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -11,6 +12,34 @@ namespace AiCare.Tests;
 [Collection("Postgres regression")]
 public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory factory) : IClassFixture<PostgresRegressionFactory>
 {
+    [Fact]
+    public async Task OrganizationWideIncidentWritesKeepTheIncidentsBranchAttribution()
+    {
+        await factory.EnsureClinicalSeedAsync();
+        var incidentId=Guid.NewGuid(); var incidentBranch=Guid.NewGuid();
+        using (var scope=factory.Services.CreateScope())
+        {
+            var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.Branches.Add(new(incidentBranch,TenantDefaults.OrganizationId,"Incident attribution branch","Test","Active"));
+            db.Incidents.Add(new(incidentId,RegressionIds.ServiceUserId,null,"Medication error","High","Branch attribution regression","Reported",DateTimeOffset.UtcNow,TenantDefaults.OrganizationId,incidentBranch));
+            await db.SaveChangesAsync();
+        }
+        using var admin=await Login("admin");
+        var path=$"/api/phase1/incident-governance/incidents/{incidentId}";
+        var investigation=new { chronology="Synthetic chronology",evidenceReviewed="Synthetic evidence",findings="Synthetic findings",rootCause="Synthetic cause",lessonsLearned="",owner="Investigation lead",complete=false };
+        Assert.Equal(HttpStatusCode.OK,(await admin.PutAsJsonAsync(path+"/investigation",investigation)).StatusCode);
+        Assert.Equal(HttpStatusCode.Created,(await admin.PostAsJsonAsync(path+"/actions",new { actionType="Corrective",detail="Synthetic corrective action",owner="Action lead",dueAt=DateTimeOffset.UtcNow.AddDays(3) })).StatusCode);
+        using var verifyScope=factory.Services.CreateScope();
+        var verify=verifyScope.ServiceProvider.GetRequiredService<CareDbContext>();
+        Assert.Equal(incidentBranch,await verify.Database.SqlQuery<Guid>($"""select branch_id as "Value" from incident_investigations where incident_id={incidentId}""").SingleAsync());
+        var evidenceBranches=await verify.Database.SqlQuery<Guid>($"""select branch_id as "Value" from incident_capa_actions where incident_id={incidentId} union all select branch_id as "Value" from incident_governance_events where incident_id={incidentId}""").ToListAsync();
+        Assert.Equal(3,evidenceBranches.Count);
+        Assert.All(evidenceBranches,branch=>Assert.Equal(incidentBranch,branch));
+        var audits=await verify.AuditEvents.Where(a=>a.EntityId==incidentId&&(a.Action=="incident.investigation_saved"||a.Action=="incident.capa_added")).ToListAsync();
+        Assert.Equal(2,audits.Count);
+        Assert.All(audits,audit=>Assert.Equal(incidentBranch,audit.BranchId));
+    }
+
     [Fact]
     public async Task InvestigationCapaAuthorizationAndClosureAreGoverned()
     {
@@ -70,4 +99,13 @@ public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory 
     private sealed record CreatedResponse(Guid Id);
     private sealed record IncidentResponse(string Status);
     private sealed record WorkspaceResponse(IncidentResponse Incident, object[] Actions, object[] History);
+
+    private async Task<HttpClient> Login(string name)
+    {
+        var client=factory.CreateClient();
+        var response=await client.PostAsJsonAsync("/api/auth/login",new { userName=name,password="Admin123!",mfaCode=(string?)null });
+        response.EnsureSuccessStatusCode();
+        client.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",(await response.Content.ReadFromJsonAsync<LoginResponse>())!.Token);
+        return client;
+    }
 }
