@@ -32,7 +32,7 @@ public sealed class IncidentGovernanceAtomicityRegressionTests(PostgresRegressio
         login.EnsureSuccessStatusCode();
         client.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",(await login.Content.ReadFromJsonAsync<Login>())!.Token);
         var path=$"/api/phase1/incident-governance/incidents/{incident}";
-        var investigation=new{chronology="Synthetic chronology",evidenceReviewed="Synthetic evidence",findings="Synthetic findings",rootCause="Synthetic root cause",lessonsLearned="Synthetic learning",owner="Test manager",complete=true};
+        var investigation=new{chronology="Synthetic chronology",evidenceReviewed="Synthetic evidence",findings="Synthetic findings",rootCause="Synthetic root cause",lessonsLearned="Synthetic learning",owner="Test manager",complete=true,expectedRevision=0};
         var action=new{actionType="Corrective",detail="Synthetic follow-up",owner="Test manager",dueAt=DateTimeOffset.UtcNow.AddDays(7)};
         var actionId=Guid.Empty;
         if(operation=="complete-action")

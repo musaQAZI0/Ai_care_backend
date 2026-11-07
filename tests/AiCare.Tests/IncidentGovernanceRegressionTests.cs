@@ -26,7 +26,7 @@ public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory 
         }
         using var admin=await Login("admin");
         var path=$"/api/phase1/incident-governance/incidents/{incidentId}";
-        var investigation=new { chronology="Synthetic chronology",evidenceReviewed="Synthetic evidence",findings="Synthetic findings",rootCause="Synthetic cause",lessonsLearned="",owner="Investigation lead",complete=false };
+        var investigation=new { chronology="Synthetic chronology",evidenceReviewed="Synthetic evidence",findings="Synthetic findings",rootCause="Synthetic cause",lessonsLearned="",owner="Investigation lead",complete=false,expectedRevision=0 };
         Assert.Equal(HttpStatusCode.OK,(await admin.PutAsJsonAsync(path+"/investigation",investigation)).StatusCode);
         Assert.Equal(HttpStatusCode.Created,(await admin.PostAsJsonAsync(path+"/actions",new { actionType="Corrective",detail="Synthetic corrective action",owner="Action lead",dueAt=DateTimeOffset.UtcNow.AddDays(3) })).StatusCode);
         using var verifyScope=factory.Services.CreateScope();
@@ -67,7 +67,7 @@ public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory 
         var coordinator = await Login(coordinatorName);
         Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsJsonAsync($"/api/phase1/incidents/{incidentId}/investigate", new { outcome = "Legacy", actionPlan = "Bypass", closeIncident = true })).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/close", new { closureSummary = "Too early" })).StatusCode);
-        var investigation = new { chronology = "Dose prepared, checked and withheld", evidenceReviewed = "MAR, prescription and witness statement", findings = "Selection error intercepted", rootCause = "Similar packaging", lessonsLearned = "Separate storage and second check", owner = "Investigation lead", complete = true };
+        var investigation = new { chronology = "Dose prepared, checked and withheld", evidenceReviewed = "MAR, prescription and witness statement", findings = "Selection error intercepted", rootCause = "Similar packaging", lessonsLearned = "Separate storage and second check", owner = "Investigation lead", complete = true, expectedRevision=0 };
         Assert.Equal(HttpStatusCode.Forbidden, (await coordinator.PutAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/investigation", investigation)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await admin.PutAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/investigation", investigation)).StatusCode);
         var action = await admin.PostAsJsonAsync($"/api/phase1/incident-governance/incidents/{incidentId}/actions", new { actionType = "Corrective", detail = "Separate look-alike medicines", owner = "Medication lead", dueAt = DateTimeOffset.UtcNow.AddDays(2) });
@@ -95,8 +95,24 @@ public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory 
         Assert.Equal(workspace.History.Length,retained.History.Length);
     }
 
+    [Fact]
+    public async Task StaleInvestigationRevisionCannotOverwriteNewerEvidence()
+    {
+        await factory.EnsureClinicalSeedAsync();var incidentId=Guid.NewGuid();
+        using(var scope=factory.Services.CreateScope()){var db=scope.ServiceProvider.GetRequiredService<CareDbContext>();db.Incidents.Add(new(incidentId,RegressionIds.ServiceUserId,null,"Fall","Medium","Revision regression","Reported",DateTimeOffset.UtcNow,TenantDefaults.OrganizationId,TenantDefaults.BranchId));await db.SaveChangesAsync();}
+        using var admin=await Login("admin");var path=$"/api/phase1/incident-governance/incidents/{incidentId}/investigation";
+        object Request(string findings,int revision)=>new{chronology="Timeline",evidenceReviewed="Records",findings,rootCause="Process",lessonsLearned="",owner="Lead",complete=false,expectedRevision=revision};
+        var created=await admin.PutAsJsonAsync(path,Request("Initial",0));Assert.Equal(HttpStatusCode.OK,created.StatusCode);
+        var revision=(await created.Content.ReadFromJsonAsync<RevisionResponse>())!.Revision;
+        Assert.Equal(HttpStatusCode.OK,(await admin.PutAsJsonAsync(path,Request("Newer evidence",revision))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await admin.PutAsJsonAsync(path,Request("Stale overwrite",revision))).StatusCode);
+        Assert.Contains("Newer evidence",await admin.GetStringAsync($"/api/phase1/incident-governance/incidents/{incidentId}"));
+        Assert.DoesNotContain("Stale overwrite",await admin.GetStringAsync($"/api/phase1/incident-governance/incidents/{incidentId}"));
+    }
+
     private sealed record LoginResponse(string Token);
     private sealed record CreatedResponse(Guid Id);
+    private sealed record RevisionResponse(int Revision);
     private sealed record IncidentResponse(string Status);
     private sealed record WorkspaceResponse(IncidentResponse Incident, object[] Actions, object[] History);
 
