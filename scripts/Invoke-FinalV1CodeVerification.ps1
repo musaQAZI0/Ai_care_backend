@@ -2,7 +2,7 @@
 param(
     [string]$FrontendPath = (Join-Path (Split-Path $PSScriptRoot -Parent) '..\ai-care'),
     [string]$ContainerName = 'aicare-v1-final-postgres',
-    [int]$PostgresPort = 55432
+    [int]$PostgresPort = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,21 +16,22 @@ if ($LASTEXITCODE -ne 0) { throw 'Docker Desktop is not ready. Start Docker Desk
 
 $containerExists = docker ps -a --filter "name=^/$ContainerName$" --format '{{.Names}}'
 if (-not $containerExists) {
+    $publishedPort = if ($PostgresPort -gt 0) { "127.0.0.1:${PostgresPort}:5432" } else { '127.0.0.1::5432' }
     docker run --name $ContainerName `
         -e "POSTGRES_PASSWORD=$testPassword" `
-        -p "${PostgresPort}:5432" `
+        -p $publishedPort `
         -d postgres:16-alpine | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the synthetic PostgreSQL container.' }
 }
 else {
-    $container = (docker inspect $ContainerName | ConvertFrom-Json)[0]
-    $testPassword = (($container.Config.Env | Where-Object { $_.StartsWith('POSTGRES_PASSWORD=') }) -replace '^POSTGRES_PASSWORD=', '')
-    $binding = $container.HostConfig.PortBindings.'5432/tcp' | Select-Object -First 1
-    if (-not $testPassword -or -not $binding.HostPort) { throw 'The existing test container has no PostgreSQL password or published port.' }
-    $PostgresPort = [int]$binding.HostPort
     docker start $ContainerName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not start the synthetic PostgreSQL container.' }
 }
+$container = (docker inspect $ContainerName | ConvertFrom-Json)[0]
+$testPassword = (($container.Config.Env | Where-Object { $_.StartsWith('POSTGRES_PASSWORD=') }) -replace '^POSTGRES_PASSWORD=', '')
+$binding = $container.HostConfig.PortBindings.'5432/tcp' | Select-Object -First 1
+if (-not $testPassword -or -not $binding.HostPort) { throw 'The test container has no PostgreSQL password or published port.' }
+$PostgresPort = [int]$binding.HostPort
 
 Write-Host "Waiting for PostgreSQL on port $PostgresPort..."
 $ready = $false
