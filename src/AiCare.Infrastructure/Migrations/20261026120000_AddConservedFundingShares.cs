@@ -28,7 +28,10 @@ public sealed class AddConservedFundingShares:Migration
   create unique index ux_invoice_line_billable_event on finance_invoice_lines(organization_id,billable_event_id) where billable_event_id is not null and event_share_id is null;
   create unique index ux_invoice_line_event_share on finance_invoice_lines(event_share_id) where event_share_id is not null;
   drop index ux_finance_invoice_visit;
-  create unique index ux_finance_invoice_visit on finance_invoice_lines(organization_id,visit_id) where visit_id is not null and event_share_id is null;
+  -- Keep the historical duplicate reconciliation established by
+  -- AddFinanceSourceUniqueness. New unsplit lines default to an anchor and are
+  -- unique per visit; retained legacy duplicates remain non-anchor evidence.
+  create unique index ux_finance_invoice_visit on finance_invoice_lines(organization_id,visit_id) where visit_id is not null and event_share_id is null and is_source_claim_anchor;
 
   create function govern_finance_allocation() returns trigger language plpgsql as $$
   declare c finance_contract_versions%rowtype;
