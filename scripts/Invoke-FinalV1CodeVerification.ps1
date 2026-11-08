@@ -29,7 +29,10 @@ else {
 }
 $container = (docker inspect $ContainerName | ConvertFrom-Json)[0]
 $testPassword = (($container.Config.Env | Where-Object { $_.StartsWith('POSTGRES_PASSWORD=') }) -replace '^POSTGRES_PASSWORD=', '')
-$binding = $container.HostConfig.PortBindings.'5432/tcp' | Select-Object -First 1
+$binding = $container.NetworkSettings.Ports.'5432/tcp' | Select-Object -First 1
+if (-not $binding.HostPort) {
+    $binding = $container.HostConfig.PortBindings.'5432/tcp' | Select-Object -First 1
+}
 if (-not $testPassword -or -not $binding.HostPort) { throw 'The test container has no PostgreSQL password or published port.' }
 $PostgresPort = [int]$binding.HostPort
 
