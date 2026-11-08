@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using AiCare.Domain;
 using AiCare.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -105,8 +106,11 @@ public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory 
         using var admin=await Login("admin");var path=$"/api/phase1/incident-governance/incidents/{incidentId}/investigation";
         object Request(string findings,int revision)=>new{chronology="Timeline",evidenceReviewed="Records",findings,rootCause="Process",lessonsLearned="",owner="Lead",complete=false,expectedRevision=revision};
         var created=await admin.PutAsJsonAsync(path,Request("Initial",0));Assert.Equal(HttpStatusCode.OK,created.StatusCode);
-        var revision=(await created.Content.ReadFromJsonAsync<RevisionResponse>())!.Revision;
-        Assert.Equal(HttpStatusCode.OK,(await admin.PutAsJsonAsync(path,Request("Newer evidence",revision))).StatusCode);
+        using var createdBody=JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        var revision=createdBody.RootElement.GetProperty("revision").GetInt32();
+        Assert.Equal(1,revision);
+        var updated=await admin.PutAsJsonAsync(path,Request("Newer evidence",revision));
+        Assert.True(updated.StatusCode==HttpStatusCode.OK,$"Expected OK for revision {revision}, received {(int)updated.StatusCode}: {await updated.Content.ReadAsStringAsync()}");
         Assert.Equal(HttpStatusCode.Conflict,(await admin.PutAsJsonAsync(path,Request("Stale overwrite",revision))).StatusCode);
         Assert.Contains("Newer evidence",await admin.GetStringAsync($"/api/phase1/incident-governance/incidents/{incidentId}"));
         Assert.DoesNotContain("Stale overwrite",await admin.GetStringAsync($"/api/phase1/incident-governance/incidents/{incidentId}"));
@@ -114,7 +118,6 @@ public sealed class IncidentGovernanceRegressionTests(PostgresRegressionFactory 
 
     private sealed record LoginResponse(string Token);
     private sealed record CreatedResponse(Guid Id);
-    private sealed record RevisionResponse(int Revision);
     private sealed record IncidentResponse(string Status);
     private sealed record WorkspaceResponse(IncidentResponse Incident, object[] Actions, object[] History);
 
