@@ -43,6 +43,8 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
 if (-not $ready) { throw 'Synthetic PostgreSQL did not become ready.' }
 
 $env:AICARE_REGRESSION_CONNECTION = "Host=127.0.0.1;Port=$PostgresPort;Database=postgres;Username=postgres;Password=$testPassword"
+$resultsPath = Join-Path $backendPath 'TestResults\FinalV1'
+New-Item -ItemType Directory -Force -Path $resultsPath | Out-Null
 $filter = @(
     'FullyQualifiedName~IncidentGovernanceRegressionTests'
     'FullyQualifiedName~IncidentAtomicityRegressionTests'
@@ -63,7 +65,9 @@ $filter = @(
 
 dotnet test .\tests\AiCare.Tests\AiCare.Tests.csproj `
     --filter $filter `
-    --logger 'console;verbosity=normal'
+    --results-directory $resultsPath `
+    --logger 'console;verbosity=normal' `
+    --logger 'trx;LogFileName=final-v1.trx'
 if ($LASTEXITCODE -ne 0) { throw 'Combined V1 backend regression verification failed.' }
 
 dotnet tool restore
@@ -83,4 +87,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Focused V1 frontend regressions failed.' }
 npm run build
 if ($LASTEXITCODE -ne 0) { throw 'The V1 frontend production build failed.' }
 
-Write-Host 'Final bounded V1 code verification passed. Browser, clinical and release-operation gates remain separate.' -ForegroundColor Green
+Write-Host "Final bounded V1 code verification passed. Backend evidence: $resultsPath\final-v1.trx" -ForegroundColor Green
+Write-Host 'Browser, clinical and release-operation gates remain separate.' -ForegroundColor Green
