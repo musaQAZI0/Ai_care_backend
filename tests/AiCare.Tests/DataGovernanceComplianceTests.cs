@@ -266,7 +266,7 @@ public sealed class DataGovernanceComplianceTests : IClassFixture<AiCareApiFacto
         using (var scope = _factory.Services.CreateScope())
         {
             var setupDb = scope.ServiceProvider.GetRequiredService<CareDbContext>();
-            setupDb.Incidents.Add(new Incident(incidentId, TestIds.ServiceUserId, TestIds.VisitId, "Medication", "Medium", "Governance archive test", "Closed", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            setupDb.Incidents.Add(new Incident(incidentId, TestIds.ServiceUserId, TestIds.VisitId, "Medication", "Medium", "Governance archive test", "Reported", DateTimeOffset.UtcNow, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
             await setupDb.SaveChangesAsync();
         }
 
@@ -371,7 +371,7 @@ public sealed class DataGovernanceComplianceTests : IClassFixture<AiCareApiFacto
         Assert.StartsWith("[Corrected/withdrawn]", note.Summary);
         Assert.True(note.RequiresReview);
         Assert.Equal(2, note.Revision);
-        Assert.Equal(1, await verifyDb.Database.SqlQuery<int>($"select count(*)::integer as \"Value\" from care_note_amendments where care_note_id={noteId}").SingleAsync());
+        Assert.Equal(1L, await verifyDb.Database.SqlQuery<long>($"select count(*) as \"Value\" from care_note_amendments where care_note_id={noteId}").SingleAsync());
         Assert.Contains(verifyDb.AuditEvents, x => x.Action == "care_note.withdrawn" && x.EntityId == noteId);
     }
 

@@ -103,7 +103,7 @@ public sealed class FullProviderJourneyRegressionTests(PostgresRegressionFactory
 
         var amended = await worker.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/amendments", new { reason = "Worker clarification", summary = "Morning care completed", personalCare = "Supported wash and dress", mealsAndHydration = "Breakfast and fluids accepted", medication = "Medication prompt completed", concerns = "No concerns", requiresReview = true });
         Assert.Equal(HttpStatusCode.Created, amended.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, (await manager.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews", new { status = "Approved", comment = "Reviewed for full journey", expectedRevision = 1 })).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await manager.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews", new { status = "Approved", comment = "Reviewed for full journey", expectedRevision = 2 })).StatusCode);
 
         var handover = await worker.PostAsJsonAsync($"/api/phase1/visit-operations/visits/{visitId}/handovers", new { summary = "Morning care completed", outstandingActions = "Monitor hydration at next call", urgent = false, attachmentReference = "" });
         Assert.Equal(HttpStatusCode.Created, handover.StatusCode);

@@ -109,11 +109,11 @@ public sealed class RotaPublicationRegressionTests(PostgresRegressionFactory fac
         var visit = await db.Visits.AsNoTracking().SingleAsync(v => v.Id == visitId);
         var task = Guid.NewGuid();
         var title = $"Synthetic publication task {task:N}";
-        // A legacy unlinked task isolates publication access from plan activation.
+        // An explicitly authorized manual task isolates publication access from plan activation.
         // Plan-linked lifecycle/supersession behavior has its own regression suite.
         await db.Database.ExecuteSqlInterpolatedAsync($"""
-            insert into visit_tasks(id,visit_id,service_user_id,care_worker_id,organization_id,branch_id,title,instructions,status)
-            values({task},{visit.Id},{visit.ServiceUserId},{visit.CareWorkerId},{visit.OrganizationId},{visit.BranchId},{title},{"Synthetic instructions"},{"Pending"})
+            insert into visit_tasks(id,visit_id,service_user_id,care_worker_id,organization_id,branch_id,title,instructions,status,source_type,source_reference,source_created_by)
+            values({task},{visit.Id},{visit.ServiceUserId},{visit.CareWorkerId},{visit.OrganizationId},{visit.BranchId},{title},{"Synthetic instructions"},{"Pending"},{"AuthorizedManual"},{$"rota-publication-regression:{task:N}"},{"rota-publication-regression"})
             """);
         var path = $"/api/phase1/visits/{visitId}/tasks";
         var read = await client.GetAsync(path);

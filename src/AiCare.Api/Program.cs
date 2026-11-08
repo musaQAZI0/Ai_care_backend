@@ -2083,7 +2083,8 @@ phase1.MapDelete("/care-notes/{id:guid}", async (Guid id, CareDbContext context,
     return await context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
     {
         await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
-        await context.Database.ExecuteSqlInterpolatedAsync($"select \"Id\" from \"CareNotes\" where \"Id\"={id} and \"OrganizationId\"={tenant.OrganizationId} for update", cancellationToken);
+        if (context.Database.IsNpgsql())
+            await context.Database.ExecuteSqlInterpolatedAsync($"select \"Id\" from \"CareNotes\" where \"Id\"={id} and \"OrganizationId\"={tenant.OrganizationId} for update", cancellationToken);
         var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
         if (roleDenied is not null) return (IResult)roleDenied;
         var note = await context.CareNotes.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);

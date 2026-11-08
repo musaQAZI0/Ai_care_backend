@@ -675,6 +675,7 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             context.Database.EnsureCreated();
             CreateGovernedFinanceSchema(context);
             CreateRecurringVisitSchema(context);
+            CreateCareDocumentationGovernanceSchema(context);
             Seed(context);
         });
     }
@@ -726,6 +727,23 @@ public sealed class AiCareApiFactory : WebApplicationFactory<Program>
             create table if not exists recurring_visit_members (
                 series_id text not null, visit_id text not null unique, ordinal integer not null,
                 primary key (series_id, visit_id), unique (series_id, ordinal)
+            );
+            """);
+    }
+
+    private static void CreateCareDocumentationGovernanceSchema(CareDbContext context)
+    {
+        context.Database.ExecuteSqlRaw("""
+            create table if not exists care_note_amendments (
+                id text primary key,
+                care_note_id text not null,
+                organization_id text not null,
+                reason text not null,
+                old_values_json text not null,
+                new_values_json text not null,
+                amended_by text not null,
+                amended_at text not null default current_timestamp,
+                foreign key (care_note_id) references "CareNotes"("Id") on delete restrict
             );
             """);
     }
