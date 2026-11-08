@@ -370,6 +370,8 @@ public sealed class DataGovernanceComplianceTests : IClassFixture<AiCareApiFacto
         var note = verifyDb.CareNotes.Single(x => x.Id == noteId);
         Assert.StartsWith("[Corrected/withdrawn]", note.Summary);
         Assert.True(note.RequiresReview);
+        Assert.Equal(2, note.Revision);
+        Assert.Equal(1, await verifyDb.Database.SqlQuery<int>($"select count(*)::integer as \"Value\" from care_note_amendments where care_note_id={noteId}").SingleAsync());
         Assert.Contains(verifyDb.AuditEvents, x => x.Action == "care_note.withdrawn" && x.EntityId == noteId);
     }
 

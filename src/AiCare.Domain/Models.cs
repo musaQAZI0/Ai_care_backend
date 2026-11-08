@@ -240,7 +240,8 @@ public sealed record CareNote(
     bool RequiresReview,
     DateTimeOffset CreatedAt,
     Guid? OrganizationId = null,
-    Guid? BranchId = null);
+    Guid? BranchId = null,
+    int Revision = 1);
 
 public sealed record HealthObservation(
     Guid Id,

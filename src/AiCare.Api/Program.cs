@@ -2076,33 +2076,37 @@ phase1.MapPut("/care-notes/{id:guid}", (Guid id, CreateCareNoteRequest request, 
     var validation = ValidateCareNoteReferences(request.VisitId, request.ServiceUserId, request.CareWorkerId, context, tenant);
     if (validation is not null) return validation;
 
-    var updated = note with
-    {
-        Summary = request.Summary,
-        PersonalCare = request.PersonalCare,
-        MealsAndHydration = request.MealsAndHydration,
-        Medication = request.Medication,
-        Concerns = request.Concerns,
-        RequiresReview = request.RequiresReview
-    };
-    context.CareNotes.Update(updated);
-    AddAudit(context, tenant, currentUser, "care_note.updated", nameof(CareNote), id);
-    context.SaveChanges();
-    return Results.Ok(updated);
+    return Results.Conflict(new { message = "Direct care-note replacement is disabled. Use the governed amendment workflow and provide an amendment reason." });
 });
-phase1.MapDelete("/care-notes/{id:guid}", (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser) =>
+phase1.MapDelete("/care-notes/{id:guid}", async (Guid id, CareDbContext context, ITenantContext tenant, ICurrentUserContext currentUser, CancellationToken cancellationToken) =>
 {
-    var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
-    if (roleDenied is not null) return roleDenied;
-    var note = context.CareNotes.Find(id);
-    if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return Results.NotFound();
-    var denied = RequireAssignedVisitForCareWorker(note.VisitId, context, tenant, currentUser);
-    if (denied is not null) return denied;
+    return await context.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+    {
+        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
+        await context.Database.ExecuteSqlInterpolatedAsync($"select \"Id\" from \"CareNotes\" where \"Id\"={id} and \"OrganizationId\"={tenant.OrganizationId} for update", cancellationToken);
+        var roleDenied = RequireAnyRole(currentUser, UserRole.Administrator, UserRole.CareManager, UserRole.CareCoordinator, UserRole.CareWorker);
+        if (roleDenied is not null) return (IResult)roleDenied;
+        var note = await context.CareNotes.SingleOrDefaultAsync(item => item.Id == id, cancellationToken);
+        if (note is null || !tenant.CanAccess(note.OrganizationId, note.BranchId)) return (IResult)Results.NotFound();
+        var denied = RequireAssignedVisitForCareWorker(note.VisitId, context, tenant, currentUser);
+        if (denied is not null) return (IResult)denied;
 
-    context.Entry(note).CurrentValues.SetValues(note with { Summary = $"[Corrected/withdrawn] {note.Summary}", Concerns = string.IsNullOrWhiteSpace(note.Concerns) ? "Withdrawn by correction" : $"{note.Concerns} | Withdrawn by correction", RequiresReview = true });
-    AddAudit(context, tenant, currentUser, "care_note.withdrawn", nameof(CareNote), id);
-    context.SaveChanges();
-    return Results.NoContent();
+        var updated = note with
+        {
+            Summary = $"[Corrected/withdrawn] {note.Summary}",
+            Concerns = string.IsNullOrWhiteSpace(note.Concerns) ? "Withdrawn by correction" : $"{note.Concerns} | Withdrawn by correction",
+            RequiresReview = true,
+            Revision = note.Revision + 1
+        };
+        var oldValues = JsonSerializer.Serialize(new { note.Summary, note.PersonalCare, note.MealsAndHydration, note.Medication, note.Concerns, note.RequiresReview, note.Revision });
+        var newValues = JsonSerializer.Serialize(new { updated.Summary, updated.PersonalCare, updated.MealsAndHydration, updated.Medication, updated.Concerns, updated.RequiresReview, updated.Revision });
+        await context.Database.ExecuteSqlInterpolatedAsync($"insert into care_note_amendments(id,care_note_id,organization_id,reason,old_values_json,new_values_json,amended_by) values({Guid.NewGuid()},{id},{tenant.OrganizationId},{"Care note withdrawn through governed correction"},{oldValues},{newValues},{currentUser.UserName})", cancellationToken);
+        context.Entry(note).CurrentValues.SetValues(updated);
+        AddAudit(context, tenant, currentUser, "care_note.withdrawn", nameof(CareNote), id, note.OrganizationId, note.BranchId);
+        await context.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return (IResult)Results.NoContent();
+    });
 });
 phase1.MapGet("/observations", async (ICareRepository repository, ICurrentUserContext currentUser, IContextualAuthorization authorization) =>
 {

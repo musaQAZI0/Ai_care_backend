@@ -73,7 +73,7 @@ public sealed class CareDocumentationScopeRegressionTests(PostgresRegressionFact
             medication = "None", concerns = "Reviewed", requiresReview = true
         });
         Assert.Equal(allowed ? HttpStatusCode.Created : HttpStatusCode.NotFound, amendment.StatusCode);
-        var review = await client.PostAsJsonAsync($"{root}/notes/{note}/reviews", new { status = "Approved", comment = "Scoped review" });
+        var review = await client.PostAsJsonAsync($"{root}/notes/{note}/reviews", new { status = "Approved", comment = "Scoped review", expectedRevision = allowed ? 2 : 1 });
         Assert.Equal(allowed ? HttpStatusCode.Created : HttpStatusCode.NotFound, review.StatusCode);
         var progress = await client.PatchAsJsonAsync($"{root}/alerts/{alert}", new {
             action = "Resolve", immediateAction = "Follow-up completed", externalContact = "Test manager", owner = "Test coordinator"

@@ -145,7 +145,7 @@ public sealed class CareTasksController : ControllerBase
             update visit_tasks set status='Completed', outcome=@outcome, exception_reason=@reason, completed_at=now()
             where id=@task and visit_id=@visit and organization_id=@organization
               and status not in ('Completed','Retired')
-              and (care_plan_task_id is null or exists (
+              and ((care_plan_task_id is null and source_type='AuthorizedManual' and source_reference<>'' and source_created_by<>'') or exists (
                 select 1 from care_plan_tasks source
                 join "CarePlans" plan on plan."Id"=source.care_plan_id
                 join care_plan_versions version on version.care_plan_id=plan."Id"
@@ -186,9 +186,9 @@ public sealed class CareTasksController : ControllerBase
 
         await Execute("""
             insert into visit_tasks
-              (id,visit_id,care_plan_task_id,service_user_id,care_worker_id,organization_id,branch_id,title,category,instructions,is_required,status,outcome,exception_reason,completed_at,created_at)
+              (id,visit_id,care_plan_task_id,service_user_id,care_worker_id,organization_id,branch_id,title,category,instructions,is_required,status,outcome,exception_reason,completed_at,created_at,source_type,source_reference,source_created_by)
             select gen_random_uuid(), @visit, task.id, @person, @worker, @organization, @branch,
-                   task.title, task.category, task.instructions, task.is_required, 'Pending', '', '', null, now()
+                   task.title, task.category, task.instructions, task.is_required, 'Pending', '', '', null, now(), 'CarePlan', task.id::text, 'care-plan-materializer'
             from care_plan_tasks task
             join "CarePlans" plan on plan."Id"=task.care_plan_id
             join care_plan_versions version on version.care_plan_id=plan."Id"
@@ -235,7 +235,8 @@ public sealed class CareTasksController : ControllerBase
         """
         select task.id,task.visit_id,task.care_plan_task_id,task.service_user_id,task.care_worker_id,task.title,task.category,
                task.instructions,task.is_required,task.status,task.outcome,task.exception_reason,task.completed_at,
-               (task.care_plan_task_id is null or exists (
+               task.source_type,task.source_reference,task.source_created_by,
+               ((task.care_plan_task_id is null and task.source_type='AuthorizedManual' and task.source_reference<>'' and task.source_created_by<>'') or exists (
                  select 1 from care_plan_tasks source
                  join "CarePlans" plan on plan."Id"=source.care_plan_id
                  join care_plan_versions version on version.care_plan_id=plan."Id"
@@ -249,10 +250,12 @@ public sealed class CareTasksController : ControllerBase
         reader =>
         {
             var retired = reader.GetString(9) == "Retired";
-            var review = reader.GetString(9) != "Completed" && !retired && !reader.GetBoolean(13);
+            var review = reader.GetString(9) != "Completed" && !retired && !reader.GetBoolean(16);
+            var sourceType = reader.GetString(13);
+            var reviewTitle = sourceType == "LegacyImported" ? "Unattributed legacy task — manager review required" : "Previous plan task — manager review required";
             return new VisitTaskResponse(reader.GetGuid(0),reader.GetGuid(1),reader.IsDBNull(2)?null:reader.GetGuid(2),reader.GetGuid(3),reader.GetGuid(4),
-                retired ? "Previous plan task — retired by manager review" : review ? "Previous plan task — manager review required" : reader.GetString(5),reader.GetString(6),review || retired ? "" : reader.GetString(7),reader.GetBoolean(8),
-                review ? "RequiresReview" : reader.GetString(9),reader.GetString(10),reader.GetString(11),reader.IsDBNull(12)?null:reader.GetDateTime(12));
+                retired ? "Previous plan task — retired by manager review" : review ? reviewTitle : reader.GetString(5),reader.GetString(6),review || retired ? "" : reader.GetString(7),reader.GetBoolean(8),
+                review ? "RequiresReview" : reader.GetString(9),reader.GetString(10),reader.GetString(11),reader.IsDBNull(12)?null:reader.GetDateTime(12),sourceType,reader.GetString(14),reader.GetString(15));
         }, cancellationToken);
 
     private async Task<List<T>> Query<T>(string sql, Action<DbCommand> bind, Func<DbDataReader,T> map, CancellationToken cancellationToken)
@@ -285,4 +288,4 @@ public sealed record CreateCarePlanTaskRequest(string Title,string? Category,str
 public sealed record ReconcileVisitTasksRequest(Guid CarePlanId, string Reason);
 public sealed record RecordVisitTaskOutcomeRequest(string Outcome,string? ExceptionReason);
 public sealed record CarePlanTaskResponse(Guid Id,Guid CarePlanId,Guid ServiceUserId,string Title,string Category,string Instructions,bool IsRequired,string Frequency,string Status);
-public sealed record VisitTaskResponse(Guid Id,Guid VisitId,Guid? CarePlanTaskId,Guid ServiceUserId,Guid CareWorkerId,string Title,string Category,string Instructions,bool IsRequired,string Status,string Outcome,string ExceptionReason,DateTimeOffset? CompletedAt);
+public sealed record VisitTaskResponse(Guid Id,Guid VisitId,Guid? CarePlanTaskId,Guid ServiceUserId,Guid CareWorkerId,string Title,string Category,string Instructions,bool IsRequired,string Status,string Outcome,string ExceptionReason,DateTimeOffset? CompletedAt,string SourceType,string SourceReference,string SourceCreatedBy);

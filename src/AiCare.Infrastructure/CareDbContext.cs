@@ -260,6 +260,8 @@ public sealed class CareDbContext : DbContext
         modelBuilder.Entity<CareNote>(builder =>
         {
             builder.HasKey(note => note.Id);
+            builder.Property(note => note.Revision).HasDefaultValue(1).IsRequired();
+            builder.ToTable(table => table.HasCheckConstraint("CK_CareNotes_Revision", "\"Revision\" > 0"));
             builder.HasIndex(note => new { note.OrganizationId, note.BranchId });
             builder.HasIndex(note => new { note.OrganizationId, note.ServiceUserId });
             builder.Property(note => note.Summary).IsRequired();

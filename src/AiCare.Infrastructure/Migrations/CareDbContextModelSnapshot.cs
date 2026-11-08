@@ -305,6 +305,11 @@ namespace AiCare.Infrastructure.Migrations
                     b.Property<bool>("RequiresReview")
                         .HasColumnType("boolean");
 
+                    b.Property<int>("Revision")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
                     b.Property<Guid>("ServiceUserId")
                         .HasColumnType("uuid");
 
@@ -321,7 +326,10 @@ namespace AiCare.Infrastructure.Migrations
 
                     b.HasIndex("OrganizationId", "ServiceUserId");
 
-                    b.ToTable("CareNotes");
+                    b.ToTable("CareNotes", t =>
+                        {
+                            t.HasCheckConstraint("CK_CareNotes_Revision", "\"Revision\" > 0");
+                        });
                 });
 
             modelBuilder.Entity("AiCare.Domain.CarePlan", b =>

@@ -169,6 +169,18 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
             string fullName;
             string status;
             DateTimeOffset expiresAt;
+            await using (var candidateCommand = CreateCommand(connection))
+            {
+                candidateCommand.CommandText = "select family_member_id,organization_id from family_portal_invitations where token_hash=@token";
+                candidateCommand.Parameters.AddWithValue("token", tokenHash);
+                await using var candidateReader = await candidateCommand.ExecuteReaderAsync(cancellationToken);
+                if (!await candidateReader.ReadAsync(cancellationToken)) throw new InvalidOperationException("Invitation is invalid.");
+                familyMemberId = candidateReader.GetGuid(0);
+                organizationId = candidateReader.GetGuid(1);
+            }
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"select \"Id\" from \"FamilyMembers\" where \"OrganizationId\"={organizationId} and \"Id\"={familyMemberId} for update",
+                cancellationToken);
             await using (var command = CreateCommand(connection))
             {
                 command.CommandText = """
@@ -177,10 +189,12 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
                            i.email, f."FullName", i.status, i.expires_at
                     from family_portal_invitations i
                     join "FamilyMembers" f on f."Id" = i.family_member_id and f."OrganizationId" = i.organization_id
-                    where i.token_hash = @token
-                    for update
+                    where i.token_hash = @token and i.family_member_id=@family and i.organization_id=@organization
+                    for update of i
                     """;
                 command.Parameters.AddWithValue("token", tokenHash);
+                command.Parameters.AddWithValue("family", familyMemberId);
+                command.Parameters.AddWithValue("organization", organizationId);
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 if (!await reader.ReadAsync(cancellationToken)) throw new InvalidOperationException("Invitation is invalid.");
                 invitationId = reader.GetGuid(0);
@@ -227,6 +241,12 @@ public sealed class FamilyPortalStore : IFamilyPortalStore
         await strategy.ExecuteAsync(async () =>
         {
             await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+            // Invitation acceptance locks this same family-member row through its
+            // joined SELECT ... FOR UPDATE. Use it as the common serialization
+            // point so activation cannot race suspension, restoration or revocation.
+            await _db.Database.ExecuteSqlInterpolatedAsync(
+                $"select \"Id\" from \"FamilyMembers\" where \"OrganizationId\"={organizationId} and \"Id\"={familyMemberId} for update",
+                cancellationToken);
             await _db.Database.ExecuteSqlInterpolatedAsync($"select id from family_access_grants where organization_id={organizationId} and family_member_id={familyMemberId} for update", cancellationToken);
             await SetAccessStatusCore(organizationId, actorUserId, actorName, familyMemberId, status, cancellationToken);
             await transaction.CommitAsync(cancellationToken);

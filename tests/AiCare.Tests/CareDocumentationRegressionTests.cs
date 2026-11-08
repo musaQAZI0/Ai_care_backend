@@ -16,7 +16,7 @@ public sealed class CareDocumentationRegressionTests(PostgresRegressionFactory f
     public async Task CareDocumentationGovernanceCreatesAuditedAlertsAmendmentsReviewsAndTimeline()
     {
         await factory.EnsureClinicalSeedAsync();
-        var workerId=Guid.NewGuid();var otherWorkerId=Guid.NewGuid();var personId=Guid.NewGuid();var visitId=Guid.NewGuid();var taskId=Guid.NewGuid();var noteId=Guid.NewGuid();
+        var workerId=Guid.NewGuid();var otherWorkerId=Guid.NewGuid();var personId=Guid.NewGuid();var visitId=Guid.NewGuid();var taskId=Guid.NewGuid();var legacyTaskId=Guid.NewGuid();var noteId=Guid.NewGuid();
         var workerName=$"phase4.worker.{Guid.NewGuid():N}";var otherName=$"phase4.other.{Guid.NewGuid():N}";var adminName=$"phase4.admin.{Guid.NewGuid():N}";
         var starts=new DateTimeOffset(2032,2,1,9,0,0,TimeSpan.Zero);
 
@@ -29,7 +29,8 @@ public sealed class CareDocumentationRegressionTests(PostgresRegressionFactory f
             db.CareNotes.Add(new CareNote(noteId,visitId,personId,workerId,"Baseline care delivered","Washed and dressed","Tea offered","Prompt completed","Raised temperature",true,DateTimeOffset.UtcNow,TenantDefaults.OrganizationId,TenantDefaults.BranchId));
             db.AppUsers.AddRange(User(workerName,UserRole.CareWorker,workerId),User(otherName,UserRole.CareWorker,otherWorkerId),User(adminName,UserRole.Administrator,null));
             await db.SaveChangesAsync();
-            await db.Database.ExecuteSqlRawAsync("insert into visit_tasks(id,visit_id,care_plan_task_id,service_user_id,care_worker_id,organization_id,branch_id,title,category,instructions,is_required,status,outcome,exception_reason,completed_at,created_at) values({0},{1},null,{2},{3},{4},{5},{6},{7},{8},true,'Pending','','',null,now())",taskId,visitId,personId,workerId,TenantDefaults.OrganizationId,TenantDefaults.BranchId,"Medication prompt","Medication","Prompt prescribed medication");
+            await db.Database.ExecuteSqlRawAsync("insert into visit_tasks(id,visit_id,care_plan_task_id,service_user_id,care_worker_id,organization_id,branch_id,title,category,instructions,is_required,status,outcome,exception_reason,completed_at,created_at,source_type,source_reference,source_created_by) values({0},{1},null,{2},{3},{4},{5},{6},{7},{8},true,'Pending','','',null,now(),'AuthorizedManual','clinical-regression-task','regression-fixture')",taskId,visitId,personId,workerId,TenantDefaults.OrganizationId,TenantDefaults.BranchId,"Medication prompt","Medication","Prompt prescribed medication");
+            await db.Database.ExecuteSqlRawAsync("insert into visit_tasks(id,visit_id,care_plan_task_id,service_user_id,care_worker_id,organization_id,branch_id,title,category,instructions,is_required,status,outcome,exception_reason,completed_at,created_at) values({0},{1},null,{2},{3},{4},{5},'Unattributed imported task','General','',true,'Pending','','',null,now())",legacyTaskId,visitId,personId,workerId,TenantDefaults.OrganizationId,TenantDefaults.BranchId);
             await db.SaveChangesAsync();
         }
 
@@ -55,11 +56,14 @@ public sealed class CareDocumentationRegressionTests(PostgresRegressionFactory f
         Assert.Equal(HttpStatusCode.BadRequest,missingReason.StatusCode);
         var amended=await worker.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/amendments",new{reason="Late clarification from worker",summary="Updated care note",personalCare="Washed and dressed",mealsAndHydration="Tea accepted",medication="Prompt completed",concerns="Raised temperature",requiresReview=true});
         Assert.Equal(HttpStatusCode.Created,amended.StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden,(await worker.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews",new{status="Approved",comment="Worker cannot approve"})).StatusCode);
-        Assert.Equal(HttpStatusCode.Created,(await admin.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews",new{status="Approved",comment="Reviewed by manager"})).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await admin.PutAsJsonAsync($"/api/phase1/care-notes/{noteId}",new{visitId,serviceUserId=personId,careWorkerId=workerId,summary="Untracked replacement",personalCare="Changed",mealsAndHydration="Changed",medication="Changed",concerns="Changed",requiresReview=false})).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,(await worker.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews",new{status="Approved",comment="Worker cannot approve",expectedRevision=2})).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await admin.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews",new{status="Approved",comment="Stale manager review",expectedRevision=1})).StatusCode);
+        Assert.Equal(HttpStatusCode.Created,(await admin.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews",new{status="Approved",comment="Reviewed by manager",expectedRevision=2})).StatusCode);
 
         var taskOutcome=await worker.PostAsJsonAsync($"/api/phase1/visits/{visitId}/tasks/{taskId}/outcome",new{outcome="Refused",exceptionReason="Person declined medication prompt"});
         Assert.Equal(HttpStatusCode.OK,taskOutcome.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,(await worker.PostAsJsonAsync($"/api/phase1/visits/{visitId}/tasks/{legacyTaskId}/outcome",new{outcome="Completed",exceptionReason=""})).StatusCode);
 
         Assert.Equal(HttpStatusCode.NoContent,(await admin.PatchAsJsonAsync($"/api/phase1/care-documentation/alerts/{alertId}",new{action="Acknowledge",immediateAction="Worker advised to re-check",externalContact="Duty manager",owner="Care coordinator"})).StatusCode);
         Assert.Equal(HttpStatusCode.NoContent,(await admin.PatchAsJsonAsync($"/api/phase1/care-documentation/alerts/{alertId}",new{action="Resolve",immediateAction="Follow-up completed",externalContact="GP updated",owner="Care coordinator"})).StatusCode);
@@ -71,7 +75,10 @@ public sealed class CareDocumentationRegressionTests(PostgresRegressionFactory f
         using var verify=factory.Services.CreateScope();
         var verifyDb=verify.ServiceProvider.GetRequiredService<CareDbContext>();
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="care_note.reviewed"));
+        Assert.Equal(1,await verifyDb.Database.SqlQuery<int>($"select count(*)::integer as \"Value\" from care_note_reviews where care_note_id={noteId}").SingleAsync());
+        Assert.Equal(2,await verifyDb.Database.SqlQuery<int>($"select care_note_revision as \"Value\" from care_note_reviews where care_note_id={noteId}").SingleAsync());
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="care_note.amended"));
+        Assert.False(await verifyDb.AuditEvents.AnyAsync(x=>x.EntityId==legacyTaskId&&x.Action=="visit_task.outcome_recorded"));
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.EntityId==alertId&&x.Action=="deterioration_alert.resolved"));
     }
 

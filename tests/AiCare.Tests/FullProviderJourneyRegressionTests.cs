@@ -103,7 +103,7 @@ public sealed class FullProviderJourneyRegressionTests(PostgresRegressionFactory
 
         var amended = await worker.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/amendments", new { reason = "Worker clarification", summary = "Morning care completed", personalCare = "Supported wash and dress", mealsAndHydration = "Breakfast and fluids accepted", medication = "Medication prompt completed", concerns = "No concerns", requiresReview = true });
         Assert.Equal(HttpStatusCode.Created, amended.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, (await manager.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews", new { status = "Approved", comment = "Reviewed for full journey" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await manager.PostAsJsonAsync($"/api/phase1/care-documentation/notes/{noteId}/reviews", new { status = "Approved", comment = "Reviewed for full journey", expectedRevision = 1 })).StatusCode);
 
         var handover = await worker.PostAsJsonAsync($"/api/phase1/visit-operations/visits/{visitId}/handovers", new { summary = "Morning care completed", outstandingActions = "Monitor hydration at next call", urgent = false, attachmentReference = "" });
         Assert.Equal(HttpStatusCode.Created, handover.StatusCode);
@@ -181,7 +181,7 @@ public sealed class FullProviderJourneyRegressionTests(PostgresRegressionFactory
     private sealed record AcknowledgementDto(Guid Id, Guid CareWorkerId, string AcknowledgedBy, DateTimeOffset AcknowledgedAt);
     private sealed record EventDto(Guid Id, string FromStatus, string ToStatus, string Reason, string Comment, DateTimeOffset PerformedAt);
     private sealed record LifecycleDto(CarePlanDto CarePlan, VersionDto Version, List<SignatureDto> Signatures, List<AcknowledgementDto> Acknowledgements, List<EventDto> Events, bool RequiredSignaturesSatisfied);
-    private sealed record VisitTaskDto(Guid Id, Guid VisitId, Guid? CarePlanTaskId, Guid ServiceUserId, Guid CareWorkerId, string Title, string Category, string Instructions, bool IsRequired, string Status, string Outcome, string ExceptionReason, DateTimeOffset? CompletedAt);
+    private sealed record VisitTaskDto(Guid Id, Guid VisitId, Guid? CarePlanTaskId, Guid ServiceUserId, Guid CareWorkerId, string Title, string Category, string Instructions, bool IsRequired, string Status, string Outcome, string ExceptionReason, DateTimeOffset? CompletedAt, string SourceType, string SourceReference, string SourceCreatedBy);
     private sealed record InvoiceBatchDto(int Count, List<InvoiceDto> Invoices);
     private sealed record InvoiceDto(Guid Id, Guid ServiceUserId, decimal Amount);
 }

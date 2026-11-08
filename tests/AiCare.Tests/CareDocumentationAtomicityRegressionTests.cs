@@ -17,6 +17,7 @@ public sealed class CareDocumentationAtomicityRegressionTests(PostgresRegression
     [Theory]
     [InlineData("amendment", "care_note.amended")]
     [InlineData("review", "care_note.reviewed")]
+    [InlineData("withdrawal", "care_note.withdrawn")]
     [InlineData("alert", "deterioration_alert.resolved")]
     public async Task FailedAuditRollsBackDocumentationEvidence(string operation, string action)
     {
@@ -35,7 +36,8 @@ public sealed class CareDocumentationAtomicityRegressionTests(PostgresRegression
             var response = operation switch
             {
                 "amendment" => await client.PostAsJsonAsync($"{Root}/notes/{data.Note}/amendments", Amendment("Changed note")),
-                "review" => await client.PostAsJsonAsync($"{Root}/notes/{data.Note}/reviews", new { status = "Approved", comment = "Synthetic review" }),
+                "review" => await client.PostAsJsonAsync($"{Root}/notes/{data.Note}/reviews", new { status = "Approved", comment = "Synthetic review", expectedRevision = 1 }),
+                "withdrawal" => await client.DeleteAsync($"/api/phase1/care-notes/{data.Note}"),
                 _ => await client.PatchAsJsonAsync($"{Root}/alerts/{data.Alert}", new { action = "Resolve", immediateAction = "Follow-up", externalContact = "Test manager", owner = "Test coordinator" })
             };
             Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
