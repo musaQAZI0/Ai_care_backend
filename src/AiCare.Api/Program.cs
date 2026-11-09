@@ -318,13 +318,14 @@ app.MapGet("/health/ready", (CareDbContext context, IConfiguration configuration
         var provider = configuration["Storage:Provider"] ?? "Local";
         var storageReady = !string.Equals(provider, "Supabase", StringComparison.OrdinalIgnoreCase) ||
             (HasConfig(configuration, "Supabase:Url") && HasConfig(configuration, "Supabase:ServiceRoleKey") && HasConfig(configuration, "Supabase:Bucket"));
-        return context.Database.CanConnect() && storageReady
-            ? Results.Ok(new { status = "ready", checkedAt = DateTimeOffset.UtcNow })
-            : Results.Problem("Service readiness check failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        var databaseConnected = context.Database.CanConnect();
+        return databaseConnected && storageReady
+            ? Results.Ok(new { status = "ready", databaseConnected, storageReady, storageProvider = provider, checkedAt = DateTimeOffset.UtcNow })
+            : Results.Json(new { status = "not_ready", databaseConnected, storageReady, storageProvider = provider, checkedAt = DateTimeOffset.UtcNow }, statusCode: StatusCodes.Status503ServiceUnavailable);
     }
     catch (Exception)
     {
-        return Results.Problem("Service readiness check failed.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        return Results.Json(new { status = "not_ready", databaseConnected = false, storageReady = false, checkedAt = DateTimeOffset.UtcNow }, statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 });
 
