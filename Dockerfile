@@ -28,4 +28,6 @@ ENV ASPNETCORE_ENVIRONMENT=Staging
 ENV DOTNET_USE_POLLING_FILE_WATCHER=true
 ENV DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 CMD curl --fail --silent http://127.0.0.1:${PORT:-10000}/health/live >/dev/null || exit 1
-CMD ["sh", "-c", "exec dotnet AiCare.Api.dll"]
+# Render supplies PORT at runtime. Pass it explicitly so Kestrel binds on the
+# public interface even when ASPNETCORE_URLS is not configured in the service.
+CMD ["sh", "-c", "exec dotnet AiCare.Api.dll --urls http://0.0.0.0:${PORT:-10000}"]
