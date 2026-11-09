@@ -89,7 +89,10 @@ public sealed class FinanceFoundationRegressionTests(PostgresRegressionFactory f
         using(var setup=factory.Services.CreateScope())
         {
             var db=setup.ServiceProvider.GetRequiredService<CareDbContext>();db.AppUsers.Add(User(name,UserRole.BackOffice));await db.SaveChangesAsync();
-            await db.Database.ExecuteSqlAsync($"alter table \"AuditEvents\" add constraint finance_foundation_audit_rejected check (\"Actor\" <> {name}) not valid");
+            // PostgreSQL does not allow bind parameters inside ALTER TABLE constraint expressions.
+            // The generated test username is local fixture data; quote it as a SQL literal explicitly.
+            var actorLiteral = name.Replace("'", "''", StringComparison.Ordinal);
+            await db.Database.ExecuteSqlRawAsync($"alter table \"AuditEvents\" add constraint finance_foundation_audit_rejected check (\"Actor\" <> '{actorLiteral}') not valid");
         }
         try
         {
