@@ -41,7 +41,15 @@ public sealed class MedicationMonitoringController(CareDbContext db, ITenantCont
 
     [HttpPost("{alertId:guid}/progress")]
     [Authorize(Roles = "CareCoordinator,CareManager,Administrator")]
-    public async Task<IActionResult> Progress(Guid medicationId,Guid alertId,MedicationAlertDecision request,CancellationToken token)
+    public Task<IActionResult> Progress(Guid medicationId,Guid alertId,MedicationAlertDecision request,CancellationToken token)
+        =>db.Database.CreateExecutionStrategy().ExecuteAsync(async()=>
+        {
+            await using var tx=await db.Database.BeginTransactionAsync(token);
+            var result=await ProgressCore(medicationId,alertId,request,token);
+            await tx.CommitAsync(token);return result;
+        });
+
+    private async Task<IActionResult> ProgressCore(Guid medicationId,Guid alertId,MedicationAlertDecision request,CancellationToken token)
     {
         if (!await Accessible(medicationId,token)) return NotFound();
         if (request.Action is not ("Acknowledge" or "Start" or "Resolve" or "Reopen") ||

@@ -37,6 +37,7 @@ public sealed class MedicationChangeActivationService(CareDbContext db)
         {
             var proposal=JsonSerializer.Deserialize<MedicationChangeProposal>(change.ProposalJson);
             if(proposal is null)return "Proposed regimen could not be read.";
+            if(proposal.AdministrationSafety is { } safety && MedicationAdministrationSafetyValidation.Validate(safety) is { } safetyError)return safetyError;
             if (!MedicationDoseTimes.TryNormalize(proposal.ScheduledLocalTimes, out var scheduledTimes) ||
                 proposal.IsPrn && scheduledTimes.Length > 0)
                 return "Approved dose times are invalid. Reconcile and review the instruction again.";
@@ -50,7 +51,7 @@ public sealed class MedicationChangeActivationService(CareDbContext db)
                   review_due_at=@reviewDue,last_reconciled_at=now(),reconciled_by=@reviewerName,
                   reconciliation_status='Verified',source_type=@sourceType,source_reference=@sourceReference,
                   reviewed_by_user_id=@reviewerId,reviewed_at=now(),change_reason=@reason,
-                  scheduled_local_times=cast(@scheduledTimes as jsonb),
+                  scheduled_local_times=cast(@scheduledTimes as jsonb),administration_safety=cast(@administrationSafety as jsonb),
                   profile_version=profile_version+1,updated_at=now()
                   where medication_id=@medication and organization_id=@organization and branch_id=@branch
                 """, c => {
@@ -63,6 +64,7 @@ public sealed class MedicationChangeActivationService(CareDbContext db)
                     Add(c,"prnIndication",proposal.PrnIndication.Trim());Add(c,"effectReview",proposal.PrnEffectReviewMinutes);
                     Add(c,"witness",proposal.RequiresWitness);Add(c,"reviewDue",proposal.ReviewDueAt);
                     Add(c,"sourceType",change.SourceType);Add(c,"sourceReference",change.SourceReference);Add(c,"reason",change.Reason);
+                    Add(c,"administrationSafety",proposal.AdministrationSafety is null?null:JsonSerializer.Serialize(proposal.AdministrationSafety));
                     Add(c,"scheduledTimes",JsonSerializer.Serialize(scheduledTimes));
                 }, token);
         }

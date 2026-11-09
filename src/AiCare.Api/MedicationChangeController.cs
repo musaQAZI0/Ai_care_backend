@@ -47,6 +47,8 @@ public sealed class MedicationChangeController(CareDbContext db, ITenantContext 
             string.IsNullOrWhiteSpace(request.PrescriberInstruction))
             return BadRequest(new { message = "Change type, reason, source, reference and prescriber instruction are required." });
         if (request.EffectiveAt < DateTimeOffset.UtcNow.AddDays(-30)) return BadRequest(new { message = "Effective time is too far in the past." });
+        if(request.Proposal?.AdministrationSafety is { } safety && MedicationAdministrationSafetyValidation.Validate(safety) is { } safetyError)
+            return BadRequest(new { message=safetyError });
         if (request.ChangeType == "Regimen" && InvalidProposal(request.Proposal, medication.IsPrn))
             return BadRequest(new { message = "Complete proposed dose, route, schedule, prescriber, form, strength, indication, and PRN protocol are required." });
         if (request.Proposal is { } proposed &&
@@ -233,7 +235,7 @@ public sealed class MedicationChangeController(CareDbContext db, ITenantContext 
     private static DateTimeOffset? Date(DbDataReader r,int i)=>r.IsDBNull(i)?null:r.GetFieldValue<DateTimeOffset>(i);
     private static void Add(DbCommand c,string n,object? v){var p=c.CreateParameter();p.ParameterName=n;p.Value=v??DBNull.Value;c.Parameters.Add(p);}
 }
-public sealed record MedicationChangeProposal(string Dosage,string Route,string Schedule,bool IsPrn,string Indication,string Prescriber,string Form,string Strength,string DoseUnit,string Frequency,string AdministrationInstructions,DateTimeOffset? StartDate,DateTimeOffset? EndDate,int DoseWindowMinutes,int? MaxPrnDoses24h,int? MinPrnIntervalMinutes,string PrnIndication,int? PrnEffectReviewMinutes,bool RequiresWitness,DateTimeOffset? ReviewDueAt,string[]? ScheduledLocalTimes=null);
+public sealed record MedicationChangeProposal(string Dosage,string Route,string Schedule,bool IsPrn,string Indication,string Prescriber,string Form,string Strength,string DoseUnit,string Frequency,string AdministrationInstructions,DateTimeOffset? StartDate,DateTimeOffset? EndDate,int DoseWindowMinutes,int? MaxPrnDoses24h,int? MinPrnIntervalMinutes,string PrnIndication,int? PrnEffectReviewMinutes,bool RequiresWitness,DateTimeOffset? ReviewDueAt,string[]? ScheduledLocalTimes=null,MedicationAdministrationSafety? AdministrationSafety=null);
 public sealed record MedicationChangeRequest(string ChangeType,MedicationChangeProposal? Proposal,DateTimeOffset EffectiveAt,string Reason,string SourceType,string SourceReference,string PrescriberInstruction);
 public sealed record MedicationChangeReviewRequest(string Decision,string Reason);
 internal sealed record MedicationChangeRow(Guid Id,Guid MedicationId,string ChangeType,string Status,int BaselineProfileVersion,string ProposalJson,string Reason,string SourceType,string SourceReference,Guid RequestedByUserId,DateTimeOffset EffectiveAt,Guid? ReviewedByUserId,string ReviewedBy);

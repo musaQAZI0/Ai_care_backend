@@ -13,7 +13,7 @@ namespace AiCare.Api;
 [ApiController]
 [Authorize(Policy="Phase1User")]
 [Route("api/phase1/emar-safety")]
-public sealed class EmarOperationsController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user):ControllerBase
+public sealed partial class EmarOperationsController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user):ControllerBase
 {
  [HttpPost("medications/{medicationId:guid}/stock")]
  [Authorize(Roles="CareCoordinator,CareManager,Administrator")]
@@ -31,7 +31,7 @@ public sealed class EmarOperationsController(CareDbContext db,ITenantContext ten
  }
 
  [HttpGet("medications/{medicationId:guid}/stock")]
- public async Task<IActionResult> StockHistory(Guid medicationId,CancellationToken token){if(await Profile(medicationId,token) is null)return NotFound();return Ok(await Query("select id,transaction_type,quantity,balance_before,balance_after,reference,reason,witness_name,created_by,created_at from medication_stock_transactions where medication_id=@medication and organization_id=@organization and branch_id=@branch order by created_at desc",c=>Add(c,"medication",medicationId),r=>(object)new{id=r.GetGuid(0),transactionType=r.GetString(1),quantity=r.GetDecimal(2),balanceBefore=r.GetDecimal(3),balanceAfter=r.GetDecimal(4),reference=r.GetString(5),reason=r.GetString(6),witnessName=r.GetString(7),createdBy=r.GetString(8),createdAt=r.GetFieldValue<DateTimeOffset>(9)},token));}
+ public async Task<IActionResult> StockHistory(Guid medicationId,CancellationToken token){if(await Profile(medicationId,token) is null)return NotFound();return Ok(await Query("select id,transaction_type,quantity,balance_before,balance_after,reference,reason,witness_name,created_by,created_at,counted_balance from medication_stock_transactions where medication_id=@medication and organization_id=@organization and branch_id=@branch order by created_at desc",c=>Add(c,"medication",medicationId),r=>(object)new{id=r.GetGuid(0),transactionType=r.GetString(1),quantity=r.GetDecimal(2),balanceBefore=r.GetDecimal(3),balanceAfter=r.GetDecimal(4),reference=r.GetString(5),reason=r.GetString(6),witnessName=r.GetString(7),createdBy=r.GetString(8),createdAt=r.GetFieldValue<DateTimeOffset>(9),countedBalance=Decimal(r,10)},token));}
 
  [HttpPost("mar/{marId:guid}/prn-effect")]
  public async Task<IActionResult> PrnEffect(Guid marId,PrnEffectOperationRequest request,CancellationToken token)

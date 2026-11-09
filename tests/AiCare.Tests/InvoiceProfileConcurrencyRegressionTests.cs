@@ -106,6 +106,64 @@ public sealed class InvoiceProfileConcurrencyRegressionTests(PostgresRegressionF
         Assert.True(await verifyDb.AuditEvents.AnyAsync(x=>x.Action=="finance.invoice_profile_scheduled"&&x.Actor==financeName));
     }
 
+    [Fact]
+    public async Task NumberPreviewUsesEffectiveSettingsAndDefaultWidthWhenCustomNumberingIsDisabled()
+    {
+        await factory.EnsureClinicalSeedAsync();
+        using var finance = await Login("admin");
+        var before = await Profile(finance);
+        object NumberingPayload(int version, bool enabled, string prefix, DateTimeOffset? effectiveFrom = null) => new
+        {
+            providerName = "Numbering regression provider", providerAddress = "1 Version Street",
+            providerEmail = "billing@example.test", providerPhone = "020 0000 0000",
+            companyNumber = "12345678", vatNumber = "", remittanceDetails = "Quote invoice number",
+            paymentTermsDays = 30, vatRate = 0m, vatExemptionReason = "Regression non-taxable supply",
+            expectedVersion = version, customNumberingEnabled = enabled, invoiceNumberPrefix = prefix,
+            invoiceNumberStart = 10000L, invoiceNumberPadding = 1, effectiveFrom
+        };
+        var saved = await finance.PutAsJsonAsync("/api/phase1/finance/invoice-profile", NumberingPayload(before.Version, true, "NOW-"));
+        Assert.Equal(HttpStatusCode.NoContent, saved.StatusCode);
+        var current = await Profile(finance);
+        var scheduled = await finance.PutAsJsonAsync("/api/phase1/finance/invoice-profile",
+            NumberingPayload(current.Version, true, "FUTURE-", DateTimeOffset.UtcNow.AddDays(7)));
+        Assert.Equal(HttpStatusCode.NoContent, scheduled.StatusCode);
+        var preview = await finance.GetFromJsonAsync<JsonElement>("/api/phase1/finance/invoice-profile/number-preview");
+        Assert.Equal($"NOW-{preview.GetProperty("year").GetInt32()}-{preview.GetProperty("nextValue").GetInt64()}",
+            preview.GetProperty("invoiceNumber").GetString());
+
+        current = await Profile(finance);
+        saved = await finance.PutAsJsonAsync("/api/phase1/finance/invoice-profile", NumberingPayload(current.Version, false, "IGNORED-"));
+        Assert.Equal(HttpStatusCode.NoContent, saved.StatusCode);
+        preview = await finance.GetFromJsonAsync<JsonElement>("/api/phase1/finance/invoice-profile/number-preview");
+        Assert.False(preview.GetProperty("enabled").GetBoolean());
+        Assert.Equal($"INV-{preview.GetProperty("year").GetInt32()}-{preview.GetProperty("nextValue").GetInt64():D6}",
+            preview.GetProperty("invoiceNumber").GetString());
+    }
+
+    [Theory]
+    [InlineData("inv-")]
+    [InlineData("INV.2026")]
+    [InlineData("INV-£")]
+    [InlineData("   ")]
+    public async Task InvalidNumberingPrefixesReturnValidationErrorsWithoutChangingTheProfile(string prefix)
+    {
+        await factory.EnsureClinicalSeedAsync();
+        using var finance = await Login("admin");
+        var before = await Profile(finance);
+        var response = await finance.PutAsJsonAsync("/api/phase1/finance/invoice-profile", new
+        {
+            providerName = "Invalid numbering edit", providerAddress = "1 Version Street",
+            providerEmail = "billing@example.test", providerPhone = "020 0000 0000",
+            companyNumber = "12345678", vatNumber = "", remittanceDetails = "Quote invoice number",
+            paymentTermsDays = 30, vatRate = 0m, vatExemptionReason = "Regression non-taxable supply",
+            expectedVersion = before.Version, invoiceNumberPrefix = prefix
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var after = await Profile(finance);
+        Assert.Equal(before.Version, after.Version);
+        Assert.Equal(before.ProviderName, after.ProviderName);
+    }
+
     private static object Payload(string providerName, int expectedVersion) => new
     {
         providerName, providerAddress = "1 Version Street", providerEmail = "billing@example.test",

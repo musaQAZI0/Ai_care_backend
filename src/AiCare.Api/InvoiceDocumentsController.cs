@@ -56,8 +56,20 @@ public sealed class InvoiceDocumentsController(
     {
         var year = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).Year;
         await using var command = await Command("""
-            select coalesce(p.custom_numbering_enabled,false),coalesce(p.invoice_number_prefix,'INV-'),coalesce(p.invoice_number_start,1),coalesce(p.invoice_number_padding,6),coalesce(s.next_value,p.invoice_number_start,1)
-            from finance_invoice_profiles p left join finance_invoice_sequences s on s.organization_id=p.organization_id and s.invoice_year=@year
+            with settings as (
+                select coalesce((v.profile_snapshot->>'customNumberingEnabled')::boolean,p.custom_numbering_enabled) enabled,
+                       coalesce(v.profile_snapshot->>'invoiceNumberPrefix',p.invoice_number_prefix) prefix,
+                       coalesce((v.profile_snapshot->>'invoiceNumberStart')::bigint,p.invoice_number_start) start_value,
+                       coalesce((v.profile_snapshot->>'invoiceNumberPadding')::int,p.invoice_number_padding) padding,
+                       p.organization_id,p.branch_id
+                from finance_invoice_profiles p left join lateral (
+                    select profile_snapshot from finance_invoice_profile_versions
+                    where organization_id=p.organization_id and branch_id=p.branch_id and effective_from<=now()
+                    order by effective_from desc,version desc limit 1
+                ) v on true
+            )
+            select p.enabled,p.prefix,p.start_value,p.padding,coalesce(s.next_value,case when p.enabled then p.start_value else 1 end)
+            from settings p left join finance_invoice_sequences s on s.organization_id=p.organization_id and s.invoice_year=@year
             where p.organization_id=@organization and p.branch_id=@branch
             """, token);
         Add(command, "year", year);
@@ -67,7 +79,7 @@ public sealed class InvoiceDocumentsController(
         var prefix = reader.GetString(1);
         var next = reader.GetInt64(4);
         var padding = reader.GetInt32(3);
-        return Ok(new { year, enabled, nextValue = next, invoiceNumber = $"{(enabled ? prefix : "INV-")}{year}-{next.ToString().PadLeft(padding, '0')}" });
+        return Ok(new { year, enabled, nextValue = next, invoiceNumber = InvoiceNumberFormatter.Format(year, next, enabled, prefix, padding) });
     }
 
     [HttpGet("invoice-profile/logo")]
@@ -123,6 +135,8 @@ public sealed class InvoiceDocumentsController(
     [HttpPut("invoice-profile")]
     public async Task<IActionResult> SaveProfile(InvoiceProfileRequest request, CancellationToken token)
     {
+        if (!InvoiceNumberFormatter.IsValidPrefix(request.InvoiceNumberPrefix))
+            return BadRequest(new { message = "Invoice prefix must contain 1 to 20 uppercase letters, digits, slashes, underscores or hyphens." });
         var now = DateTimeOffset.UtcNow;
         if (request.ExpectedVersion < 0 || string.IsNullOrWhiteSpace(request.ProviderName) || request.ProviderName.Trim().Length > 200
             || request.ProviderAddress?.Trim().Length > 1000 || request.ProviderEmail?.Trim().Length > 254
@@ -133,7 +147,6 @@ public sealed class InvoiceDocumentsController(
             || string.IsNullOrWhiteSpace(request.CurrencySymbol) || request.CurrencySymbol.Trim().Length > 8
             || string.IsNullOrWhiteSpace(request.TaxLabel) || request.TaxLabel.Trim().Length > 30
             || request.VatRoundingPolicy is not ("Early" or "Late")
-            || request.InvoiceNumberPrefix?.Trim().Length is < 1 or > 20 || (request.InvoiceNumberPrefix??"").Any(c=>!(char.IsAsciiLetterOrDigit(c)||c is '/' or '_' or '-'))
             || request.InvoiceNumberStart is < 1 or > 999999999999 || request.InvoiceNumberPadding is < 1 or > 12
             || request.EffectiveFrom is DateTimeOffset effectiveFrom && (effectiveFrom < now.AddMinutes(-5) || effectiveFrom > now.AddYears(2))
             || request.PaymentTermsDays is < 1 or > 365 || request.VatRate is < 0 or > 100)
@@ -302,7 +315,7 @@ public sealed class InvoiceDocumentsController(
         await using var version=await Command("""
             insert into finance_invoice_profile_versions(id,organization_id,branch_id,version,effective_from,profile_snapshot,changed_by)
             select @id,p.organization_id,p.branch_id,coalesce((select max(v.version) from finance_invoice_profile_versions v where v.organization_id=p.organization_id and v.branch_id=p.branch_id),0)+1,now(),
-                jsonb_build_object('providerName',p.provider_name,'providerAddress',p.provider_address,'providerEmail',p.provider_email,'providerPhone',p.provider_phone,'companyNumber',p.company_number,'vatNumber',p.vat_number,'remittanceDetails',p.remittance_details,'paymentTermsDays',p.default_payment_terms_days,'vatRate',p.default_vat_rate,'vatExemptionReason',p.vat_exemption_reason,'defaultCurrency',trim(p.default_currency),'currencySymbol',p.currency_symbol,'taxLabel',p.tax_label,'vatRoundingPolicy',p.vat_rounding_policy,'logoSha256',p.logo_sha256),@actor
+                jsonb_build_object('providerName',p.provider_name,'providerAddress',p.provider_address,'providerEmail',p.provider_email,'providerPhone',p.provider_phone,'companyNumber',p.company_number,'vatNumber',p.vat_number,'remittanceDetails',p.remittance_details,'paymentTermsDays',p.default_payment_terms_days,'vatRate',p.default_vat_rate,'vatExemptionReason',p.vat_exemption_reason,'defaultCurrency',trim(p.default_currency),'currencySymbol',p.currency_symbol,'taxLabel',p.tax_label,'vatRoundingPolicy',p.vat_rounding_policy,'customNumberingEnabled',p.custom_numbering_enabled,'invoiceNumberPrefix',p.invoice_number_prefix,'invoiceNumberStart',p.invoice_number_start,'invoiceNumberPadding',p.invoice_number_padding,'logoSha256',p.logo_sha256),@actor
             from finance_invoice_profiles p where p.organization_id=@organization and p.branch_id=@branch
             """,token);Add(version,"id",Guid.NewGuid());await version.ExecuteNonQueryAsync(token);
     }
@@ -316,10 +329,11 @@ public sealed class InvoiceDocumentsController(
         await using var version=await Command("""
             insert into finance_invoice_profile_versions(id,organization_id,branch_id,version,effective_from,profile_snapshot,changed_by)
             values(@id,@organization,@branch,@version,@effectiveFrom,
-                jsonb_build_object('providerName',@provider,'providerAddress',@address,'providerEmail',@email,'providerPhone',@phone,'companyNumber',@company,'vatNumber',@vatNumber,'remittanceDetails',@remittance,'paymentTermsDays',@terms,'vatRate',@vatRate,'vatExemptionReason',@exemption,'defaultCurrency',@currency,'currencySymbol',@symbol,'taxLabel',@taxLabel,'vatRoundingPolicy',@roundingPolicy,'logoSha256',(select logo_sha256 from finance_invoice_profiles where organization_id=@organization and branch_id=@branch)),@actor)
+                jsonb_build_object('providerName',@provider,'providerAddress',@address,'providerEmail',@email,'providerPhone',@phone,'companyNumber',@company,'vatNumber',@vatNumber,'remittanceDetails',@remittance,'paymentTermsDays',@terms,'vatRate',@vatRate,'vatExemptionReason',@exemption,'defaultCurrency',@currency,'currencySymbol',@symbol,'taxLabel',@taxLabel,'vatRoundingPolicy',@roundingPolicy,'customNumberingEnabled',@numberingEnabled,'invoiceNumberPrefix',@numberPrefix,'invoiceNumberStart',@numberStart,'invoiceNumberPadding',@numberPadding,'logoSha256',(select logo_sha256 from finance_invoice_profiles where organization_id=@organization and branch_id=@branch)),@actor)
             """,token);
         Add(version,"id",Guid.NewGuid());Add(version,"version",request.ExpectedVersion+1);Add(version,"effectiveFrom",effectiveFrom);
         Add(version,"provider",request.ProviderName.Trim());Add(version,"address",request.ProviderAddress?.Trim()??"");Add(version,"email",request.ProviderEmail?.Trim()??"");Add(version,"phone",request.ProviderPhone?.Trim()??"");Add(version,"company",request.CompanyNumber?.Trim()??"");Add(version,"vatNumber",request.VatNumber?.Trim()??"");Add(version,"remittance",request.RemittanceDetails?.Trim()??"");Add(version,"terms",request.PaymentTermsDays);Add(version,"vatRate",request.VatRate);Add(version,"exemption",request.VatExemptionReason?.Trim()??"");Add(version,"currency",request.DefaultCurrency.Trim());Add(version,"symbol",request.CurrencySymbol.Trim());Add(version,"taxLabel",request.TaxLabel.Trim());Add(version,"roundingPolicy",request.VatRoundingPolicy);
+        Add(version,"numberingEnabled",request.CustomNumberingEnabled);Add(version,"numberPrefix",request.InvoiceNumberPrefix.Trim());Add(version,"numberStart",request.InvoiceNumberStart);Add(version,"numberPadding",request.InvoiceNumberPadding);
         await version.ExecuteNonQueryAsync(token);
     }
     private IActionResult StaleProfile(int currentVersion)=>Conflict(new{message="Invoice settings changed after you opened them. Reload the latest settings before saving again.",currentVersion});

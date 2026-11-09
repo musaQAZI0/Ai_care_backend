@@ -78,7 +78,11 @@ public sealed record Rule(string Purpose, string Scope)
         if (method == "POST" && path == "/api/phase1/mar") return new("medication", "emar.schedule");
         if (method == "POST" && Has("/emar-safety/mar/") && Ends("/record")) return new("medication", "emar.administration.record");
         if (method == "POST" && Has("/medication-safety/mar/") && Ends("/events")) return new("medication", "emar.safety-event.record");
+        if (method == "POST" && Has("/emar-safety/medications/") && Ends("/stock-count")) return new("medication", "emar.stock.count");
         if (method == "POST" && Has("/emar-safety/medications/") && Ends("/stock")) return new("medication", "emar.stock.record");
+        if (method == "POST" && Has("/emar-safety/witness-requests/") && Ends("/attest")) return new("medication", "emar.witness.attest");
+        if (method == "POST" && Has("/emar-safety/mar/") && Ends("/witness-request")) return new("medication", "emar.witness.request");
+        if (method == "POST" && Has("/emar-safety/recovery-reviews/") && Ends("/resolve")) return new("medication", "emar.recovery.resolve");
         if (method == "POST" && Has("/emar-safety/mar/") && Ends("/corrections")) return new("medication", "emar.correction.record");
         return null;
     }
