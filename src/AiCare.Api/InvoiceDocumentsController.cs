@@ -29,7 +29,7 @@ public sealed class InvoiceDocumentsController(
     {
         await using var command = await Command("""
             select provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,logo_sha256,
-                   trim(default_currency),currency_symbol,tax_label,vat_rounding_policy,
+                   trim(default_currency),currency_symbol,tax_label,vat_rounding_policy,custom_numbering_enabled,invoice_number_prefix,invoice_number_start,invoice_number_padding,
                    coalesce((select max(v.version) from finance_invoice_profile_versions v where v.organization_id=p.organization_id and v.branch_id=p.branch_id),0)
             from finance_invoice_profiles p where organization_id=@organization and branch_id=@branch
             """, token);
@@ -40,14 +40,14 @@ public sealed class InvoiceDocumentsController(
                 providerPhone=reader.GetString(3),companyNumber=reader.GetString(4),vatNumber=reader.GetString(5),
                 remittanceDetails=reader.GetString(6),paymentTermsDays=reader.GetInt32(7),vatRate=reader.GetDecimal(8),
                 vatExemptionReason=reader.GetString(9),logoAvailable=!reader.IsDBNull(10),logoVersion=reader.IsDBNull(10)?null:reader.GetString(10),
-                defaultCurrency=reader.GetString(11),currencySymbol=reader.GetString(12),taxLabel=reader.GetString(13),vatRoundingPolicy=reader.GetString(14),
-                version=reader.GetInt32(15)
+                defaultCurrency=reader.GetString(11),currencySymbol=reader.GetString(12),taxLabel=reader.GetString(13),vatRoundingPolicy=reader.GetString(14),customNumberingEnabled=reader.GetBoolean(15),invoiceNumberPrefix=reader.GetString(16),invoiceNumberStart=reader.GetInt64(17),invoiceNumberPadding=reader.GetInt32(18),
+                version=reader.GetInt32(19)
             });
         await reader.DisposeAsync();
         var organization = await db.Organizations.AsNoTracking().SingleAsync(x => x.Id == tenant.OrganizationId, token);
         return Ok(new {
             providerName=organization.Name,providerAddress="",providerEmail="",providerPhone="",companyNumber="",
-            vatNumber="",remittanceDetails="",paymentTermsDays=30,vatRate=0m,vatExemptionReason="VAT not charged",defaultCurrency="GBP",currencySymbol="£",taxLabel="VAT",vatRoundingPolicy="Early",logoAvailable=false,logoVersion=(string?)null,version=0
+            vatNumber="",remittanceDetails="",paymentTermsDays=30,vatRate=0m,vatExemptionReason="VAT not charged",defaultCurrency="GBP",currencySymbol="£",taxLabel="VAT",vatRoundingPolicy="Early",customNumberingEnabled=false,invoiceNumberPrefix="INV-",invoiceNumberStart=1L,invoiceNumberPadding=6,logoAvailable=false,logoVersion=(string?)null,version=0
         });
     }
 
@@ -114,6 +114,8 @@ public sealed class InvoiceDocumentsController(
             || string.IsNullOrWhiteSpace(request.CurrencySymbol) || request.CurrencySymbol.Trim().Length > 8
             || string.IsNullOrWhiteSpace(request.TaxLabel) || request.TaxLabel.Trim().Length > 30
             || request.VatRoundingPolicy is not ("Early" or "Late")
+            || request.InvoiceNumberPrefix?.Trim().Length is < 1 or > 20 || (request.InvoiceNumberPrefix??"").Any(c=>!(char.IsAsciiLetterOrDigit(c)||c is '/' or '_' or '-'))
+            || request.InvoiceNumberStart is < 1 or > 999999999999 || request.InvoiceNumberPadding is < 1 or > 12
             || request.EffectiveFrom is DateTimeOffset effectiveFrom && (effectiveFrom < now.AddMinutes(-5) || effectiveFrom > now.AddYears(2))
             || request.PaymentTermsDays is < 1 or > 365 || request.VatRate is < 0 or > 100)
             return BadRequest(new { message = "Provider name, valid payment terms, a VAT rate between 0 and 100, and an effective time within two years are required." });
@@ -155,11 +157,11 @@ public sealed class InvoiceDocumentsController(
         }
 
         await using var command = await Command("""
-            insert into finance_invoice_profiles(organization_id,branch_id,provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,default_currency,currency_symbol,tax_label,vat_rounding_policy,updated_at)
-            values(@organization,@branch,@provider,@address,@email,@phone,@company,@vatNumber,@remittance,@terms,@vatRate,@exemption,@currency,@symbol,@taxLabel,@roundingPolicy,now())
-            on conflict(organization_id,branch_id) do update set provider_name=excluded.provider_name,provider_address=excluded.provider_address,provider_email=excluded.provider_email,provider_phone=excluded.provider_phone,company_number=excluded.company_number,vat_number=excluded.vat_number,remittance_details=excluded.remittance_details,default_payment_terms_days=excluded.default_payment_terms_days,default_vat_rate=excluded.default_vat_rate,vat_exemption_reason=excluded.vat_exemption_reason,default_currency=excluded.default_currency,currency_symbol=excluded.currency_symbol,tax_label=excluded.tax_label,vat_rounding_policy=excluded.vat_rounding_policy,updated_at=now()
+            insert into finance_invoice_profiles(organization_id,branch_id,provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,default_currency,currency_symbol,tax_label,vat_rounding_policy,custom_numbering_enabled,invoice_number_prefix,invoice_number_start,invoice_number_padding,updated_at)
+            values(@organization,@branch,@provider,@address,@email,@phone,@company,@vatNumber,@remittance,@terms,@vatRate,@exemption,@currency,@symbol,@taxLabel,@roundingPolicy,@numberingEnabled,@numberPrefix,@numberStart,@numberPadding,now())
+            on conflict(organization_id,branch_id) do update set provider_name=excluded.provider_name,provider_address=excluded.provider_address,provider_email=excluded.provider_email,provider_phone=excluded.provider_phone,company_number=excluded.company_number,vat_number=excluded.vat_number,remittance_details=excluded.remittance_details,default_payment_terms_days=excluded.default_payment_terms_days,default_vat_rate=excluded.default_vat_rate,vat_exemption_reason=excluded.vat_exemption_reason,default_currency=excluded.default_currency,currency_symbol=excluded.currency_symbol,tax_label=excluded.tax_label,vat_rounding_policy=excluded.vat_rounding_policy,custom_numbering_enabled=excluded.custom_numbering_enabled,invoice_number_prefix=excluded.invoice_number_prefix,invoice_number_start=excluded.invoice_number_start,invoice_number_padding=excluded.invoice_number_padding,updated_at=now()
             """, token);
-        Add(command,"provider",request.ProviderName.Trim());Add(command,"address",request.ProviderAddress?.Trim()??"");Add(command,"email",request.ProviderEmail?.Trim()??"");Add(command,"phone",request.ProviderPhone?.Trim()??"");Add(command,"company",request.CompanyNumber?.Trim()??"");Add(command,"vatNumber",request.VatNumber?.Trim()??"");Add(command,"remittance",request.RemittanceDetails?.Trim()??"");Add(command,"terms",request.PaymentTermsDays);Add(command,"vatRate",request.VatRate);Add(command,"exemption",request.VatExemptionReason?.Trim()??"");Add(command,"currency",request.DefaultCurrency.Trim());Add(command,"symbol",request.CurrencySymbol.Trim());Add(command,"taxLabel",request.TaxLabel.Trim());Add(command,"roundingPolicy",request.VatRoundingPolicy);
+        Add(command,"provider",request.ProviderName.Trim());Add(command,"address",request.ProviderAddress?.Trim()??"");Add(command,"email",request.ProviderEmail?.Trim()??"");Add(command,"phone",request.ProviderPhone?.Trim()??"");Add(command,"company",request.CompanyNumber?.Trim()??"");Add(command,"vatNumber",request.VatNumber?.Trim()??"");Add(command,"remittance",request.RemittanceDetails?.Trim()??"");Add(command,"terms",request.PaymentTermsDays);Add(command,"vatRate",request.VatRate);Add(command,"exemption",request.VatExemptionReason?.Trim()??"");Add(command,"currency",request.DefaultCurrency.Trim());Add(command,"symbol",request.CurrencySymbol.Trim());Add(command,"taxLabel",request.TaxLabel.Trim());Add(command,"roundingPolicy",request.VatRoundingPolicy);Add(command,"numberingEnabled",request.CustomNumberingEnabled);Add(command,"numberPrefix",request.InvoiceNumberPrefix.Trim());Add(command,"numberStart",request.InvoiceNumberStart);Add(command,"numberPadding",request.InvoiceNumberPadding);
         await command.ExecuteNonQueryAsync(token);
         await AppendProfileVersion(token);
         Audit("finance.invoice_profile_updated",null);await db.SaveChangesAsync(token);
@@ -319,5 +321,5 @@ public sealed class InvoiceDocumentsController(
     private static string Domain(string email){var index=email.LastIndexOf('@');return index>=0?email[index..]:"unknown-domain";}
 }
 
-public sealed record InvoiceProfileRequest(string ProviderName,string? ProviderAddress,string? ProviderEmail,string? ProviderPhone,string? CompanyNumber,string? VatNumber,string? RemittanceDetails,int PaymentTermsDays,decimal VatRate,string? VatExemptionReason,int ExpectedVersion,string DefaultCurrency="GBP",string CurrencySymbol="£",string TaxLabel="VAT",string VatRoundingPolicy="Early",DateTimeOffset? EffectiveFrom=null);
+public sealed record InvoiceProfileRequest(string ProviderName,string? ProviderAddress,string? ProviderEmail,string? ProviderPhone,string? CompanyNumber,string? VatNumber,string? RemittanceDetails,int PaymentTermsDays,decimal VatRate,string? VatExemptionReason,int ExpectedVersion,string DefaultCurrency="GBP",string CurrencySymbol="£",string TaxLabel="VAT",string VatRoundingPolicy="Early",bool CustomNumberingEnabled=false,string InvoiceNumberPrefix="INV-",long InvoiceNumberStart=1,int InvoiceNumberPadding=6,DateTimeOffset? EffectiveFrom=null);
 public sealed record InvoiceDeliveryRequest(string RecipientEmail);
