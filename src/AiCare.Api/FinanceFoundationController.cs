@@ -40,6 +40,7 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
     }
 
     [HttpPost("funders")]
+    [TransactionalAction]
     public async Task<IActionResult> CreateFunder(FunderRequest request, CancellationToken token)
     {
         if (!CanManage) return Forbid();
@@ -59,6 +60,7 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
     }
 
     [HttpPut("funders/{id:guid}")]
+    [TransactionalAction]
     public async Task<IActionResult> UpdateFunder(Guid id,FunderRequest request,CancellationToken token)
     {
         if (!CanManage) return Forbid();
@@ -79,6 +81,7 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
     }
 
     [HttpPost("funders/{id:guid}/archive")]
+    [TransactionalAction]
     public async Task<IActionResult> ArchiveFunder(Guid id,CancellationToken token)
     {
         if(!CanManage)return Forbid();
@@ -149,6 +152,7 @@ public sealed class FinanceFoundationController(CareDbContext db, ITenantContext
     """,_=>{},r=>new{id=r.GetGuid(0),name=r.GetString(1),serviceType=r.GetString(2),currency=r.GetString(3).Trim(),active=r.GetBoolean(4),branchId=r.IsDBNull(5)?null:(Guid?)r.GetGuid(5),versions=r.GetInt64(6)},token));
 
     [HttpPost("rate-cards")]
+    [TransactionalAction]
     public async Task<IActionResult> CreateRateCard(RateCardRequest request,CancellationToken token)
     {
         if(!CanManage)return Forbid();if(string.IsNullOrWhiteSpace(request.Name)||string.IsNullOrWhiteSpace(request.ServiceType)||!Currency(request.Currency))return BadRequest(new{message="Name, service type, and a three-letter currency are required."});var id=Guid.NewGuid();

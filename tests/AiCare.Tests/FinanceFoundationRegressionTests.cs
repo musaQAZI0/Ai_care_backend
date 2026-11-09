@@ -82,6 +82,28 @@ public sealed class FinanceFoundationRegressionTests(PostgresRegressionFactory f
         Assert.DoesNotContain(id.ToString(),await client.GetStringAsync("/api/phase1/finance/integrity-findings"));
     }
 
+    [Fact]
+    public async Task FoundationMutationRollsBackWhenItsAuditCannotBeSaved()
+    {
+        await factory.EnsureClinicalSeedAsync();var name=$"foundation.rollback.{Guid.NewGuid():N}";var funderName=$"Rollback payer {Guid.NewGuid():N}";
+        using(var setup=factory.Services.CreateScope())
+        {
+            var db=setup.ServiceProvider.GetRequiredService<CareDbContext>();db.AppUsers.Add(User(name,UserRole.BackOffice));await db.SaveChangesAsync();
+            await db.Database.ExecuteSqlAsync($"alter table \"AuditEvents\" add constraint finance_foundation_audit_rejected check (\"Actor\" <> {name}) not valid");
+        }
+        try
+        {
+            using var client=await Client(name);var response=await client.PostAsJsonAsync("/api/phase1/finance/funders",new{name=funderName,funderType="Other",paymentTermsDays=30,defaultInvoiceFrequency="Monthly",currency="GBP"});
+            Assert.False(response.IsSuccessStatusCode);
+            using var verify=factory.Services.CreateScope();var db=verify.ServiceProvider.GetRequiredService<CareDbContext>();
+            Assert.False(await db.Database.SqlQueryRaw<bool>("select exists(select 1 from finance_funders where name={0}) as \"Value\"",funderName).SingleAsync());
+        }
+        finally
+        {
+            using var cleanup=factory.Services.CreateScope();await cleanup.ServiceProvider.GetRequiredService<CareDbContext>().Database.ExecuteSqlRawAsync("alter table \"AuditEvents\" drop constraint if exists finance_foundation_audit_rejected");
+        }
+    }
+
     private static AppUser User(string name,UserRole role)=>new(Guid.NewGuid(),name,$"{name}@aicare.local",PasswordHasher.HashPassword("Admin123!"),role,true,TenantDefaults.OrganizationId,TenantDefaults.BranchId,null,null);
     private async Task<HttpClient> Client(string name){var client=factory.CreateClient();var response=await client.PostAsJsonAsync("/api/auth/login",new{userName=name,password="Admin123!",mfaCode=(string?)null});response.EnsureSuccessStatusCode();client.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",(await response.Content.ReadFromJsonAsync<Login>())!.Token);return client;}
     private sealed record Login(string Token);private sealed record Identifier(Guid Id);

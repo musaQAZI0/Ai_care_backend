@@ -178,5 +178,62 @@ public sealed class OperationalReportsRegressionTests(PostgresRegressionFactory 
         Assert.True(await verifyDb.AuditEvents.AnyAsync(item => item.Action == "report.export.activity-logs"));
     }
 
+    [Theory]
+    [InlineData("2026-07-15", "2026-07-14T23:00:00Z", "2026-07-15T23:00:00Z")]
+    [InlineData("2026-03-29", "2026-03-29T00:00:00Z", "2026-03-29T23:00:00Z")]
+    [InlineData("2026-10-25", "2026-10-24T23:00:00Z", "2026-10-26T00:00:00Z")]
+    public async Task ReportAndCsvUseTheWholeUkCalendarDay(string day, string startText, string endText)
+    {
+        await factory.EnsureClinicalSeedAsync();
+        var action = $"report.uk-day.{Guid.NewGuid():N}";
+        var start = DateTimeOffset.Parse(startText);
+        var end = DateTimeOffset.Parse(endText);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            foreach (var (actor, instant) in new[] { ("before-start", start.AddTicks(-10)), ("at-start", start), ("before-end", end.AddTicks(-10)), ("at-end", end) })
+                db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), action, actor, "ReportCalendarFixture", null, instant, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+        }
+        using var admin = factory.CreateClient();
+        var login = await admin.PostAsJsonAsync("/api/auth/login", new { userName = "admin", password = "Admin123!", mfaCode = (string?)null });
+        login.EnsureSuccessStatusCode();
+        admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await login.Content.ReadFromJsonAsync<Login>())!.Token);
+        var filters = $"from={day}&to={day}&action={action}";
+        var response = await admin.GetAsync($"/api/phase1/operational-reports/activity-logs?{filters}");
+        response.EnsureSuccessStatusCode();
+        using var page = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(2, page.RootElement.GetProperty("total").GetInt32());
+        var json = page.RootElement.GetRawText();
+        Assert.Contains("at-start", json);
+        Assert.Contains("before-end", json);
+        Assert.DoesNotContain("before-start", json);
+        Assert.DoesNotContain("at-end", json);
+        await StepUpTestGrants.GrantAsync(factory, admin, "export");
+        var csvResponse = await admin.GetAsync($"/api/phase1/operational-reports/activity-logs.csv?{filters}&reason=UK%20calendar%20boundary%20review");
+        csvResponse.EnsureSuccessStatusCode();
+        var csv = await csvResponse.Content.ReadAsStringAsync();
+        Assert.Contains("at-start", csv);
+        Assert.Contains("before-end", csv);
+        Assert.DoesNotContain("before-start", csv);
+        Assert.DoesNotContain("at-end", csv);
+    }
+
+    [Theory]
+    [InlineData("from=0001-01-01&to=0001-01-01")]
+    [InlineData("from=9999-12-31&to=9999-12-31")]
+    [InlineData("from=2026-07-16&to=2026-07-15")]
+    [InlineData("from=2020-01-01")]
+    [InlineData("page=2147483647&pageSize=100")]
+    public async Task InvalidReportBoundsReturnBadRequest(string query)
+    {
+        await factory.EnsureClinicalSeedAsync();
+        using var admin = factory.CreateClient();
+        var login = await admin.PostAsJsonAsync("/api/auth/login", new { userName = "admin", password = "Admin123!", mfaCode = (string?)null });
+        login.EnsureSuccessStatusCode();
+        admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", (await login.Content.ReadFromJsonAsync<Login>())!.Token);
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.GetAsync($"/api/phase1/operational-reports/activity-logs?{query}")).StatusCode);
+    }
+
     private sealed record Login(string Token);
 }

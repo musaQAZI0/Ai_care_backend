@@ -28,8 +28,10 @@ public sealed class InvoiceDocumentsController(
     public async Task<IActionResult> GetProfile(CancellationToken token)
     {
         await using var command = await Command("""
-            select provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,logo_sha256
-            from finance_invoice_profiles where organization_id=@organization and branch_id=@branch
+            select provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,logo_sha256,
+                   trim(default_currency),currency_symbol,tax_label,vat_rounding_policy,
+                   coalesce((select max(v.version) from finance_invoice_profile_versions v where v.organization_id=p.organization_id and v.branch_id=p.branch_id),0)
+            from finance_invoice_profiles p where organization_id=@organization and branch_id=@branch
             """, token);
         await using var reader = await command.ExecuteReaderAsync(token);
         if (await reader.ReadAsync(token))
@@ -37,13 +39,15 @@ public sealed class InvoiceDocumentsController(
                 providerName=reader.GetString(0),providerAddress=reader.GetString(1),providerEmail=reader.GetString(2),
                 providerPhone=reader.GetString(3),companyNumber=reader.GetString(4),vatNumber=reader.GetString(5),
                 remittanceDetails=reader.GetString(6),paymentTermsDays=reader.GetInt32(7),vatRate=reader.GetDecimal(8),
-                vatExemptionReason=reader.GetString(9),logoAvailable=!reader.IsDBNull(10),logoVersion=reader.IsDBNull(10)?null:reader.GetString(10)
+                vatExemptionReason=reader.GetString(9),logoAvailable=!reader.IsDBNull(10),logoVersion=reader.IsDBNull(10)?null:reader.GetString(10),
+                defaultCurrency=reader.GetString(11),currencySymbol=reader.GetString(12),taxLabel=reader.GetString(13),vatRoundingPolicy=reader.GetString(14),
+                version=reader.GetInt32(15)
             });
         await reader.DisposeAsync();
         var organization = await db.Organizations.AsNoTracking().SingleAsync(x => x.Id == tenant.OrganizationId, token);
         return Ok(new {
             providerName=organization.Name,providerAddress="",providerEmail="",providerPhone="",companyNumber="",
-            vatNumber="",remittanceDetails="",paymentTermsDays=30,vatRate=0m,vatExemptionReason="VAT not charged",logoAvailable=false,logoVersion=(string?)null
+            vatNumber="",remittanceDetails="",paymentTermsDays=30,vatRate=0m,vatExemptionReason="VAT not charged",defaultCurrency="GBP",currencySymbol="£",taxLabel="VAT",vatRoundingPolicy="Early",logoAvailable=false,logoVersion=(string?)null,version=0
         });
     }
 
@@ -60,9 +64,9 @@ public sealed class InvoiceDocumentsController(
 
     [HttpPost("invoice-profile/logo")]
     [RequestSizeLimit(2_097_152)]
-    public async Task<IActionResult> UploadLogo(IFormFile logo,CancellationToken token)
+    public async Task<IActionResult> UploadLogo(IFormFile logo,[FromForm] int expectedVersion,CancellationToken token)
     {
-        if(logo is null||logo.Length is <=0 or >2_097_152)return BadRequest(new{message="Choose a logo smaller than 2 MB."});
+        if(expectedVersion<0||logo is null||logo.Length is <=0 or >2_097_152)return BadRequest(new{message="Choose a logo smaller than 2 MB and provide the current settings version."});
         await using var stream=new MemoryStream();await logo.CopyToAsync(stream,token);var bytes=stream.ToArray();
         var type=DetectLogoType(bytes);if(type is null)return BadRequest(new{message="Only valid PNG and JPEG logo files are supported."});
         var hash=Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
@@ -70,6 +74,7 @@ public sealed class InvoiceDocumentsController(
         {
             await using var transaction=await db.Database.BeginTransactionAsync(token);
             await using(var profileLock=await Command("select pg_advisory_xact_lock(hashtextextended(@key,0))",token)){Add(profileLock,"key",$"invoice-profile:{tenant.OrganizationId}:{tenant.BranchId??TenantDefaults.BranchId}");await profileLock.ExecuteNonQueryAsync(token);}
+            var currentVersion=await CurrentProfileVersion(token);if(currentVersion!=expectedVersion){await transaction.RollbackAsync(token);return StaleProfile(currentVersion);}
             var organization=await db.Organizations.AsNoTracking().SingleAsync(x=>x.Id==tenant.OrganizationId,token);
             await using(var update=await Command("""
                 insert into finance_invoice_profiles(organization_id,branch_id,provider_name,logo_content_type,logo_bytes,logo_sha256)
@@ -83,12 +88,14 @@ public sealed class InvoiceDocumentsController(
     }
 
     [HttpDelete("invoice-profile/logo")]
-    public async Task<IActionResult> DeleteLogo(CancellationToken token)
+    public async Task<IActionResult> DeleteLogo([FromQuery] int expectedVersion,CancellationToken token)
     {
+        if(expectedVersion<0)return BadRequest(new{message="Provide the current settings version."});
         return await db.Database.CreateExecutionStrategy().ExecuteAsync<IActionResult>(async()=>
         {
             await using var transaction=await db.Database.BeginTransactionAsync(token);
             await using(var profileLock=await Command("select pg_advisory_xact_lock(hashtextextended(@key,0))",token)){Add(profileLock,"key",$"invoice-profile:{tenant.OrganizationId}:{tenant.BranchId??TenantDefaults.BranchId}");await profileLock.ExecuteNonQueryAsync(token);}
+            var currentVersion=await CurrentProfileVersion(token);if(currentVersion!=expectedVersion){await transaction.RollbackAsync(token);return StaleProfile(currentVersion);}
             await using(var update=await Command("update finance_invoice_profiles set logo_content_type=null,logo_bytes=null,logo_sha256=null,updated_at=now() where organization_id=@organization and branch_id=@branch",token))await update.ExecuteNonQueryAsync(token);
             await AppendProfileVersion(token);
             Audit("finance.invoice_logo_removed",null);await db.SaveChangesAsync(token);await transaction.CommitAsync(token);return NoContent();
@@ -97,8 +104,23 @@ public sealed class InvoiceDocumentsController(
     [HttpPut("invoice-profile")]
     public async Task<IActionResult> SaveProfile(InvoiceProfileRequest request, CancellationToken token)
     {
-        if (string.IsNullOrWhiteSpace(request.ProviderName) || request.PaymentTermsDays is < 1 or > 365 || request.VatRate is < 0 or > 100)
-            return BadRequest(new { message = "Provider name, valid payment terms, and a VAT rate between 0 and 100 are required." });
+        var now = DateTimeOffset.UtcNow;
+        if (request.ExpectedVersion < 0 || string.IsNullOrWhiteSpace(request.ProviderName) || request.ProviderName.Trim().Length > 200
+            || request.ProviderAddress?.Trim().Length > 1000 || request.ProviderEmail?.Trim().Length > 254
+            || request.ProviderPhone?.Trim().Length > 80 || request.CompanyNumber?.Trim().Length > 80
+            || request.VatNumber?.Trim().Length > 80 || request.RemittanceDetails?.Trim().Length > 2000
+            || request.VatExemptionReason?.Trim().Length > 500
+            || request.DefaultCurrency?.Trim().Length != 3 || request.DefaultCurrency.Any(c=>c is < 'A' or > 'Z')
+            || string.IsNullOrWhiteSpace(request.CurrencySymbol) || request.CurrencySymbol.Trim().Length > 8
+            || string.IsNullOrWhiteSpace(request.TaxLabel) || request.TaxLabel.Trim().Length > 30
+            || request.VatRoundingPolicy is not ("Early" or "Late")
+            || request.EffectiveFrom is DateTimeOffset effectiveFrom && (effectiveFrom < now.AddMinutes(-5) || effectiveFrom > now.AddYears(2))
+            || request.PaymentTermsDays is < 1 or > 365 || request.VatRate is < 0 or > 100)
+            return BadRequest(new { message = "Provider name, valid payment terms, a VAT rate between 0 and 100, and an effective time within two years are required." });
+        if (!string.IsNullOrWhiteSpace(request.ProviderEmail)
+            && (!MailAddress.TryCreate(request.ProviderEmail.Trim(), out var providerEmail)
+                || !string.Equals(providerEmail.Address, request.ProviderEmail.Trim(), StringComparison.OrdinalIgnoreCase)))
+            return BadRequest(new { message = "Enter a valid provider email address." });
         if (request.VatRate == 0 && string.IsNullOrWhiteSpace(request.VatExemptionReason))
             return BadRequest(new { message = "A VAT exemption or non-taxable reason is required when VAT is zero." });
 
@@ -111,12 +133,33 @@ public sealed class InvoiceDocumentsController(
             await profileLock.ExecuteNonQueryAsync(token);
         }
 
+        var currentVersion = await CurrentProfileVersion(token);
+        if (currentVersion != request.ExpectedVersion)
+        {
+            await transaction.RollbackAsync(token);
+            return StaleProfile(currentVersion);
+        }
+
+        if (request.EffectiveFrom is DateTimeOffset scheduledFor && scheduledFor > now)
+        {
+            if(currentVersion==0)
+            {
+                var organization=await db.Organizations.AsNoTracking().SingleAsync(x=>x.Id==tenant.OrganizationId,token);
+                await using var baseline=await Command("insert into finance_invoice_profiles(organization_id,branch_id,provider_name) values(@organization,@branch,@provider) on conflict(organization_id,branch_id) do nothing",token);
+                Add(baseline,"provider",organization.Name);await baseline.ExecuteNonQueryAsync(token);
+            }
+            await AppendScheduledProfileVersion(request, scheduledFor, token);
+            Audit("finance.invoice_profile_scheduled", null);await db.SaveChangesAsync(token);
+            await transaction.CommitAsync(token);
+            return NoContent();
+        }
+
         await using var command = await Command("""
-            insert into finance_invoice_profiles(organization_id,branch_id,provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,updated_at)
-            values(@organization,@branch,@provider,@address,@email,@phone,@company,@vatNumber,@remittance,@terms,@vatRate,@exemption,now())
-            on conflict(organization_id,branch_id) do update set provider_name=excluded.provider_name,provider_address=excluded.provider_address,provider_email=excluded.provider_email,provider_phone=excluded.provider_phone,company_number=excluded.company_number,vat_number=excluded.vat_number,remittance_details=excluded.remittance_details,default_payment_terms_days=excluded.default_payment_terms_days,default_vat_rate=excluded.default_vat_rate,vat_exemption_reason=excluded.vat_exemption_reason,updated_at=now()
+            insert into finance_invoice_profiles(organization_id,branch_id,provider_name,provider_address,provider_email,provider_phone,company_number,vat_number,remittance_details,default_payment_terms_days,default_vat_rate,vat_exemption_reason,default_currency,currency_symbol,tax_label,vat_rounding_policy,updated_at)
+            values(@organization,@branch,@provider,@address,@email,@phone,@company,@vatNumber,@remittance,@terms,@vatRate,@exemption,@currency,@symbol,@taxLabel,@roundingPolicy,now())
+            on conflict(organization_id,branch_id) do update set provider_name=excluded.provider_name,provider_address=excluded.provider_address,provider_email=excluded.provider_email,provider_phone=excluded.provider_phone,company_number=excluded.company_number,vat_number=excluded.vat_number,remittance_details=excluded.remittance_details,default_payment_terms_days=excluded.default_payment_terms_days,default_vat_rate=excluded.default_vat_rate,vat_exemption_reason=excluded.vat_exemption_reason,default_currency=excluded.default_currency,currency_symbol=excluded.currency_symbol,tax_label=excluded.tax_label,vat_rounding_policy=excluded.vat_rounding_policy,updated_at=now()
             """, token);
-        Add(command,"provider",request.ProviderName.Trim());Add(command,"address",request.ProviderAddress?.Trim()??"");Add(command,"email",request.ProviderEmail?.Trim()??"");Add(command,"phone",request.ProviderPhone?.Trim()??"");Add(command,"company",request.CompanyNumber?.Trim()??"");Add(command,"vatNumber",request.VatNumber?.Trim()??"");Add(command,"remittance",request.RemittanceDetails?.Trim()??"");Add(command,"terms",request.PaymentTermsDays);Add(command,"vatRate",request.VatRate);Add(command,"exemption",request.VatExemptionReason?.Trim()??"");
+        Add(command,"provider",request.ProviderName.Trim());Add(command,"address",request.ProviderAddress?.Trim()??"");Add(command,"email",request.ProviderEmail?.Trim()??"");Add(command,"phone",request.ProviderPhone?.Trim()??"");Add(command,"company",request.CompanyNumber?.Trim()??"");Add(command,"vatNumber",request.VatNumber?.Trim()??"");Add(command,"remittance",request.RemittanceDetails?.Trim()??"");Add(command,"terms",request.PaymentTermsDays);Add(command,"vatRate",request.VatRate);Add(command,"exemption",request.VatExemptionReason?.Trim()??"");Add(command,"currency",request.DefaultCurrency.Trim());Add(command,"symbol",request.CurrencySymbol.Trim());Add(command,"taxLabel",request.TaxLabel.Trim());Add(command,"roundingPolicy",request.VatRoundingPolicy);
         await command.ExecuteNonQueryAsync(token);
         await AppendProfileVersion(token);
         Audit("finance.invoice_profile_updated",null);await db.SaveChangesAsync(token);
@@ -225,11 +268,11 @@ public sealed class InvoiceDocumentsController(
     private async Task<InvoicePdfData?> Load(Guid id,CancellationToken token)
     {
         await using var command=await Command("""
-            select d.invoice_number,d.invoice_date,d.due_date,i."Status",d.provider_name,d.provider_address,d.provider_email,d.provider_phone,d.company_number,d.vat_number,d.customer_name,d.customer_address,d.funder_name,d.payment_terms,d.remittance_details,d.currency,d.net_amount,d.vat_rate,d.vat_amount,d.gross_amount,d.vat_exemption_reason,coalesce((select sum(amount) from finance_payments where invoice_id=i."Id" and organization_id=i."OrganizationId"),0)+coalesce((select sum(amount) from finance_payment_allocations where invoice_id=i."Id" and organization_id=i."OrganizationId" and reversed_at is null),0)-coalesce((select sum(amount) from finance_refunds where invoice_id=i."Id" and organization_id=i."OrganizationId"),0),coalesce((select sum(amount) from finance_credit_notes where invoice_id=i."Id" and organization_id=i."OrganizationId" and status='Issued'),0),d.care_recipient_name,coalesce((select sum(amount) from finance_write_offs where invoice_id=i."Id" and organization_id=i."OrganizationId"),0)
+            select d.invoice_number,d.invoice_date,d.due_date,i."Status",d.provider_name,d.provider_address,d.provider_email,d.provider_phone,d.company_number,d.vat_number,d.customer_name,d.customer_address,d.funder_name,d.payment_terms,d.remittance_details,d.currency,d.net_amount,d.vat_rate,d.vat_amount,d.gross_amount,d.vat_exemption_reason,coalesce((select sum(amount) from finance_payments where invoice_id=i."Id" and organization_id=i."OrganizationId"),0)+coalesce((select sum(amount) from finance_payment_allocations where invoice_id=i."Id" and organization_id=i."OrganizationId" and reversed_at is null),0)-coalesce((select sum(amount) from finance_refunds where invoice_id=i."Id" and organization_id=i."OrganizationId"),0),coalesce((select sum(amount) from finance_credit_notes where invoice_id=i."Id" and organization_id=i."OrganizationId" and status='Issued'),0),d.care_recipient_name,coalesce((select sum(amount) from finance_write_offs where invoice_id=i."Id" and organization_id=i."OrganizationId"),0),d.settings_snapshot->>'currencySymbol',coalesce(d.settings_snapshot->>'taxLabel','VAT'),coalesce(d.settings_snapshot->>'vatRoundingPolicy','Early')
             from "Invoices" i join finance_invoice_details d on d.invoice_id=i."Id" where i."Id"=@invoice and i."OrganizationId"=@organization and (@organizationWide or i."BranchId"=@branch)
-            """,token);Add(command,"invoice",id);Add(command,"organizationWide",tenant.IsOrganizationWide);await using var reader=await command.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))return null;var values=new object[25];reader.GetValues(values);await reader.DisposeAsync();var lines=new List<InvoicePdfLine>();await using var lineCommand=await Command("select description,quantity,unit_rate,amount,vat_treatment,vat_rate,vat_amount from finance_invoice_lines where invoice_id=@invoice and organization_id=@organization order by created_at",token);Add(lineCommand,"invoice",id);await using var lr=await lineCommand.ExecuteReaderAsync(token);while(await lr.ReadAsync(token))lines.Add(new(lr.GetString(0),lr.GetDecimal(1),lr.GetDecimal(2),lr.GetDecimal(3),lr.IsDBNull(4)?null:lr.GetString(4),lr.IsDBNull(5)?null:lr.GetDecimal(5),lr.IsDBNull(6)?null:lr.GetDecimal(6)));
+            """,token);Add(command,"invoice",id);Add(command,"organizationWide",tenant.IsOrganizationWide);await using var reader=await command.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))return null;var values=new object[28];reader.GetValues(values);await reader.DisposeAsync();var lines=new List<InvoicePdfLine>();await using var lineCommand=await Command("select description,quantity,unit_rate,amount,vat_treatment,vat_rate,vat_amount from finance_invoice_lines where invoice_id=@invoice and organization_id=@organization order by created_at",token);Add(lineCommand,"invoice",id);await using var lr=await lineCommand.ExecuteReaderAsync(token);while(await lr.ReadAsync(token))lines.Add(new(lr.GetString(0),lr.GetDecimal(1),lr.GetDecimal(2),lr.GetDecimal(3),lr.IsDBNull(4)?null:lr.GetString(4),lr.IsDBNull(5)?null:lr.GetDecimal(5),lr.IsDBNull(6)?null:lr.GetDecimal(6)));
         static DateOnly Date(object value)=>value is DateOnly date?date:DateOnly.FromDateTime((DateTime)value);
-        return new((string)values[0],Date(values[1]),Date(values[2]),(string)values[3],(string)values[4],(string)values[5],(string)values[6],(string)values[7],(string)values[8],(string)values[9],(string)values[10],(string)values[11],(string)values[12],(string)values[13],(string)values[14],(string)values[15],(decimal)values[16],(decimal)values[17],(decimal)values[18],(decimal)values[19],(decimal)values[21],(decimal)values[22],(string)values[20],lines,values[23] is string recipient ? recipient : null,(decimal)values[24]);
+        return new((string)values[0],Date(values[1]),Date(values[2]),(string)values[3],(string)values[4],(string)values[5],(string)values[6],(string)values[7],(string)values[8],(string)values[9],(string)values[10],(string)values[11],(string)values[12],(string)values[13],(string)values[14],(string)values[15],(decimal)values[16],(decimal)values[17],(decimal)values[18],(decimal)values[19],(decimal)values[21],(decimal)values[22],(string)values[20],lines,values[23] is string recipient ? recipient : null,(decimal)values[24],values[25] is string symbol?symbol:null,(string)values[26],(string)values[27]);
     }
 
     private async Task MarkOverdue(CancellationToken token){await using var command=await Command("update \"Invoices\" i set \"Status\"='Overdue' from finance_invoice_details d where d.invoice_id=i.\"Id\" and i.\"OrganizationId\"=@organization and (@organizationWide or i.\"BranchId\"=@branch) and i.\"Status\"='Issued' and d.due_date<(now() at time zone 'Europe/London')::date",token);Add(command,"organizationWide",tenant.IsOrganizationWide);await command.ExecuteNonQueryAsync(token);}
@@ -238,10 +281,27 @@ public sealed class InvoiceDocumentsController(
         await using var version=await Command("""
             insert into finance_invoice_profile_versions(id,organization_id,branch_id,version,effective_from,profile_snapshot,changed_by)
             select @id,p.organization_id,p.branch_id,coalesce((select max(v.version) from finance_invoice_profile_versions v where v.organization_id=p.organization_id and v.branch_id=p.branch_id),0)+1,now(),
-                jsonb_build_object('providerName',p.provider_name,'providerAddress',p.provider_address,'providerEmail',p.provider_email,'providerPhone',p.provider_phone,'companyNumber',p.company_number,'vatNumber',p.vat_number,'remittanceDetails',p.remittance_details,'paymentTermsDays',p.default_payment_terms_days,'vatRate',p.default_vat_rate,'vatExemptionReason',p.vat_exemption_reason,'logoSha256',p.logo_sha256),@actor
+                jsonb_build_object('providerName',p.provider_name,'providerAddress',p.provider_address,'providerEmail',p.provider_email,'providerPhone',p.provider_phone,'companyNumber',p.company_number,'vatNumber',p.vat_number,'remittanceDetails',p.remittance_details,'paymentTermsDays',p.default_payment_terms_days,'vatRate',p.default_vat_rate,'vatExemptionReason',p.vat_exemption_reason,'defaultCurrency',trim(p.default_currency),'currencySymbol',p.currency_symbol,'taxLabel',p.tax_label,'vatRoundingPolicy',p.vat_rounding_policy,'logoSha256',p.logo_sha256),@actor
             from finance_invoice_profiles p where p.organization_id=@organization and p.branch_id=@branch
             """,token);Add(version,"id",Guid.NewGuid());await version.ExecuteNonQueryAsync(token);
     }
+    private async Task<int> CurrentProfileVersion(CancellationToken token)
+    {
+        await using var command=await Command("select coalesce(max(version),0) from finance_invoice_profile_versions where organization_id=@organization and branch_id=@branch",token);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(token));
+    }
+    private async Task AppendScheduledProfileVersion(InvoiceProfileRequest request,DateTimeOffset effectiveFrom,CancellationToken token)
+    {
+        await using var version=await Command("""
+            insert into finance_invoice_profile_versions(id,organization_id,branch_id,version,effective_from,profile_snapshot,changed_by)
+            values(@id,@organization,@branch,@version,@effectiveFrom,
+                jsonb_build_object('providerName',@provider,'providerAddress',@address,'providerEmail',@email,'providerPhone',@phone,'companyNumber',@company,'vatNumber',@vatNumber,'remittanceDetails',@remittance,'paymentTermsDays',@terms,'vatRate',@vatRate,'vatExemptionReason',@exemption,'defaultCurrency',@currency,'currencySymbol',@symbol,'taxLabel',@taxLabel,'vatRoundingPolicy',@roundingPolicy,'logoSha256',(select logo_sha256 from finance_invoice_profiles where organization_id=@organization and branch_id=@branch)),@actor)
+            """,token);
+        Add(version,"id",Guid.NewGuid());Add(version,"version",request.ExpectedVersion+1);Add(version,"effectiveFrom",effectiveFrom);
+        Add(version,"provider",request.ProviderName.Trim());Add(version,"address",request.ProviderAddress?.Trim()??"");Add(version,"email",request.ProviderEmail?.Trim()??"");Add(version,"phone",request.ProviderPhone?.Trim()??"");Add(version,"company",request.CompanyNumber?.Trim()??"");Add(version,"vatNumber",request.VatNumber?.Trim()??"");Add(version,"remittance",request.RemittanceDetails?.Trim()??"");Add(version,"terms",request.PaymentTermsDays);Add(version,"vatRate",request.VatRate);Add(version,"exemption",request.VatExemptionReason?.Trim()??"");Add(version,"currency",request.DefaultCurrency.Trim());Add(version,"symbol",request.CurrencySymbol.Trim());Add(version,"taxLabel",request.TaxLabel.Trim());Add(version,"roundingPolicy",request.VatRoundingPolicy);
+        await version.ExecuteNonQueryAsync(token);
+    }
+    private IActionResult StaleProfile(int currentVersion)=>Conflict(new{message="Invoice settings changed after you opened them. Reload the latest settings before saving again.",currentVersion});
     private static string? DetectLogoType(byte[] bytes)
     {
         if(bytes.Length>=24&&bytes.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10})&&bytes[12]==73&&bytes[13]==72&&bytes[14]==68&&bytes[15]==82)
@@ -259,5 +319,5 @@ public sealed class InvoiceDocumentsController(
     private static string Domain(string email){var index=email.LastIndexOf('@');return index>=0?email[index..]:"unknown-domain";}
 }
 
-public sealed record InvoiceProfileRequest(string ProviderName,string? ProviderAddress,string? ProviderEmail,string? ProviderPhone,string? CompanyNumber,string? VatNumber,string? RemittanceDetails,int PaymentTermsDays,decimal VatRate,string? VatExemptionReason);
+public sealed record InvoiceProfileRequest(string ProviderName,string? ProviderAddress,string? ProviderEmail,string? ProviderPhone,string? CompanyNumber,string? VatNumber,string? RemittanceDetails,int PaymentTermsDays,decimal VatRate,string? VatExemptionReason,int ExpectedVersion,string DefaultCurrency="GBP",string CurrencySymbol="£",string TaxLabel="VAT",string VatRoundingPolicy="Early",DateTimeOffset? EffectiveFrom=null);
 public sealed record InvoiceDeliveryRequest(string RecipientEmail);

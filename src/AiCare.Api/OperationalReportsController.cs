@@ -135,17 +135,28 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         definition.Key == "activity-logs" ? user.IsAdministrator :
         definition.Key is "carer-contact-details" or "carer-personal-details" or "carer-reasons-for-leaving" or "client-contact-details" or "client-personal-details" or "uninvoiced-appointments" or "untimesheeted-appointments" or "export-appointment-data" or "finance-stats" or "finance-stats-by-client" ? user.HasAnyRole(UserRole.Administrator, UserRole.CareManager) :
         !definition.Medication || user.HasAnyRole(UserRole.Administrator, UserRole.CareManager);
-    private static bool Invalid(ReportQuery query) => query.Page < 1 || query.PageSize is < 1 or > 100 || query.From is not null && query.To is not null && (query.To < query.From || query.To.Value.DayNumber - query.From.Value.DayNumber > 366) || new[] { query.Actor, query.Action, query.EntityType }.Any(value => value?.Length > 100);
+    private static bool Invalid(ReportQuery query)
+    {
+        var today = AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow);
+        var from = query.From ?? today.AddDays(-30);
+        var to = query.To ?? today;
+        // Bound pagination before multiplying, and dates before forming the exclusive end.
+        return query.Page < 1 || query.PageSize is < 1 or > 100
+            || (long)(query.Page - 1) * query.PageSize > int.MaxValue
+            || from == DateOnly.MinValue || to == DateOnly.MaxValue
+            || to < from || to.DayNumber - from.DayNumber > 366
+            || new[] { query.Actor, query.Action, query.EntityType }.Any(value => value?.Length > 100);
+    }
     private IQueryable<Visit> Visits(ReportQuery query)
     {
-        var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-        var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+        var from = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+        var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
         var visits = db.Visits.AsNoTracking().Where(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || item.BranchId == tenant.BranchId) && item.StartsAt >= from && item.StartsAt < to);
         if (query.WorkerId is { } worker) visits = visits.Where(item => item.CareWorkerId == worker);
         if (query.ClientId is { } client) visits = visits.Where(item => item.ServiceUserId == client);
         return visits;
     }
-    private static DateTimeOffset AtStart(DateOnly date) => new(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+    private static DateTimeOffset AtStart(DateOnly date) => AppointmentWorkflow.UkStart(date);
     private static string Csv(string value)
     {
         var safe = value.Length > 0 && "=+-@".Contains(value[0]) ? "'" + value : value;
@@ -157,8 +168,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         var take = export ? 5001 : query.PageSize;
         if (definition.Key == "activity-logs")
         {
-            var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-            var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var from = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+            var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var events = db.AuditEvents.AsNoTracking().Where(item => item.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || item.BranchId == tenant.BranchId) && item.CreatedAt >= from && item.CreatedAt < to);
             if (!string.IsNullOrWhiteSpace(query.Actor)) events = events.Where(item => EF.Functions.ILike(item.Actor, $"%{EscapeLike(query.Actor.Trim())}%", "\\"));
             if (!string.IsNullOrWhiteSpace(query.Action)) events = events.Where(item => EF.Functions.ILike(item.Action, $"%{EscapeLike(query.Action.Trim())}%", "\\"));
@@ -179,8 +190,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key == "finance-stats")
         {
-            var from = query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30));
-            var to = query.To ?? DateOnly.FromDateTime(DateTime.UtcNow);
+            var from = query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30);
+            var to = query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow);
             var stats = db.Database.SqlQuery<OperationalFinanceStatsRow>($"""
                 select d.invoice_date as "InvoiceDate", i."Status" as "InvoiceStatus", trim(d.currency) as "Currency",
                        count(*)::integer as "Invoices", sum(d.net_amount) as "NetAmount",
@@ -197,8 +208,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key == "finance-stats-by-client")
         {
-            var from = query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30));
-            var to = query.To ?? DateOnly.FromDateTime(DateTime.UtcNow);
+            var from = query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30);
+            var to = query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow);
             var stats = db.Database.SqlQuery<OperationalClientFinanceStatsRow>($"""
                 select l.service_user_id as "ClientId", i."Status" as "InvoiceStatus", trim(d.currency) as "Currency",
                        count(distinct i."Id")::integer as "Invoices", count(*)::integer as "Lines", sum(l.amount) as "NetLineAmount"
@@ -219,8 +230,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         if (definition.Key is "uninvoiced-appointments" or "untimesheeted-appointments")
         {
             var uninvoiced = definition.Key == "uninvoiced-appointments";
-            var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-            var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var from = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+            var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var exceptions = db.Database.SqlQuery<OperationalFinanceExceptionRow>($"""
                 select v."Id" as "VisitId", v."StartsAt" as "StartsAt", v."ServiceUserId" as "ClientId",
                        v."CareWorkerId" as "WorkerId", v."VisitType" as "VisitType", v."DurationMinutes" as "DurationMinutes",
@@ -251,8 +262,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key == "availability")
         {
-            var from = query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30));
-            var to = query.To ?? DateOnly.FromDateTime(DateTime.UtcNow);
+            var from = query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30);
+            var to = query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow);
             var rules = db.Database.SqlQuery<OperationalAvailabilityRow>($"""
                 select a.id as "Id", a.care_worker_id as "WorkerId", a.day_of_week as "DayOfWeek",
                        a.start_time as "StartTime", a.end_time as "EndTime", a.is_available as "IsAvailable",
@@ -303,8 +314,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key == "carer-reasons-for-leaving")
         {
-            var from = query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30));
-            var to = query.To ?? DateOnly.FromDateTime(DateTime.UtcNow);
+            var from = query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30);
+            var to = query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow);
             var leavers = db.Database.SqlQuery<OperationalWorkerLeaverRow>($"""
                 select w."Id" as "WorkerId", w."FullName" as "Name", p.job_title as "JobTitle",
                        p.end_date as "EndDate", p.status_reason as "Reason", p.updated_at as "UpdatedAt"
@@ -347,8 +358,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key == "time-off-requests")
         {
-            var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-            var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var from = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+            var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var absences = db.Database.SqlQuery<OperationalTimeOffRow>($"""
                 select a.id as "Id", a.care_worker_id as "WorkerId", a.absence_type as "Type",
                        a.starts_at as "StartsAt", a.ends_at as "EndsAt", a.status as "Status",
@@ -366,8 +377,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key == "time-off-summary")
         {
-            var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-            var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var from = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+            var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var summary = db.Database.SqlQuery<OperationalTimeOffSummaryRow>($"""
                 select a.care_worker_id as "WorkerId", a.absence_type as "Type", a.status as "Status",
                        count(*)::integer as "Periods",
@@ -386,7 +397,7 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key is "training-matrix" or "required-training")
         {
-            var asOf = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var asOf = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var matrix = db.Database.SqlQuery<OperationalTrainingMatrixRow>($"""
                 select w."Id" as "WorkerId", c.id as "CourseId", c.code as "Code", c.title as "Title",
                        b.completed_at as "CompletedAt", b.expires_at as "ExpiresAt", upcoming.scheduled_at as "PlannedAt",
@@ -416,8 +427,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         if (definition.Key is "acquired-training" or "planned-training")
         {
             var acquired = definition.Key == "acquired-training";
-            var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-            var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var from = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+            var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var bookings = db.Database.SqlQuery<OperationalTrainingBookingRow>($"""
                 select b.id as "Id", b.care_worker_id as "WorkerId", c.code as "Code", c.title as "Title",
                        b.status as "Status", b.scheduled_at as "ScheduledAt", b.completed_at as "CompletedAt",
@@ -438,8 +449,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key is "carer-diary" or "client-diary")
         {
-            var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-            var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var from = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+            var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var canReadManagerOnlyDiary = User.IsInRole("Administrator") || User.IsInRole("CareManager");
             var diary = db.Database.SqlQuery<OperationalDiaryReportRow>($"""
                 select d.id as "Id", d.event_at as "EventAt", d.category as "Category", d.priority as "Priority",
@@ -467,8 +478,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         if (definition.Key is "outstanding-checklist" or "checklist-history" or "checklist-history-by-date")
         {
             var history = definition.Key != "outstanding-checklist";
-            var from = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-            var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var from = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+            var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var tasks = db.Database.SqlQuery<OperationalChecklistReportRow>($"""
                 select t.id as "Id", v."StartsAt" as "VisitAt", t.completed_at as "CompletedAt",
                        t.service_user_id as "ClientId", t.care_worker_id as "WorkerId", t.title as "Title",
@@ -549,8 +560,8 @@ public sealed class OperationalReportsController(CareDbContext db, ITenantContex
         }
         if (definition.Key == "medication-administration")
         {
-            var fromTime = AtStart(query.From ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-30)));
-            var to = AtStart((query.To ?? DateOnly.FromDateTime(DateTime.UtcNow)).AddDays(1));
+            var fromTime = AtStart(query.From ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow).AddDays(-30));
+            var to = AtStart((query.To ?? AppointmentWorkflow.UkDate(DateTimeOffset.UtcNow)).AddDays(1));
             var administrations = from item in db.MedicationAdministrationRecords.AsNoTracking()
                                   join medication in db.Medications.AsNoTracking() on item.MedicationId equals medication.Id
                                   where item.OrganizationId == tenant.OrganizationId && medication.OrganizationId == tenant.OrganizationId && (tenant.IsOrganizationWide || item.BranchId == tenant.BranchId && medication.BranchId == tenant.BranchId) && item.ScheduledAt >= fromTime && item.ScheduledAt < to
