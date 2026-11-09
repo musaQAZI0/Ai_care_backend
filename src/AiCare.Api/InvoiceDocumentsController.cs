@@ -51,6 +51,25 @@ public sealed class InvoiceDocumentsController(
         });
     }
 
+    [HttpGet("invoice-profile/number-preview")]
+    public async Task<IActionResult> NumberPreview(CancellationToken token)
+    {
+        var year = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).Year;
+        await using var command = await Command("""
+            select coalesce(p.custom_numbering_enabled,false),coalesce(p.invoice_number_prefix,'INV-'),coalesce(p.invoice_number_start,1),coalesce(p.invoice_number_padding,6),coalesce(s.next_value,p.invoice_number_start,1)
+            from finance_invoice_profiles p left join finance_invoice_sequences s on s.organization_id=p.organization_id and s.invoice_year=@year
+            where p.organization_id=@organization and p.branch_id=@branch
+            """, token);
+        Add(command, "year", year);
+        await using var reader = await command.ExecuteReaderAsync(token);
+        if (!await reader.ReadAsync(token)) return NotFound();
+        var enabled = reader.GetBoolean(0);
+        var prefix = reader.GetString(1);
+        var next = reader.GetInt64(4);
+        var padding = reader.GetInt32(3);
+        return Ok(new { year, enabled, nextValue = next, invoiceNumber = $"{(enabled ? prefix : "INV-")}{year}-{next.ToString().PadLeft(padding, '0')}" });
+    }
+
     [HttpGet("invoice-profile/logo")]
     public async Task<IActionResult> GetLogo(CancellationToken token)
     {
