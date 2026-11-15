@@ -12,7 +12,7 @@ namespace AiCare.Api;
 [ApiController,Authorize(Roles="Administrator,BackOffice")]
 [Route("api/phase1/finance/payroll-ready")]
 [SubscriptionEntitlement("PayrollReady")]
-public sealed class PayrollReadyController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user):ControllerBase
+public sealed partial class PayrollReadyController(CareDbContext db,ITenantContext tenant,ICurrentUserContext user):ControllerBase
 {
  [HttpGet("sources")]public async Task<IActionResult> Sources(CancellationToken t)=>Ok(new{
   runs=await Rows("select r.\"Id\" id,r.\"Period\" period,r.\"GrossPay\" gross_pay,r.\"BranchId\" branch_id from \"PayrollRuns\" r join timesheet_periods p on p.payroll_run_id=r.\"Id\" where r.\"OrganizationId\"=@org and (@wide or r.\"BranchId\"=@branch) and r.\"Status\"='Approved' and p.status='Locked' and not exists(select 1 from finance_payroll_batch_lines b join finance_payroll_lines l on l.id=b.source_id where l.payroll_run_id=r.\"Id\" and not b.released and b.source_type in ('Worked','Travel','TimesheetMileage'))",_=>{},t),

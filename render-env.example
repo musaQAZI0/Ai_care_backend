@@ -47,3 +47,9 @@ Resend__ApiKey=CHANGE_ME_RESEND_API_KEY
 Resend__FromAddress=notifications@CHANGE_ME_VERIFIED_DOMAIN
 Resend__FromName=AI Care
 Resend__ReplyToAddress=CHANGE_ME_CLIENT_INBOX
+
+# Controlled payroll CSV: no external payroll API. Keep keys in Render secrets.
+# Empty key disables generation; provide base64 of exactly 32 random bytes.
+# Retain old key IDs for historical downloads and backups.
+PayrollExports__ActiveKeyId=v1
+PayrollExports__EncryptionKeys__v1=
