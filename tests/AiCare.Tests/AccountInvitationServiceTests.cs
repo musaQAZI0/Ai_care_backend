@@ -19,7 +19,7 @@ public sealed class AccountInvitationServiceTests
     public async Task QueueFailureKeepsAccountInactiveAndMarksInvitationFailed()
     {
         var store=new Store();var sender=new Sender{Fail=true};var service=new AccountInvitationService(store,sender);
-        await Assert.ThrowsAsync<InvalidOperationException>(()=>service.CreateAsync(Guid.NewGuid(),null,Guid.NewGuid(),"admin",new("manager@example.com","manager@example.com",UserRole.CareManager,null,null),"https://app.example.com",default));
+        await Assert.ThrowsAsync<AccountInvitationDeliveryException>(()=>service.CreateAsync(Guid.NewGuid(),null,Guid.NewGuid(),"admin",new("manager@example.com","manager@example.com",UserRole.CareManager,null,null),"https://app.example.com",default));
         Assert.True(store.Failed);
     }
 
@@ -38,6 +38,24 @@ public sealed class AccountInvitationServiceTests
         Assert.Contains("Platform BackOffice",error.Message);
     }
 
+    [Fact]
+    public async Task InvalidEmailConfigurationDoesNotCreateAnInactiveAccount()
+    {
+        var store = new Store();
+        var service = new AccountInvitationService(store, new Sender { ConfigurationFailure = true });
+        await Assert.ThrowsAsync<AccountInvitationDeliveryException>(() => service.CreateAsync(Guid.NewGuid(), null, Guid.NewGuid(), "admin", new("user", "user@example.com", UserRole.CareCoordinator, null, null), "https://app.example.com", default));
+        Assert.Null(store.TokenHash);
+    }
+
+    [Fact]
+    public async Task InvalidActivationOriginDoesNotCreateAnAccount()
+    {
+        var store = new Store();
+        var service = new AccountInvitationService(store, new Sender());
+        await Assert.ThrowsAsync<AccountInvitationDeliveryException>(() => service.CreateAsync(Guid.NewGuid(), null, Guid.NewGuid(), "admin", new("user", "user@example.com", UserRole.CareCoordinator, null, null), "not-a-url", default));
+        Assert.Null(store.TokenHash);
+    }
+
     private sealed class Store:IAccountInvitationStore
     {
         public string? TokenHash;public bool Failed;
@@ -49,7 +67,8 @@ public sealed class AccountInvitationServiceTests
     }
     private sealed class Sender:IAccountInvitationEmailSender
     {
-        public AccountInvitationEmailRequest? Request;public bool Fail;
+        public AccountInvitationEmailRequest? Request;public bool Fail;public bool ConfigurationFailure;
+        public void ValidateConfiguration(){if(ConfigurationFailure)throw new AccountInvitationDeliveryException("Email is not configured.");}
         public Task SendAsync(AccountInvitationEmailRequest request,CancellationToken ct){Request=request;if(Fail)throw new HttpRequestException("queue unavailable");return Task.CompletedTask;}
     }
 }

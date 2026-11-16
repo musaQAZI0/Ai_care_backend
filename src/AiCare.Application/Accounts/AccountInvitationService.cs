@@ -16,7 +16,8 @@ public interface IAccountInvitationStore
     Task AcceptAsync(string tokenHash, string password, DateTimeOffset now, CancellationToken ct);
     Task<bool> RevokeAsync(Guid invitationId, Guid organizationId, Guid? branchId, bool organizationWide, Guid actorUserId, string actorName, string reason, DateTimeOffset now, CancellationToken ct);
 }
-public interface IAccountInvitationEmailSender { Task SendAsync(AccountInvitationEmailRequest request, CancellationToken ct); }
+public sealed class AccountInvitationDeliveryException(string message, Exception? inner = null) : InvalidOperationException(message, inner) { }
+public interface IAccountInvitationEmailSender { void ValidateConfiguration() { } Task SendAsync(AccountInvitationEmailRequest request, CancellationToken ct); }
 public interface IAccountInvitationService
 {
     Task<AccountInvitationResult> CreateAsync(Guid organizationId, Guid? branchId, Guid actorUserId, string actorName, CreateAccountInvitationCommand command, string frontendBaseUrl, CancellationToken ct);
@@ -35,13 +36,18 @@ public sealed class AccountInvitationService(IAccountInvitationStore store, IAcc
         if (string.IsNullOrWhiteSpace(command.UserName) || string.IsNullOrWhiteSpace(command.Email)) throw new InvalidOperationException("Username and email are required.");
         if (!System.Net.Mail.MailAddress.TryCreate(command.Email.Trim(), out _)) throw new InvalidOperationException("A valid email is required.");
         if (command.Role == UserRole.CareWorker && command.CareWorkerId is null) throw new InvalidOperationException("Care worker accounts must be linked to a care worker profile.");
+        if (!Uri.TryCreate(frontendBaseUrl, UriKind.Absolute, out var frontendUri) ||
+            frontendUri.Scheme is not ("https" or "http") || !string.IsNullOrEmpty(frontendUri.Query) || !string.IsNullOrEmpty(frontendUri.Fragment))
+            throw new AccountInvitationDeliveryException("Invitation links are not configured correctly. Ask the operator to check Frontend__BaseUrl.");
+        // Fail before creating an inactive account when delivery cannot be configured.
+        emailSender.ValidateConfiguration();
         var normalized = command with { UserName = command.UserName.Trim(), Email = command.Email.Trim().ToLowerInvariant() };
         var rawToken = Base64Url(RandomNumberGenerator.GetBytes(32));
         var expiresAt = DateTimeOffset.UtcNow.AddHours(48);
         var invitation = await store.CreateAsync(organizationId, branchId, actorUserId, actorName, normalized, Hash(rawToken), expiresAt, ct);
         var activationUrl = $"{frontendBaseUrl.TrimEnd('/')}/staff/activate?token={Uri.EscapeDataString(rawToken)}";
         try { await emailSender.SendAsync(new AccountInvitationEmailRequest(invitation.InvitationId, organizationId, normalized.UserName, normalized.Email, activationUrl, expiresAt, normalized.Role.ToString()), ct); }
-        catch (Exception ex) { await store.MarkQueueFailedAsync(invitation.InvitationId, ex.GetType().Name, ct); throw new InvalidOperationException("The account remains inactive because its invitation could not be queued."); }
+        catch (Exception ex) { await store.MarkQueueFailedAsync(invitation.InvitationId, ex.GetType().Name, ct); throw new AccountInvitationDeliveryException("The invitation email could not be submitted. The account remains inactive. Ask the operator to check email-provider or queue logs before trying again; do not create another account for this recipient.", ex); }
         return invitation;
     }
     public Task<AccountInvitationValidation> ValidateAsync(string token, CancellationToken ct) => string.IsNullOrWhiteSpace(token) ? Task.FromResult(new AccountInvitationValidation(false,"Invalid","Invitation token is required.",null,null,null,null)) : store.ValidateAsync(Hash(token),DateTimeOffset.UtcNow,ct);

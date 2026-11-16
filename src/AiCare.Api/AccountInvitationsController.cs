@@ -8,7 +8,7 @@ namespace AiCare.Api;
 
 [ApiController]
 [Route("api/phase1/account-invitations")]
-public sealed class AccountInvitationsController(IAccountInvitationService invitations,ITenantContext tenant,ICurrentUserContext currentUser,IConfiguration configuration):ControllerBase
+public sealed class AccountInvitationsController(IAccountInvitationService invitations,ITenantContext tenant,ICurrentUserContext currentUser,IConfiguration configuration,ILogger<AccountInvitationsController> logger,IAccountInvitationEmailSender emailSender):ControllerBase
 {
     [Authorize(Policy="Phase1User")]
     [HttpPost]
@@ -17,12 +17,32 @@ public sealed class AccountInvitationsController(IAccountInvitationService invit
         if(!currentUser.IsAdministrator)return Forbid();
         try
         {
-            var baseUrl=configuration["Frontend:BaseUrl"]??throw new InvalidOperationException("Frontend:BaseUrl must be configured before invitations can be sent.");
+            var baseUrl=configuration["Frontend:BaseUrl"]??throw new AccountInvitationDeliveryException("Frontend__BaseUrl must be configured before invitations can be sent.");
             var result=await invitations.CreateAsync(tenant.OrganizationId,tenant.BranchId,currentUser.UserId??throw new InvalidOperationException("Authenticated user identifier is required."),currentUser.UserName,new(request.UserName??"",request.Email??"",request.Role,request.BranchId,request.CareWorkerId),baseUrl,ct);
             return StatusCode(StatusCodes.Status201Created,result);
         }
+        catch(AccountInvitationDeliveryException ex){logger.LogWarning("Account invitation delivery unavailable: {Reason}; failure type {FailureType}",ex.Message,ex.InnerException?.GetType().Name);return StatusCode(StatusCodes.Status503ServiceUnavailable,new{message=ex.Message});}
         catch(InvalidOperationException ex){return BadRequest(new{message=ex.Message});}
     }
+    [Authorize(Policy="Phase1User")]
+    [HttpGet("delivery-status")]
+    public IActionResult DeliveryStatus()
+    {
+        if(!currentUser.IsAdministrator)return Forbid();
+        var mode=configuration.GetValue<bool>("EmailQueue:Enabled")?"Queue":"Direct";
+        try
+        {
+            if(!Uri.TryCreate(configuration["Frontend:BaseUrl"],UriKind.Absolute,out var frontend)||frontend.Scheme is not ("https" or "http"))
+                throw new AccountInvitationDeliveryException("Frontend__BaseUrl must be configured with the frontend URL.");
+            emailSender.ValidateConfiguration();
+            return Ok(new{configured=true,mode,message="Email settings are present. This check does not contact Resend or confirm delivery. No email was sent."});
+        }
+        catch(AccountInvitationDeliveryException ex)
+        {
+            return Ok(new{configured=false,mode,message=ex.Message});
+        }
+    }
+
     [AllowAnonymous][HttpPost("validate")]
     public Task<AccountInvitationValidation> Validate(ValidateAccountInvitationRequest request,CancellationToken ct)=>invitations.ValidateAsync(request.Token??"",ct);
     [AllowAnonymous][HttpPost("accept")]

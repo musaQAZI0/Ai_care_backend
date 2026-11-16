@@ -14,7 +14,7 @@ public sealed class AccountInvitationStore(CareDbContext db) : IAccountInvitatio
         return await strategy.ExecuteAsync<AccountInvitationResult>(async()=>
         {
             await using var transaction=await db.Database.BeginTransactionAsync(ct);
-            if(await db.AppUsers.AnyAsync(x=>x.UserName==command.UserName||x.Email==command.Email,ct))throw new InvalidOperationException("A user with that username or email already exists.");
+            if(await db.AppUsers.AnyAsync(x=>x.UserName==command.UserName||x.Email==command.Email,ct))throw new InvalidOperationException("A user with that username or email already exists. No new email was sent. If a previous invitation failed, an authorised operator must review the inactive account and invitation status before recovery; do not create a duplicate account.");
             if(command.BranchId is not null&&!await db.Branches.AnyAsync(x=>x.Id==command.BranchId&&x.OrganizationId==organizationId,ct))throw new InvalidOperationException("The selected branch is not part of this organization.");
             if(command.Role==UserRole.CareWorker&&(command.CareWorkerId is null||!await db.CareWorkers.AnyAsync(x=>x.Id==command.CareWorkerId&&x.OrganizationId==organizationId,ct)))throw new InvalidOperationException("The selected care worker is not part of this organization.");
             var userId=Guid.NewGuid();

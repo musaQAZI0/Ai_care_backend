@@ -43,3 +43,15 @@ services:
         sync: false
       - key: Supabase__Bucket
         value: care-documents
+
+      # Configure these values in Render. Do not enable delivery without a verified sender.
+      - key: Email__Enabled
+        sync: false
+      - key: EmailQueue__Enabled
+        sync: false
+      - key: Resend__ApiKey
+        sync: false
+      - key: Resend__FromAddress
+        sync: false
+      - key: Resend__FromName
+        value: AiCare
