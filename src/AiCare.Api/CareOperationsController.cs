@@ -135,18 +135,21 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
         var start=from??DateTimeOffset.UtcNow.Date;var end=to??start.AddDays(7);
         if(end<=start||end-start>TimeSpan.FromDays(62))return BadRequest(new{message="Choose a monitoring period of no more than 62 days."});
         return Ok(await Rows("""
-            select v."Id",v."StartsAt",v."DurationMinutes",v."CheckedInAt",v."CheckedOutAt",v."Status",v."VisitType",
-                   v."ServiceUserId",s."FullName" as service_user_name,v."CareWorkerId",w."FullName" as care_worker_name,
+            select v."Id" as id,v."StartsAt" as starts_at,v."DurationMinutes" as duration_minutes,
+                   v."CheckedInAt" as checked_in_at,v."CheckedOutAt" as checked_out_at,v."Status" as status,v."VisitType" as visit_type,
+                   v."ServiceUserId" as service_user_id,s."FullName" as service_user_name,v."CareWorkerId" as care_worker_id,w."FullName" as care_worker_name,
                    extract(epoch from (v."CheckedInAt"-v."StartsAt"))/60.0 as arrival_variance_minutes,
                    case when v."CheckedInAt" is null or v."CheckedOutAt" is null then null else extract(epoch from (v."CheckedOutAt"-v."CheckedInAt"))/60.0 end as actual_duration_minutes,
-                   coalesce(o.care_provided,''),coalesce(o.duration_reason,''),coalesce(o.exception_reason,'')
+                   coalesce(o.care_provided,'') as care_provided,
+                   coalesce(o.duration_reason,'') as duration_reason,
+                   coalesce(o.exception_reason,'') as exception_reason
             from "Visits" v join "ServiceUsers" s on s."Id"=v."ServiceUserId" left join "CareWorkers" w on w."Id"=v."CareWorkerId"
             left join visit_monitoring_outcomes o on o.visit_id=v."Id" and o.organization_id=v."OrganizationId"
             where v."OrganizationId"=@organization and (@organizationWide or v."BranchId"=@branch)
               and v."StartsAt">=@from and v."StartsAt"<=@to and (@worker is null or v."CareWorkerId"=@worker)
               and (@person is null or v."ServiceUserId"=@person) and (@status='' or v."Status"::text=@status)
             order by v."StartsAt"
-            """, command => {Add(command,"from",start);Add(command,"to",end);Add(command,"worker",careWorkerId);Add(command,"person",serviceUserId);Add(command,"status",status??"");}, token));
+            """, command => {Add(command,"from",start);Add(command,"to",end);Add(command,"worker",careWorkerId,DbType.Guid);Add(command,"person",serviceUserId,DbType.Guid);Add(command,"status",status??"");}, token));
     }
 
     [HttpPut("monitoring/{visitId:guid}/outcome")]
@@ -197,7 +200,7 @@ public sealed class CareOperationsController(CareDbContext db, ITenantContext te
     private async Task<int> Exec(string sql,Action<DbCommand> bind,CancellationToken token){await using var command=await Command(sql,token);bind(command);return await command.ExecuteNonQueryAsync(token);}
     private async Task<DbCommand> Command(string sql,CancellationToken token){var connection=db.Database.GetDbConnection();if(connection.State!=ConnectionState.Open)await connection.OpenAsync(token);var command=connection.CreateCommand();command.CommandText=sql;Add(command,"organization",tenant.OrganizationId);Add(command,"branch",tenant.BranchId??TenantDefaults.BranchId);Add(command,"organizationWide",tenant.IsOrganizationWide);Add(command,"actor",user.UserName);return command;}
     private async Task Audit(string action,string entity,Guid id,CancellationToken token){db.AuditEvents.Add(new AuditEvent(Guid.NewGuid(),action,user.UserName,entity,id,DateTimeOffset.UtcNow,tenant.OrganizationId,tenant.BranchId??TenantDefaults.BranchId));await db.SaveChangesAsync(token);}
-    private static void Add(DbCommand command,string name,object? value){if(command.Parameters.Contains(name))return;var parameter=command.CreateParameter();parameter.ParameterName=name;parameter.Value=value??DBNull.Value;command.Parameters.Add(parameter);}
+    private static void Add(DbCommand command,string name,object? value,DbType? type=null){if(command.Parameters.Contains(name))return;var parameter=command.CreateParameter();parameter.ParameterName=name;if(type.HasValue)parameter.DbType=type.Value;parameter.Value=value??DBNull.Value;command.Parameters.Add(parameter);}
     private static string Camel(string value){var parts=value.Split('_');return parts[0]+string.Concat(parts.Skip(1).Select(x=>char.ToUpperInvariant(x[0])+x[1..]));}
 }
 

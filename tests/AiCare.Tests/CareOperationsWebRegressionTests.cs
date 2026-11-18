@@ -249,6 +249,51 @@ public sealed class CareOperationsWebRegressionTests(PostgresRegressionFactory f
         Assert.Contains(RegressionIds.WorkerId.ToString(), await compliance.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task MonitoringSupportsOptionalUuidFiltersAndDistinctOutcomeFields(bool workerFilter, bool personFilter)
+    {
+        await factory.EnsureClinicalSeedAsync();
+        var id = Guid.NewGuid();
+        var startsAt = DateTimeOffset.UtcNow.AddDays(2);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<CareDbContext>();
+            db.Visits.Add(new Visit(id, RegressionIds.ServiceUserId, RegressionIds.WorkerId, startsAt,
+                "Synthetic monitoring regression", 30, "Personal care", VisitStatus.Scheduled,
+                null, null, null, null, null, null, TenantDefaults.OrganizationId, TenantDefaults.BranchId));
+            await db.SaveChangesAsync();
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                insert into visit_monitoring_outcomes
+                  (visit_id,organization_id,branch_id,care_provided,duration_reason,exception_reason,recorded_by)
+                values ({id},{TenantDefaults.OrganizationId},{TenantDefaults.BranchId},
+                  'Synthetic care','Synthetic duration','Synthetic exception','regression fixture')
+                """);
+        }
+        using var client = await AdminClient();
+        var url = $"/api/phase1/care-operations/monitoring?from={Uri.EscapeDataString(startsAt.AddHours(-1).ToString("O"))}&to={Uri.EscapeDataString(startsAt.AddHours(1).ToString("O"))}";
+        if (workerFilter) url += $"&careWorkerId={RegressionIds.WorkerId}";
+        if (personFilter) url += $"&serviceUserId={RegressionIds.ServiceUserId}";
+        using var response = await client.GetAsync(url);
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var row = document.RootElement.EnumerateArray().Single(x => x.GetProperty("id").GetGuid() == id);
+        Assert.Equal(RegressionIds.ServiceUserId, row.GetProperty("serviceUserId").GetGuid());
+        Assert.Equal(RegressionIds.WorkerId, row.GetProperty("careWorkerId").GetGuid());
+        Assert.Equal(30, row.GetProperty("durationMinutes").GetInt32());
+        Assert.Equal("Synthetic care", row.GetProperty("careProvided").GetString());
+        Assert.Equal("Synthetic duration", row.GetProperty("durationReason").GetString());
+        Assert.Equal("Synthetic exception", row.GetProperty("exceptionReason").GetString());
+        Assert.False(row.TryGetProperty("coalesce", out _));
+        using var excluded = await client.GetAsync(url + $"&status=Completed");
+        excluded.EnsureSuccessStatusCode();
+        using var excludedDocument = JsonDocument.Parse(await excluded.Content.ReadAsStringAsync());
+        Assert.DoesNotContain(excludedDocument.RootElement.EnumerateArray(), x => x.GetProperty("id").GetGuid() == id);
+    }
+
     private async Task<HttpClient> AdminClient()
     {
         var client = factory.CreateClient();

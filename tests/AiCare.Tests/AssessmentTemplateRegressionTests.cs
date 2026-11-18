@@ -12,7 +12,7 @@ using Xunit;
 namespace AiCare.Tests;
 
 [Collection("Postgres regression")]
-public sealed class AssessmentTemplateRegressionTests(PostgresRegressionFactory factory) : IClassFixture<PostgresRegressionFactory>
+public sealed partial class AssessmentTemplateRegressionTests(PostgresRegressionFactory factory) : IClassFixture<PostgresRegressionFactory>
 {
     [Fact]
     public async Task PublishedVersionsValidateAnswersAndPreserveHistoricalQuestionsAndSignatures()

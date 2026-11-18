@@ -35,9 +35,8 @@ public sealed class VisitDeliveryController : ControllerBase
         var visit = await FindVisit(visitId, cancellationToken);
         if (visit is null) return NotFound();
         if (!await _authorization.CanOperateVisitAsync(visit.Id, cancellationToken)) return Forbid();
-        if (request.Latitude is < -90 or > 90 || request.Longitude is < -180 or > 180)
-            return BadRequest(new { message = "Coordinates are invalid." });
-        if (request.AccuracyMeters is < 0) return BadRequest(new { message = "Location accuracy cannot be negative." });
+        if (!ValidLocation(request, DateTimeOffset.UtcNow))
+            return BadRequest(new { message = "A current location with valid coordinates and reported accuracy is required." });
         if (request.EventType is not ("CheckIn" or "CheckOut" or "Evidence"))
             return BadRequest(new { message = "Event type must be CheckIn, CheckOut, or Evidence." });
 
@@ -59,6 +58,62 @@ public sealed class VisitDeliveryController : ControllerBase
         await _context.SaveChangesAsync(cancellationToken);
         return Created($"/api/phase1/visits/{visitId}/delivery/location/{id}", new { id });
     }
+
+    // Attendance and evidence share one transaction. A lost HTTP response can
+    // safely be reconciled without replacing the original attendance timestamp.
+    [HttpPost("attendance")]
+    [TransactionalAction]
+    public async Task<IActionResult> RecordAttendance(Guid visitId, RecordVisitLocationRequest request, CancellationToken cancellationToken)
+    {
+        if (request.EventType is not ("CheckIn" or "CheckOut") || !ValidLocation(request, DateTimeOffset.UtcNow))
+            return BadRequest(new { message = "CheckIn or CheckOut and a current accurate device location are required." });
+        var visit = await FindVisit(visitId, cancellationToken);
+        if (visit is null) return NotFound();
+        if (!await _authorization.CanOperateVisitAsync(visitId, cancellationToken)) return Forbid();
+        // Serialize competing submissions, including separate browser tabs.
+        await Execute("select 1 from \"Visits\" where \"Id\"=@visit for update", c => Add(c, "visit", visitId), cancellationToken);
+        await _context.Entry(visit).ReloadAsync(cancellationToken);
+        if (!_tenant.CanAccess(visit.OrganizationId, visit.BranchId) ||
+            !await _authorization.CanOperateVisitAsync(visitId, cancellationToken)) return NotFound();
+        var property = await _context.Database.SqlQueryRaw<PropertyLocation>("""
+            select latitude as "Latitude", longitude as "Longitude" from subject_geocoded_locations
+            where organization_id={0} and branch_id={1} and subject_type='ServiceUser'
+              and subject_id={2} and verified_at is not null
+            """, visit.OrganizationId!, visit.BranchId!, visit.ServiceUserId).SingleOrDefaultAsync(cancellationToken);
+        double? distanceMeters = property is null ? null : DistanceMeters(request.Latitude, request.Longitude, property.Latitude, property.Longitude);
+        var checkIn = request.EventType == "CheckIn";
+        var recorded = checkIn ? visit.CheckedInAt : visit.CheckedOutAt;
+        if (recorded is not null)
+            return Ok(new { visit, replayed = true, distanceMeters });
+        if (checkIn ? visit.Status != VisitStatus.Scheduled : visit.Status != VisitStatus.InProgress || visit.CheckedInAt is null)
+            return Conflict(new { message = "The visit state does not allow this attendance action. Refresh the visit before continuing." });
+        var now = DateTimeOffset.UtcNow;
+        var updated = checkIn
+            ? visit with { Status = VisitStatus.InProgress, CheckedInAt = now, CheckInLatitude = request.Latitude, CheckInLongitude = request.Longitude }
+            : visit with { Status = VisitStatus.Completed, CheckedOutAt = now, CheckOutLatitude = request.Latitude, CheckOutLongitude = request.Longitude };
+        _context.Entry(visit).CurrentValues.SetValues(updated);
+        _context.AuditEvents.Add(new AuditEvent(Guid.NewGuid(), checkIn ? "visit.checked_in" : "visit.checked_out", _currentUser.UserName, nameof(Visit), visitId, now, visit.OrganizationId, visit.BranchId));
+        var evidence = await RecordLocation(visitId, request, cancellationToken);
+        return evidence is CreatedResult ? Ok(new { visit = updated, replayed = false, distanceMeters }) : evidence;
+    }
+
+    public static bool ValidLocation(RecordVisitLocationRequest request, DateTimeOffset now) =>
+        request.Latitude is >= -90 and <= 90 && request.Longitude is >= -180 and <= 180 &&
+        request.AccuracyMeters is >= 0 and <= 10000 &&
+        request.CapturedAt >= now.AddMinutes(-5) && request.CapturedAt <= now.AddMinutes(1);
+
+    public static double DistanceMeters(decimal latitude, decimal longitude, decimal propertyLatitude, decimal propertyLongitude)
+    {
+        const double radians = Math.PI / 180;
+        var lat = (double)latitude * radians;
+        var targetLat = (double)propertyLatitude * radians;
+        var deltaLat = targetLat - lat;
+        var deltaLng = (double)(propertyLongitude - longitude) * radians;
+        var a = Math.Pow(Math.Sin(deltaLat / 2), 2) + Math.Cos(lat) * Math.Cos(targetLat) * Math.Pow(Math.Sin(deltaLng / 2), 2);
+        return 6371000 * 2 * Math.Asin(Math.Sqrt(Math.Clamp(a, 0, 1)));
+    }
+
+    private sealed record PropertyLocation(decimal Latitude, decimal Longitude);
 
     [HttpGet("location")]
     public async Task<IActionResult> GetLocations(Guid visitId, CancellationToken cancellationToken)
