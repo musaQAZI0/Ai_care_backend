@@ -57,7 +57,6 @@ public sealed record Rule(string Purpose, string Scope)
         if (method == "POST" && Has("/payroll-runs/") && Ends("/approve")) return new("payroll", "payroll.approve");
         if (method == "POST" && path == "/api/phase1/admin/users") return new("admin", "admin.user.create");
         if (method == "PATCH" && Has("/admin/users/") && Ends("/role")) return new("admin", "admin.role.change");
-        if (method == "PATCH" && Has("/admin/accounts/") && Ends("/branch")) return new("admin", "admin.account.branch");
         if (method == "PATCH" && Has("/admin/accounts/") && Ends("/status")) return new("admin", "admin.account.status");
         if (method == "PUT" && Has("/admin/accounts/") && Ends("/permissions")) return new("admin", "admin.permission.change");
         if (method == "POST" && path == "/api/phase1/admin/accounts/bulk-unblock") return new("admin", "admin.account.unblock");

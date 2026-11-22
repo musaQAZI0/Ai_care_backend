@@ -14,7 +14,7 @@ namespace AiCare.Tests;
 public sealed class AdminAccountBranchRegressionTests(PostgresRegressionFactory factory) : IClassFixture<PostgresRegressionFactory>
 {
     [Fact]
-    public async Task MissingWorkerBranchRequiresStepUpAndMatchingProfileAndPreservesAccount()
+    public async Task MissingWorkerBranchRequiresAdministratorAndMatchingProfileAndPreservesAccount()
     {
         await factory.EnsureClinicalSeedAsync();
         var id = Guid.NewGuid(); var workerId = Guid.NewGuid(); var otherBranch = Guid.NewGuid();
@@ -32,13 +32,11 @@ public sealed class AdminAccountBranchRegressionTests(PostgresRegressionFactory 
         login.EnsureSuccessStatusCode();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", JsonDocument.Parse(await login.Content.ReadAsStringAsync()).RootElement.GetProperty("token").GetString());
         var path = $"/api/phase1/admin/accounts/{id}/branch";
-        Assert.Equal(HttpStatusCode.Forbidden, (await client.PatchAsJsonAsync(path, new { branchId = TenantDefaults.BranchId, reason = "Repair missing branch assignment" })).StatusCode);
-        await StepUpTestGrants.GrantAsync(factory, client, "admin");
+        using var anonymous = factory.CreateClient();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PatchAsJsonAsync(path, new { branchId = TenantDefaults.BranchId, reason = "Repair missing branch assignment" })).StatusCode);
         var wrongBranch = await client.PatchAsJsonAsync(path, new { branchId = otherBranch, reason = "Reject incorrect worker branch" });
         Assert.True(wrongBranch.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Conflict);
-        await StepUpTestGrants.GrantAsync(factory, client, "admin");
         Assert.Equal(HttpStatusCode.OK, (await client.PatchAsJsonAsync(path, new { branchId = TenantDefaults.BranchId, reason = "Repair missing branch assignment" })).StatusCode);
-        await StepUpTestGrants.GrantAsync(factory, client, "admin");
         Assert.Equal(HttpStatusCode.Conflict, (await client.PatchAsJsonAsync(path, new { branchId = TenantDefaults.BranchId, reason = "Do not duplicate branch repair" })).StatusCode);
         using var verify = factory.Services.CreateScope();
         var context = verify.ServiceProvider.GetRequiredService<CareDbContext>();
