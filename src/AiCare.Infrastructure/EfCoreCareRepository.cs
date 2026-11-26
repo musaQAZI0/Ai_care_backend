@@ -563,12 +563,7 @@ public sealed class EfCoreCareRepository : ICareRepository
     public AdminUser AddAdminUser(CreateAdminUserRequest request)
     {
         var normalizedUserName = request.UserName.Trim();
-        var normalizedEmail = request.Email.Trim();
-        if (_context.AppUsers.Any(user => user.UserName == normalizedUserName || user.Email == normalizedEmail))
-        {
-            throw new InvalidOperationException("A user with that username or email already exists.");
-        }
-
+        var normalizedEmail = request.Email.Trim().ToLowerInvariant();
         var organizationId = request.OrganizationId ?? _tenant.OrganizationId;
         var branchId = request.BranchId;
         if (!_tenant.IsPlatformOwner && organizationId != _tenant.OrganizationId)
@@ -580,6 +575,11 @@ public sealed class EfCoreCareRepository : ICareRepository
         {
             throw new InvalidOperationException("You cannot create users outside your branch.");
         }
+
+        if (_context.AppUsers.Any(user => user.OrganizationId == organizationId && user.Email.ToLower() == normalizedEmail))
+            throw new InvalidOperationException("An account with this email already exists in this organization.");
+        if (_context.AppUsers.Any(user => user.UserName == normalizedUserName))
+            throw new InvalidOperationException("This sign-in username is unavailable. Choose a distinct username for this organization.");
 
         var user = new AppUser(
             Guid.NewGuid(),

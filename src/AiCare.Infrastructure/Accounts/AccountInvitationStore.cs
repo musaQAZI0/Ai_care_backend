@@ -14,7 +14,12 @@ public sealed class AccountInvitationStore(CareDbContext db) : IAccountInvitatio
         return await strategy.ExecuteAsync<AccountInvitationResult>(async()=>
         {
             await using var transaction=await db.Database.BeginTransactionAsync(ct);
-            if(await db.AppUsers.AnyAsync(x=>x.UserName==command.UserName||x.Email==command.Email,ct))throw new InvalidOperationException("A user with that username or email already exists. No new email was sent. If a previous invitation failed, an authorised operator must review the inactive account and invitation status before recovery; do not create a duplicate account.");
+            // Email identifies a recipient within a tenant, not a platform-wide identity.
+            // Usernames remain globally distinct because sign-in takes a username.
+            if(await db.AppUsers.AnyAsync(x=>x.OrganizationId==organizationId && x.Email.ToLower()==command.Email.ToLower(),ct))
+                throw new InvalidOperationException("An account with this email already exists in this organization. No new email was sent. Review its account and invitation status before recovery.");
+            if(await db.AppUsers.AnyAsync(x=>x.UserName==command.UserName,ct))
+                throw new InvalidOperationException("This sign-in username is unavailable. Choose a distinct username for this organization. No new email was sent.");
             if(command.BranchId is not null&&!await db.Branches.AnyAsync(x=>x.Id==command.BranchId&&x.OrganizationId==organizationId,ct))throw new InvalidOperationException("The selected branch is not part of this organization.");
             if(command.Role==UserRole.CareWorker&&(command.CareWorkerId is null||!await db.CareWorkers.AnyAsync(x=>x.Id==command.CareWorkerId&&x.OrganizationId==organizationId,ct)))throw new InvalidOperationException("The selected care worker is not part of this organization.");
             var userId=Guid.NewGuid();
@@ -54,6 +59,7 @@ public sealed class AccountInvitationStore(CareDbContext db) : IAccountInvitatio
             if(row.ExpiresAt<=now)throw new InvalidOperationException("Invitation has expired.");
             if(row.Status is not ("Pending" or "Sent"))throw new InvalidOperationException("Invitation has already been used or revoked.");
             var user=await db.AppUsers.SingleAsync(x=>x.Id==row.UserId,ct);
+            if(user.OrganizationId!=row.OrganizationId)throw new InvalidOperationException("Invitation does not match the account organization.");
             db.Entry(user).CurrentValues.SetValues(user with{PasswordHash=PasswordHasher.HashPassword(password),IsActive=true});
             await db.SaveChangesAsync(ct);
             await db.Database.ExecuteSqlInterpolatedAsync($"update account_invitations set status='Accepted',accepted_at={now},accepted_terms_at={now} where id={row.InvitationId}",ct);

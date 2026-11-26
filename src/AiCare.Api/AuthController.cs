@@ -149,8 +149,8 @@ public class AuthController : ControllerBase
 
         var email = request.AdminEmail.Trim().ToLowerInvariant();
         var userName = string.IsNullOrWhiteSpace(request.AdminUserName) ? email : request.AdminUserName.Trim();
-        if (await _context.AppUsers.AnyAsync(user => user.UserName == userName || user.Email == email, cancellationToken))
-            return Conflict(new { message = "An account already exists for this username or email." });
+        if (await _context.AppUsers.AnyAsync(user => user.UserName == userName, cancellationToken))
+            return Conflict(new { message = "This sign-in username is unavailable. Choose a distinct administrator username for the new organization." });
         if (await _context.Organizations.AnyAsync(organization => organization.Name == request.OrganizationName.Trim(), cancellationToken))
             return Conflict(new { message = "An organization with this name already exists." });
 
@@ -235,7 +235,15 @@ public class AuthController : ControllerBase
         var local = _environment.IsDevelopment() || _environment.IsEnvironment("Testing");
         if (!local && !_passwordResetEmail.IsConfigured)
             return StatusCode(503, new { message = "Password reset email is not configured. Contact your administrator." });
-        var user = await _context.AppUsers.SingleOrDefaultAsync(u => u.Email == request.Email && u.IsActive, cancellationToken);
+        var email = request.Email.Trim().ToLowerInvariant();
+        var candidates = _context.AppUsers.Where(u => u.Email.ToLower() == email && u.IsActive);
+        if (!string.IsNullOrWhiteSpace(request.UserName))
+            candidates = candidates.Where(u => u.UserName == request.UserName.Trim());
+        // Never select an arbitrary tenant when a recipient uses the same email
+        // for several independent accounts. Legacy email-only requests work only
+        // when unambiguous; all responses retain the same non-enumerating message.
+        var matches = await candidates.Take(2).ToListAsync(cancellationToken);
+        var user = matches.Count == 1 ? matches[0] : null;
         string? developmentToken = null;
         if (user is not null)
         {
@@ -363,7 +371,7 @@ public sealed record TenantSignupResponse(Guid OrganizationId,Guid BranchId,Guid
 public sealed record ChangePasswordRequest(string UserName,string CurrentPassword,string NewPassword);
 public sealed record RefreshTokenRequest(string RefreshToken);
 public sealed record LogoutRequest(string? RefreshToken);
-public sealed record ForgotPasswordRequest(string Email);
+public sealed record ForgotPasswordRequest(string Email,string? UserName=null);
 public sealed record ResetPasswordRequest(string ResetToken,string NewPassword);
 public sealed record MfaVerifyRequest(string Code);
 
